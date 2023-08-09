@@ -5,7 +5,7 @@ import random
 
 from typing import Union
 
-from src.POMDP.model  import Model
+from src.POMDP.pomdp_model  import POMDPModel
 from src.POMDP.belief import Belief
 from src.POMDP.alpha_vector import AlphaVector
 from src.Util import arreq_in_list
@@ -39,7 +39,7 @@ class PBVI:
     solve(expansions:int, horizon:int, expand_function:str='ssea', initial_belief=None):
         The general solving function that will call iteratively the expand and the backup function.
     '''
-    def __init__(self, model:Model):
+    def __init__(self, model:POMDPModel):
         self.model = model
 
 
