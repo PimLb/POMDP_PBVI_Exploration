@@ -1,14 +1,44 @@
 import copy
-from typing import Union
 import numpy as np
 import math
 import random
 
-from . import Model, Belief, AlphaVector
+from typing import Union
+
+from src.POMDP.model  import Model
+from src.POMDP.belief import Belief
+from src.POMDP.alpha_vector import AlphaVector
 from src.Util import arreq_in_list
 
 
 class PBVI:
+    '''
+    The Point-Based Value Iteration for POMDP Models. It works in two steps, first the backup step that updates the alpha vector set that approximates the value function.
+    Then, the expand function that expands the belief set.
+
+    ...
+    Attributes
+    ----------
+    model: Model
+        The POMDP model the solver will be applied on.
+
+    Methods
+    -------
+    backup(belief_set:list[Belief], alpha_set:list[AlphaVector], discount_factor:float=0.9):
+        The backup function, responsible to update the alpha vector set.
+    expand_ssra(belief_set:list[Belief]):
+        Random action, belief expansion strategy function.
+    expand_ssga(belief_set:list[Belief], alpha_set:list[AlphaVector], eps:float=0.1):
+        Expsilon greedy action, belief expansion strategy function.
+    expand_ssea(belief_set:list[Belief], alpha_set:list[AlphaVector]):
+        Exploratory action, belief expansion strategy function.
+    expand_ger(belief_set, alpha_set):
+        Greedy error reduction, belief expansion strategy function.
+    expand(expand_function:str='ssea', **kwargs):
+        The general expand function, used to call the other expand_* functions.
+    solve(expansions:int, horizon:int, expand_function:str='ssea', initial_belief=None):
+        The general solving function that will call iteratively the expand and the backup function.
+    '''
     def __init__(self, model:Model):
         self.model = model
 
@@ -257,7 +287,7 @@ class PBVI:
             return []
 
 
-    def solve(self, expansions:int, horizon:int, expand_function:str='ssea') -> list[AlphaVector]:
+    def solve(self, expansions:int, horizon:int, expand_function:str='ssea', initial_belief=None) -> list[AlphaVector]:
         '''
         Main loop of the Point-Based Value Iteration algorithm.
         It consists in 2 steps, Backup and Expand.
@@ -272,7 +302,13 @@ class PBVI:
                         alpha_set (list[AlphaVector]): The alpha vectors approximating the value function.
 
         '''
-        belief_set = [self.model.initial_belief]
+        if initial_belief is None:
+            uni_prob = np.ones(self.model.state_count) / self.model.state_count
+            initial_belief = Belief(self.model, uni_prob)
+        else:
+            initial_belief = Belief(self.model, np.array(initial_belief))
+        
+        belief_set = [initial_belief]
         alpha_set = [AlphaVector(self.model.reward_table[:,a], a) for a in self.model.actions]
 
         for _ in range(expansions):
