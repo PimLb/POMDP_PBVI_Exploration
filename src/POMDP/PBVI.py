@@ -8,6 +8,7 @@ from typing import Union
 from src.POMDP.pomdp_model  import POMDPModel
 from src.POMDP.belief import Belief
 from src.POMDP.alpha_vector import AlphaVector
+from src.POMDP.value_function import ValueFunction
 from src.Util import arreq_in_list
 
 
@@ -43,7 +44,7 @@ class PBVI:
         self.model = model
 
 
-    def backup(self, belief_set:list[Belief], alpha_set:list[AlphaVector], discount_factor:float=0.9):
+    def backup(self, belief_set:list[Belief], value_function:ValueFunction, discount_factor:float=0.9) -> ValueFunction:
         '''
         This function has purpose to update the set of alpha vectors. It does so in 3 steps:
         1. It creates projections from each alpha vector for each possible action and each possible observation
@@ -55,11 +56,11 @@ class PBVI:
 
                 Parameters:
                         belief_set (list[Belief]): The belief set to use to generate the new alpha vectors with.
-                        alpha_set (list[AlphaVector]): The alpha vectors to generate the new set from.
+                        alpha_set (ValueFunction): The alpha vectors to generate the new set from.
                         discount_factor (float): The discount factor used for training (also known as gamma), default: 0.9.
 
                 Returns:
-                        new_alpha_set (list[AlphaVector]): A list of updated alpha vectors.
+                        new_alpha_set (ValueFunction): A list of updated alpha vectors.
         '''
         
         # Step 1
@@ -68,11 +69,11 @@ class PBVI:
             for o in self.model.states:
                 alpa_a_o_set = []
                 
-                for alpha_i in alpha_set:
+                for alpha_i in value_function:
                     alpa_a_o_vect = []
                     
                     for s in self.model.states:
-                        products = [(self.model.transition_table[s,a,s_p] * self.model.observation_table[s,a,o] * alpha_i[s_p])  # In the paper it also shows s_p for the observation table
+                        products = [(self.model.transition_table[s,a,s_p] * self.model.observation_table[s_p,a,o] * alpha_i[s_p])
                                     for s_p in self.model.states]
                         alpa_a_o_vect.append(discount_factor * sum(products))
                         
@@ -84,13 +85,11 @@ class PBVI:
                     gamma_a_o_t[a][o] = alpa_a_o_set
 
         # Step 2
-        alpha_set_t = []
-        alpha_actions = []
+        new_value_function = ValueFunction([])
         
         for b in belief_set:
             
             best_alpha = None
-            best_action = None
             best_alpha_val = -np.inf
             
             for a in self.model.actions:
@@ -118,27 +117,15 @@ class PBVI:
                 val = np.dot(alpha_a_vect, b)
                 if val > best_alpha_val:
                     best_alpha_val = val
-                    best_alpha = alpha_a_vect
-                    best_action = a
+                    best_alpha = AlphaVector(alpha_a_vect, a)
 
-            # Pruning step computationally expensive and saves very few vectors
-            dominated = False
-            # for other_vect in alpha_set_t:
-            #     if all(np.array(best_alpha) < np.array(other_vect)):
-            #         print(f'dominated by {other_vect}')
-            #         dominated = True
-            #     if all(np.array(best_alpha) > np.array(other_vect)):
-            #         print(f'removing: {other_vect}')
-            #         alpha_set_t.remove(other_vect)
-            
-            if not arreq_in_list(best_alpha, alpha_set_t) and not dominated:
-                alpha_set_t.append(best_alpha)
-                alpha_actions.append(best_action)
-            else:
-                # print('prune')
-                pass
+            assert best_alpha is not None
+            new_value_function.append(best_alpha)
+
+        # Pruning
+        new_value_function = new_value_function.prune(level=1) # Just check for duplicates
                 
-        return (alpha_set_t, alpha_actions)
+        return new_value_function
     
     
     def expand_ssra(self, belief_set:list[Belief]) -> list[Belief]:
@@ -160,7 +147,7 @@ class PBVI:
             s = b.random_state()
             a = random.choice(self.model.actions)
             s_p = self.model.transition(s, a)
-            o = self.model.observe(s_p, a) # Weird to use s_p here
+            o = self.model.observe(s_p, a)
             b_new = b.update(a, o)
             
             belief_set_new.append(b_new)
@@ -168,7 +155,7 @@ class PBVI:
         return belief_set_new
     
 
-    def expand_ssga(self, belief_set:list[Belief], alpha_set:list[AlphaVector], eps:float=0.1) -> list[Belief]:
+    def expand_ssga(self, belief_set:list[Belief], value_function:ValueFunction, eps:float=0.1) -> list[Belief]:
         '''
         Stochastic Simulation with Greedy Action.
         Simulates running a single-step forward from the beliefs in the "belief_set".
@@ -179,7 +166,7 @@ class PBVI:
 
                 Parameters:
                         belief_set (list[Belief]): list of beliefs to expand on.
-                        alpha_set (list[AlphaVector]): Used to find the best action knowing the belief.
+                        value_function (ValueFunction): Used to find the best action knowing the belief.
                         epsilon (float): Parameter tuning how often we take a greedy approach and how often we move randomly.
 
                 Returns:
@@ -193,8 +180,8 @@ class PBVI:
             if random.random() < eps:
                 a = random.choice(self.model.actions)
             else:
-                best_alpha_index = np.argmax([np.dot(alpha, b) for alpha in alpha_set])
-                a = alpha_set[best_alpha_index].action
+                best_alpha_index = np.argmax([np.dot(alpha, b) for alpha in value_function])
+                a = value_function[best_alpha_index].action
             
             s_p = self.model.transition(s, a)
             o = self.model.observe(s_p, a)
@@ -205,7 +192,7 @@ class PBVI:
         return belief_set_new
     
 
-    def expand_ssea(self, belief_set:list[Belief], alpha_set:list[AlphaVector]) -> list[Belief]:
+    def expand_ssea(self, belief_set:list[Belief]) -> list[Belief]:
         '''
         Stochastic Simulation with Exploratory Action.
         Simulates running steps forward for each possible action knowing we are a state s, chosen randomly with according to the belief probability.
@@ -215,7 +202,6 @@ class PBVI:
 
                 Parameters:
                         belief_set (list[Belief]): list of beliefs to expand on.
-                        alpha_set (list[AlphaVector]): Used to find the best action knowing the belief.
 
                 Returns:
                         belief_set_new (list[Belief]): union of the belief_set and the expansions of the beliefs in the belief_set
@@ -244,14 +230,13 @@ class PBVI:
         return belief_set_new
     
 
-    def expand_ger(self, belief_set, alpha_set) -> list[Belief]:
+    def expand_ger(self, belief_set:list[Belief], value_function:ValueFunction) -> list[Belief]:
         '''
         Greedy Error Reduction
 
                 Parameters:
                         belief_set (list[Belief]): list of beliefs to expand on.
-                        alpha_set (list[AlphaVector]): Used to find the best action knowing the belief.
-                        alpha_actions (list[int]): Used to find the best action knowing the belief.
+                        value_function (ValueFunction): Used to find the best action knowing the belief.
 
                 Returns:
                         belief_set_new (list[Belief]): union of the belief_set and the expansions of the beliefs in the belief_set
@@ -276,18 +261,25 @@ class PBVI:
                         belief_set_new (list[Belief]): The belief set the expansion function returns. 
         '''
         if expand_function in 'expand_ssra':
-            return self.expand_ssra(**kwargs)
+            args = {arg: kwargs[arg] for arg in ['belief_set'] if arg in kwargs}
+            return self.expand_ssra(**args)
+        
         elif expand_function in 'expand_ssga':
-            return self.expand_ssga(**kwargs)
+            args = {arg: kwargs[arg] for arg in ['belief_set', 'value_function', 'eps'] if arg in kwargs}
+            return self.expand_ssga(**args)
+        
         elif expand_function in 'expand_ssea':
-            return self.expand_ssea(**kwargs)
+            args = {arg: kwargs[arg] for arg in ['belief_set'] if arg in kwargs}
+            return self.expand_ssea(**args)
+        
         elif expand_function in 'expand_ger':
-            return self.expand_ger(**kwargs)
-        else:
-            return []
+            args = {arg: kwargs[arg] for arg in ['belief_set', 'value_function'] if arg in kwargs}
+            return self.expand_ger(**args)
+        
+        return []
 
 
-    def solve(self, expansions:int, horizon:int, expand_function:str='ssea', initial_belief=None) -> list[AlphaVector]:
+    def solve(self, expansions:int, horizon:int, expand_function:str='ssea', initial_belief=None) -> ValueFunction:
         '''
         Main loop of the Point-Based Value Iteration algorithm.
         It consists in 2 steps, Backup and Expand.
@@ -299,7 +291,7 @@ class PBVI:
                         horizon (int): How many times the alpha vector set must be updated every time the belief set is expanded.
                 
                 Returns:
-                        alpha_set (list[AlphaVector]): The alpha vectors approximating the value function.
+                        value_function (ValueFunction): The alpha vectors approximating the value function.
 
         '''
         if initial_belief is None:
@@ -309,12 +301,12 @@ class PBVI:
             initial_belief = Belief(self.model, np.array(initial_belief))
         
         belief_set = [initial_belief]
-        alpha_set = [AlphaVector(self.model.reward_table[:,a], a) for a in self.model.actions]
+        value_function = ValueFunction([AlphaVector(self.model.reward_table[:,a], a) for a in self.model.actions])
 
         for _ in range(expansions):
             for _ in range(horizon):
-                alpha_set, alpha_actions = self.backup(belief_set, alpha_set)
+                value_function = self.backup(belief_set, value_function)
 
-            belief_set = self.expand(belief_set=belief_set, alpha_set=alpha_set)
+            belief_set = self.expand(belief_set=belief_set, value_function=value_function)
 
-        return alpha_set
+        return value_function
