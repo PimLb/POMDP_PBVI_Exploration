@@ -1,6 +1,8 @@
 import copy
 import numpy as np
+import random
 
+from matplotlib import pyplot as plt
 from scipy.optimize import milp, LinearConstraint
 from typing import Self
 
@@ -95,5 +97,141 @@ class ValueFunction(list[AlphaVector]):
         return ValueFunction(alpha_set)
     
 
-    def plot(self):
-        pass
+    def plot(self, size:int=5):
+        assert len(self) > 0, "Value function is empty, plotting is impossible..."
+        dimension = self[0].shape[0]
+        assert dimension in [2,3], "Value function plotting only available for MDP's of 2 or 3 states."
+
+        if dimension == 2:
+            self._plot_2D(size)
+        elif dimension == 3:
+            self._plot_3D(size)
+
+
+    def _plot_2D(self, size=5):
+        x = np.linspace(0, 1, 1000)
+
+        plt.figure(figsize=(size,size))
+
+        for alpha in self:
+            m = alpha[1] - alpha[0]
+            y = (m * x) + alpha[0]
+
+            plt.plot(x,y,c=alpha.action,cmap='Set1')
+
+        plt.show()
+
+
+    def _plot_3D(self, size=5):
+
+        def get_alpha_vect_z(xx, yy, alpha_vect):
+            x0, y0, z0 = [0, 0, alpha_vect[0]]
+            x1, y1, z1 = [1, 0, alpha_vect[1]]
+            x2, y2, z2 = [0, 1, alpha_vect[2]]
+
+            ux, uy, uz = u = [x1-x0, y1-y0, z1-z0]
+            vx, vy, vz = v = [x2-x0, y2-y0, z2-z0]
+
+            u_cross_v = [uy*vz-uz*vy, uz*vx-ux*vz, ux*vy-uy*vx]
+
+            point  = np.array([0, 0, alpha_vect[0]])
+            normal = np.array(u_cross_v)
+
+            d = -point.dot(normal)
+
+            z = (-normal[0] * xx - normal[1] * yy - d) * 1. / normal[2]
+            
+            return z
+
+
+        def get_plane_gradient(alpha_vect):
+        
+            x0, y0, z0 = [0, 0, alpha_vect[0]]
+            x1, y1, z1 = [1, 0, alpha_vect[1]]
+            x2, y2, z2 = [0, 1, alpha_vect[2]]
+
+            ux, uy, uz = u = [x1-x0, y1-y0, z1-z0]
+            vx, vy, vz = v = [x2-x0, y2-y0, z2-z0]
+
+            u_cross_v = [uy*vz-uz*vy, uz*vx-ux*vz, ux*vy-uy*vx]
+            
+            normal_vector = np.array(u_cross_v)
+            normal_vector_norm = float(np.linalg.norm(normal_vector))
+            normal_vector = np.divide(normal_vector, normal_vector_norm)
+            normal_vector[2] = 0
+            
+            return np.linalg.norm(normal_vector)
+        
+
+        # Actual plotting
+        x = np.linspace(0, 1, 1000)
+        y = np.linspace(0, 1, 1000)
+
+        xx, yy = np.meshgrid(x, y)
+
+        max_z = np.zeros((xx.shape[0], yy.shape[0]))
+        best_a = (np.zeros((xx.shape[0], yy.shape[0])))
+        plane = (np.zeros((xx.shape[0], yy.shape[0])))
+        gradients = (np.zeros((xx.shape[0], yy.shape[0])))
+
+        for alpha in self:
+
+            z = get_alpha_vect_z(xx, yy, alpha)
+
+            # Action array upodate
+            new_a_mask = np.argmax(np.array([max_z, z]), axis=0)
+
+            best_a[new_a_mask == 1] = alpha.action
+            
+            plane[new_a_mask == 1] = random.randrange(100)
+            
+            alpha_gradient = get_plane_gradient(alpha)
+            gradients[new_a_mask == 1] = alpha_gradient
+
+            # Max z update
+            max_z = np.max(np.array([max_z, z]), axis=0)
+            
+        for x_i, x_val in enumerate(x):
+            for y_i, y_val in enumerate(y):
+                if (x_val+y_val) > 1:
+                    max_z[x_i, y_i] = np.nan
+                    plane[x_i, y_i] = np.nan
+                    gradients[x_i, y_i] = np.nan
+                    best_a[x_i, y_i] = np.nan
+                    
+        plt.figure(figsize=(size*4,size*4))
+
+        plt.subplot(2, 2, 1)
+        plt.title("Value function")
+        plt.contourf(x, y, max_z, 100, cmap="viridis")
+        plt.axis('scaled')
+        plt.xlabel('s1')
+        plt.ylabel('s2')
+        plt.colorbar()
+
+        plt.subplot(2, 2, 2)
+        plt.title("Alpha planes")
+        plt.contourf(x, y, plane, 100, cmap="viridis")
+        plt.axis('scaled')
+        plt.xlabel('s1')
+        plt.ylabel('s2')
+        plt.colorbar()
+        
+        
+        plt.subplot(2, 2, 3)
+        plt.title("Gradients of planes")
+        plt.contourf(x, y, gradients, 100, cmap="Blues")
+        plt.axis('scaled')
+        plt.xlabel('s1')
+        plt.ylabel('s2')
+        plt.colorbar()
+
+        plt.subplot(2, 2, 4)
+        plt.title("Action policy")
+        plt.contourf(x, y, best_a, 1, cmap="Set1")
+        plt.axis('scaled')
+        plt.xlabel('s1')
+        plt.ylabel('s2')
+        plt.colorbar()
+
+        plt.show()
