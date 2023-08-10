@@ -1,8 +1,15 @@
 import copy
+import datetime
+import matplotlib.ticker as MT
+import matplotlib.lines as L
+import matplotlib.cm as CM
+import matplotlib.colors as C
+
 import numpy as np
 import math
 import random
 
+from matplotlib import pyplot as plt
 from typing import Union
 
 from src.POMDP.pomdp_model  import POMDPModel
@@ -42,6 +49,9 @@ class PBVI:
     '''
     def __init__(self, model:POMDPModel):
         self.model = model
+
+        self._solve_history = None
+        self._solve_run_ts = None
 
 
     def backup(self, belief_set:list[Belief], value_function:ValueFunction, discount_factor:float=0.9) -> ValueFunction:
@@ -303,10 +313,121 @@ class PBVI:
         belief_set = [initial_belief]
         value_function = ValueFunction([AlphaVector(self.model.reward_table[:,a], a) for a in self.model.actions])
 
+        # History tracking
+        self._solve_history = [{
+            'alphas': value_function,
+            'beliefs': belief_set
+        }]
+        self._solve_run_ts = datetime.datetime.now()
+
+        # Loop
         for _ in range(expansions):
             for _ in range(horizon):
                 value_function = self.backup(belief_set, value_function)
+                self._solve_history.append({
+                    'alphas': value_function,
+                    'beliefs': belief_set
+                })
 
             belief_set = self.expand(belief_set=belief_set, value_function=value_function)
 
         return value_function
+    
+
+    def plot_belief_set(self, size:int=15):
+        assert self._solve_history is not None, "solve() has to be run first..."
+        assert self.model.state_count in [2,3], "Can't plot for models with state count other than 2 or 3"
+        
+        if self.model.state_count == 2:
+            self._plot_belief_set_2D(size)
+        elif self.model.state_count == 3:
+            self._plot_belief_set_3D(size)
+
+    def _plot_belief_set_2D(self, size=15):
+        assert self._solve_history is not None
+        beliefs_x = np.array(self._solve_history[-1]['beliefs'])[:,1]
+
+        plt.figure(figsize=(size, max([int(size/7),1])))
+        plt.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c=range(beliefs_x.shape[0]), cmap='Blues')
+        ax = plt.gca()
+        ax.get_yaxis().set_visible(False)
+        plt.xticks(np.arange(0,1.1,0.1))
+        plt.show()
+
+    def _plot_belief_set_3D(self, size=15):
+        # Function to project points to a simplex triangle
+        def projectSimplex(points):
+            """ 
+            Project probabilities on the 3-simplex to a 2D triangle
+            
+            N points are given as N x 3 array
+            """
+            # Convert points one at a time
+            tripts = np.zeros((points.shape[0],2))
+            for idx in range(points.shape[0]):
+                # Init to triangle centroid
+                x = 1.0 / 2
+                y = 1.0 / (2 * np.sqrt(3))
+                # Vector 1 - bisect out of lower left vertex 
+                p1 = points[idx, 0]
+                x = x - (1.0 / np.sqrt(3)) * p1 * np.cos(np.pi / 6)
+                y = y - (1.0 / np.sqrt(3)) * p1 * np.sin(np.pi / 6)
+                # Vector 2 - bisect out of lower right vertex  
+                p2 = points[idx, 1]  
+                x = x + (1.0 / np.sqrt(3)) * p2 * np.cos(np.pi / 6)
+                y = y - (1.0 / np.sqrt(3)) * p2 * np.sin(np.pi / 6)        
+                # Vector 3 - bisect out of top vertex
+                p3 = points[idx, 2]
+                y = y + (1.0 / np.sqrt(3) * p3)
+            
+                tripts[idx,:] = (x,y)
+
+            return tripts
+        
+        # Plotting the simplex 
+        def plotSimplex(points, fig=None, 
+                        vertexlabels=['s_0','s_1','s_2'],
+                        **kwargs):
+            """
+            Plot Nx3 points array on the 3-simplex 
+            (with optionally labeled vertices) 
+            
+            kwargs will be passed along directly to matplotlib.pyplot.scatter    
+            Returns Figure, caller must .show()
+            """
+            if(fig == None):        
+                fig = plt.figure()
+            # Draw the triangle
+            l1 = L.Line2D([0, 0.5, 1.0, 0], # xcoords
+                        [0, np.sqrt(3) / 2, 0, 0], # ycoords
+                        color='k')
+            fig.gca().add_line(l1)
+            fig.gca().xaxis.set_major_locator(MT.NullLocator())
+            fig.gca().yaxis.set_major_locator(MT.NullLocator())
+            # Draw vertex labels
+            fig.gca().text(-0.05, -0.05, vertexlabels[0])
+            fig.gca().text(1.05, -0.05, vertexlabels[1])
+            fig.gca().text(0.5, np.sqrt(3) / 2 + 0.05, vertexlabels[2])
+            # Project and draw the actual points
+            projected = projectSimplex(points)
+            plt.scatter(projected[:,0], projected[:,1], **kwargs)              
+            # Leave some buffer around the triangle for vertex labels
+            fig.gca().set_xlim(-0.2, 1.2)
+            fig.gca().set_ylim(-0.2, 1.2)
+
+            return fig    
+
+        # Actual plot
+        assert self._solve_history is not None
+        belief_set = self._solve_history[-1]['beliefs']
+
+        fig = plt.figure(figsize=(size,size))
+
+        cmap = CM.get_cmap('Blues')
+        norm = C.Normalize(vmin=0, vmax=len(belief_set))
+        c = range(len(belief_set))
+        # Do scatter plot
+        fig = plotSimplex(np.array(belief_set), fig=fig, vertexlabels=self.model.state_labels, s=size, c=c,                      
+                        cmap=cmap, norm=norm)
+
+        plt.show()
