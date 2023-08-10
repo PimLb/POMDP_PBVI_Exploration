@@ -26,6 +26,14 @@ class ValueFunction(list[AlphaVector]):
             - 1: Simple deduplication of the alpha vectors.
             - 2: 1+ Check of absolute domination (check if dominated at each state).
             - 3: 2+ Solves Linear Programming problem for each alpha vector to see if it is dominated by combinations of other vectors.
+        
+        Note that the higher the level, the heavier the time impact will be.
+
+                Parameters:
+                        level (int): Between 0 and 3, how thorough the alpha vector pruning should be.
+                
+                Returns:
+                        new_value_function (ValueFunction): A new value function with a pruned set of alpha vectors.
         '''
         if level < 1:
             return copy.deepcopy(self)
@@ -85,3 +93,7 @@ class ValueFunction(list[AlphaVector]):
             alpha_set = pruned_alphas
         
         return ValueFunction(alpha_set)
+    
+
+    def plot(self):
+        pass
