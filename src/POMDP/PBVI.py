@@ -350,6 +350,7 @@ class PBVI:
         elif self.model.state_count == 3:
             self._plot_belief_set_3D(size)
 
+
     def _plot_belief_set_2D(self, size=15):
         assert self._solve_history is not None
         beliefs_x = np.array(self._solve_history[-1]['beliefs'])[:,1]
@@ -360,6 +361,7 @@ class PBVI:
         ax.get_yaxis().set_visible(False)
         plt.xticks(np.arange(0,1.1,0.1))
         plt.show()
+
 
     def _plot_belief_set_3D(self, size=15):
         # Function to project points to a simplex triangle
@@ -438,3 +440,9 @@ class PBVI:
                         cmap=cmap, norm=norm)
 
         plt.show()
+
+
+    @property
+    def explored_beliefs(self) -> list[Belief]:
+        assert self._solve_history is not None, "solve() has to be run first..."
+        return self._solve_history[-1]['beliefs']

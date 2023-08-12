@@ -4,9 +4,10 @@ import random
 
 from matplotlib import pyplot as plt
 from scipy.optimize import milp, LinearConstraint
-from typing import Self
+from typing import Self, Union
 
 from src.POMDP.alpha_vector import AlphaVector
+from src.POMDP.belief import Belief
 
 class ValueFunction(list[AlphaVector]):
     '''
@@ -97,32 +98,57 @@ class ValueFunction(list[AlphaVector]):
         return ValueFunction(alpha_set)
     
 
-    def plot(self, size:int=5):
+    def plot(self, size:int=5, belief_set:Union[list[Belief],None]=None):
+        '''
+        Function to plot out the value function in 2 or 3 dimensions.
+
+                Parameters:
+                        size (int): The actual plot scale
+                        belief_set (list[Belief]): Optional, a set of belief to plot the belief points that were explored.
+        '''
         assert len(self) > 0, "Value function is empty, plotting is impossible..."
         dimension = self[0].shape[0]
         assert dimension in [2,3], "Value function plotting only available for MDP's of 2 or 3 states."
 
         if dimension == 2:
-            self._plot_2D(size)
+            self._plot_2D(size, belief_set)
         elif dimension == 3:
-            self._plot_3D(size)
+            self._plot_3D(size, belief_set)
 
 
-    def _plot_2D(self, size=5):
+    def _plot_2D(self, size=5, belief_set=None):
         x = np.linspace(0, 1, 1000)
 
-        plt.figure(figsize=(size,size))
+        plt.figure(figsize=(int(size*1.5),size))
+        colors = plt.get_cmap('Set1').colors #type: ignore
+
+        main_graph = None
+        if belief_set is not None:
+            main_graph = plt.subplot(2,1,1)
 
         for alpha in self:
             m = alpha[1] - alpha[0]
             y = (m * x) + alpha[0]
 
-            plt.plot(x,y,c=alpha.action,cmap='Set1')
+            plt.plot(x,y,color=colors[alpha.action])
+            plt.xlabel('s1')
+
+        if belief_set is not None:
+            assert main_graph is not None
+            plt.subplot(2,1,2, sharex=main_graph)
+
+            beliefs_x = np.array(belief_set)[:,1]
+            plt.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
+            ax = plt.gca()
+            ax.get_yaxis().set_visible(False)
+            plt.axhline(0, color='black')
+            # plt.xticks(np.arange(0,1.1,0.1))
+            
 
         plt.show()
 
 
-    def _plot_3D(self, size=5):
+    def _plot_3D(self, size=5, belief_set=None):
 
         def get_alpha_vect_z(xx, yy, alpha_vect):
             x0, y0, z0 = [0, 0, alpha_vect[0]]
@@ -143,7 +169,6 @@ class ValueFunction(list[AlphaVector]):
             
             return z
 
-
         def get_plane_gradient(alpha_vect):
         
             x0, y0, z0 = [0, 0, alpha_vect[0]]
@@ -161,7 +186,6 @@ class ValueFunction(list[AlphaVector]):
             normal_vector[2] = 0
             
             return np.linalg.norm(normal_vector)
-        
 
         # Actual plotting
         x = np.linspace(0, 1, 1000)
@@ -198,6 +222,10 @@ class ValueFunction(list[AlphaVector]):
                     plane[x_i, y_i] = np.nan
                     gradients[x_i, y_i] = np.nan
                     best_a[x_i, y_i] = np.nan
+
+        belief_points = None
+        if belief_set is not None:
+            belief_points = np.array(belief_set)[:,1:]
                     
         plt.figure(figsize=(size*4,size*4))
 
@@ -205,6 +233,8 @@ class ValueFunction(list[AlphaVector]):
         plt.title("Value function")
         plt.contourf(x, y, max_z, 100, cmap="viridis")
         plt.axis('scaled')
+        if belief_points is not None:
+            plt.scatter(belief_points[:,0], belief_points[:,1], s=1, c='red')
         plt.xlabel('s1')
         plt.ylabel('s2')
         plt.colorbar()
@@ -213,23 +243,31 @@ class ValueFunction(list[AlphaVector]):
         plt.title("Alpha planes")
         plt.contourf(x, y, plane, 100, cmap="viridis")
         plt.axis('scaled')
+        if belief_points is not None:
+            plt.scatter(belief_points[:,0], belief_points[:,1], s=1, c='red')
         plt.xlabel('s1')
         plt.ylabel('s2')
         plt.colorbar()
-        
         
         plt.subplot(2, 2, 3)
         plt.title("Gradients of planes")
         plt.contourf(x, y, gradients, 100, cmap="Blues")
         plt.axis('scaled')
+        if belief_points is not None:
+            plt.scatter(belief_points[:,0], belief_points[:,1], s=1, c='red')
         plt.xlabel('s1')
         plt.ylabel('s2')
         plt.colorbar()
 
+        # actions colors
+        colors = plt.get_cmap('Set1').colors #type: ignore
+
         plt.subplot(2, 2, 4)
         plt.title("Action policy")
-        plt.contourf(x, y, best_a, 1, cmap="Set1")
+        plt.contourf(x, y, best_a, 1, colors=colors)
         plt.axis('scaled')
+        if belief_points is not None:
+            plt.scatter(belief_points[:,0], belief_points[:,1], s=1, c='red')
         plt.xlabel('s1')
         plt.ylabel('s2')
         plt.colorbar()
