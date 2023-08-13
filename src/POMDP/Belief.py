@@ -61,7 +61,7 @@ class Belief(np.ndarray):
         new_state_probabilities = np.zeros((self.model.state_count))
         
         for s_p in self.model.states:
-            new_state_probabilities[s_p] = sum([(self.model.observation_table[s, a, o] * self.model.transition_table[s, a, s_p] * self[s]) 
+            new_state_probabilities[s_p] = sum([(self.model.observation_table[s_p, a, o] * self.model.transition_table[s, a, s_p] * self[s]) 
                               for s in self.model.states])
 
         # Formal definition of the normailizer as in paper

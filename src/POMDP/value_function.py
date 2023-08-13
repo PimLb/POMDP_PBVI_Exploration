@@ -118,32 +118,24 @@ class ValueFunction(list[AlphaVector]):
 
     def _plot_2D(self, size=5, belief_set=None):
         x = np.linspace(0, 1, 1000)
+        colors = plt.get_cmap('Set1').colors # type: ignore
 
         plt.figure(figsize=(int(size*1.5),size))
-        colors = plt.get_cmap('Set1').colors #type: ignore
-
-        main_graph = None
-        if belief_set is not None:
-            main_graph = plt.subplot(2,1,1)
+        grid_spec = {'height_ratios': ([1] if belief_set is None else [19,1])}
+        _, ax = plt.subplots((2 if belief_set is not None else 1),1,sharex=True,gridspec_kw=grid_spec)
 
         for alpha in self:
             m = alpha[1] - alpha[0]
             y = (m * x) + alpha[0]
 
-            plt.plot(x,y,color=colors[alpha.action])
-            plt.xlabel('s1')
+            ax1 = ax[0] if belief_set is not None else ax
+            ax1.plot(x,y,color=colors[alpha.action]) # type: ignore
 
         if belief_set is not None:
-            assert main_graph is not None
-            plt.subplot(2,1,2, sharex=main_graph)
-
             beliefs_x = np.array(belief_set)[:,1]
-            plt.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
-            ax = plt.gca()
-            ax.get_yaxis().set_visible(False)
-            plt.axhline(0, color='black')
-            # plt.xticks(np.arange(0,1.1,0.1))
-            
+            ax[1].scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
+            ax[1].get_yaxis().set_visible(False)
+            ax[1].axhline(0, color='black')
 
         plt.show()
 
@@ -202,7 +194,7 @@ class ValueFunction(list[AlphaVector]):
 
             z = get_alpha_vect_z(xx, yy, alpha)
 
-            # Action array upodate
+            # Action array update
             new_a_mask = np.argmax(np.array([max_z, z]), axis=0)
 
             best_a[new_a_mask == 1] = alpha.action

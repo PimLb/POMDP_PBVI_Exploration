@@ -4,13 +4,14 @@ import matplotlib.ticker as MT
 import matplotlib.lines as L
 import matplotlib.cm as CM
 import matplotlib.colors as C
-
 import numpy as np
 import math
 import random
 
 from matplotlib import pyplot as plt
-from typing import Union
+from matplotlib import animation
+from matplotlib.animation import FuncAnimation
+from typing import Self, Union
 
 from src.POMDP.pomdp_model  import POMDPModel
 from src.POMDP.belief import Belief
@@ -356,7 +357,7 @@ class PBVI:
         beliefs_x = np.array(self._solve_history[-1]['beliefs'])[:,1]
 
         plt.figure(figsize=(size, max([int(size/7),1])))
-        plt.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c=range(beliefs_x.shape[0]), cmap='Blues')
+        plt.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c=list(range(beliefs_x.shape[0])), cmap='Blues')
         ax = plt.gca()
         ax.get_yaxis().set_visible(False)
         plt.xticks(np.arange(0,1.1,0.1))
@@ -446,3 +447,55 @@ class PBVI:
     def explored_beliefs(self) -> list[Belief]:
         assert self._solve_history is not None, "solve() has to be run first..."
         return self._solve_history[-1]['beliefs']
+
+
+    def save_history_video(self, custom_name:Union[str,None]=None, compare_with:Union[Self,None]=None):
+        assert self._solve_history is not None, "solve() has to be run first..."
+        assert self.model.state_count in [2,3], "Can't plot for models with state count other than 2 or 3"
+        if self.model.state_count == 2:
+            self._save_history_video_2D(compare_with)
+        elif self.model.state_count == 3:
+            print('Not implemented...')
+
+
+    def _save_history_video_2D(self, custom_name=None, compare_with=None):
+
+        # Figure definition
+        grid_spec = {'height_ratios': [19,1]}
+        fig, (ax1,ax2) = plt.subplots(2, 1, sharex=True, gridspec_kw=grid_spec)
+
+        colors = plt.get_cmap('Set1').colors #type: ignore
+
+        def animate(frame_i):
+            x = np.linspace(0, 1, 1000)
+            ax1.clear()
+
+            assert self._solve_history is not None
+            history_i = self._solve_history[frame_i]
+
+            for alpha in history_i['alphas']:
+                m = alpha[1] - alpha[0]
+                y = (m * x) + alpha[0]
+
+                ax1.plot(x,y,c=colors[alpha.action])
+
+            beliefs_x = np.array(history_i['beliefs'])[:,1]
+            ax2.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
+            ax2.get_yaxis().set_visible(False)
+            ax2.axhline(0, color='black')
+
+        assert self._solve_history is not None
+        ani = FuncAnimation(fig, animate, frames=len(self._solve_history), interval=500, repeat=False)
+        
+        # Title
+        assert self._solve_run_ts is not None
+        solved_time = self._solve_run_ts.strftime('%Y%m%d_%H%M%S')
+
+        video_title = f'{custom_name}-' if custom_name is not None else f's_{self.model.state_count}-a_{self.model.action_count}-'
+        video_title += f'{solved_time}.mp4'
+
+        # Video saving
+        writervideo = animation.FFMpegWriter(fps=10)
+        ani.save('./Results/' + video_title, writer=writervideo)
+        print(f'Video saved at \'Results/{video_title}\'...')
+        plt.close()
