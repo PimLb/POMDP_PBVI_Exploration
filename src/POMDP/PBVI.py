@@ -320,19 +320,35 @@ class PBVI:
             'beliefs': belief_set
         }]
         self._solve_run_ts = datetime.datetime.now()
+        self._solve_steps_count = 0
 
         # Loop
         for _ in range(expansions):
+            # 1: Expand belief set
+            belief_set = self.expand(belief_set=belief_set, value_function=value_function)
+
+            # 2: Backup, update value function (alpha vector set)
             for _ in range(horizon):
                 value_function = self.backup(belief_set, value_function)
                 self._solve_history.append({
                     'alphas': value_function,
                     'beliefs': belief_set
                 })
-
-            belief_set = self.expand(belief_set=belief_set, value_function=value_function)
+                self._solve_steps_count += 1
 
         return value_function
+
+
+    @property
+    def explored_beliefs(self) -> list[Belief]:
+        assert self._solve_history is not None, "solve() has to be run first..."
+        return self._solve_history[-1]['beliefs']
+    
+
+    @property
+    def solution(self) -> ValueFunction:
+        assert self._solve_history is not None, "solve() has to be run first..."
+        return self._solve_history[-1]['alphas']
     
 
     def plot_belief_set(self, size:int=15):
@@ -343,7 +359,6 @@ class PBVI:
                 Parameters:
                         size (int): The figure size and general scaling factor
         '''
-        assert self._solve_history is not None, "solve() has to be run first..."
         assert self.model.state_count in [2,3], "Can't plot for models with state count other than 2 or 3"
         
         if self.model.state_count == 2:
@@ -353,14 +368,13 @@ class PBVI:
 
 
     def _plot_belief_set_2D(self, size=15):
-        assert self._solve_history is not None
-        beliefs_x = np.array(self._solve_history[-1]['beliefs'])[:,1]
+        beliefs_x = np.array(self.explored_beliefs)[:,1]
 
         plt.figure(figsize=(size, max([int(size/7),1])))
         plt.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c=list(range(beliefs_x.shape[0])), cmap='Blues')
         ax = plt.gca()
         ax.get_yaxis().set_visible(False)
-        plt.xticks(np.arange(0,1.1,0.1))
+        plt.xticks(np.arange(0, 1.1, 0.1))
         plt.show()
 
 
@@ -428,8 +442,7 @@ class PBVI:
             return fig    
 
         # Actual plot
-        assert self._solve_history is not None
-        belief_set = self._solve_history[-1]['beliefs']
+        belief_set = self.explored_beliefs
 
         fig = plt.figure(figsize=(size,size))
 
@@ -443,49 +456,97 @@ class PBVI:
         plt.show()
 
 
-    @property
-    def explored_beliefs(self) -> list[Belief]:
-        assert self._solve_history is not None, "solve() has to be run first..."
-        return self._solve_history[-1]['beliefs']
+    def plot_solution(self, size:int=5):
+        '''
+        Function to plot the value function of the solution.
+        Note: only works for 2 and 3 states models
+
+                Parameters:
+                        size (int): The figure size and general scaling factor
+        '''
+        self.solution.plot(size, self.explored_beliefs)
 
 
-    def save_history_video(self, custom_name:Union[str,None]=None, compare_with:Union[Self,None]=None):
-        assert self._solve_history is not None, "solve() has to be run first..."
+    def save_history_video(self, custom_name:Union[str,None]=None, compare_with:Union[list, ValueFunction, Self]=[]):
+        '''
+        Function to generate a video of the training history. Another solved solver or list of solvers can be put in the 'compare_with' parameter.
+        These other solver's value function will be overlapped with the 1st value function.
+        The explored beliefs of the main solver are also mapped out. (other solvers's explored beliefs will not be plotted)
+        Also, a single value function or list of value functions can be sent in but they will be fixed in the video.
+
+        Note: only works for 2-state models.
+
+                Parameters:
+                        custom_name (str): Optional, the name the video will be saved with.
+                        compare_with (PBVI, ValueFunction, list): Optional, value functions or other solvers to plot against the current solver's history
+        '''
         assert self.model.state_count in [2,3], "Can't plot for models with state count other than 2 or 3"
         if self.model.state_count == 2:
-            self._save_history_video_2D(compare_with)
+            self._save_history_video_2D(custom_name, compare_with)
         elif self.model.state_count == 3:
             print('Not implemented...')
 
 
-    def _save_history_video_2D(self, custom_name=None, compare_with=None):
-
+    def _save_history_video_2D(self, custom_name=None, compare_with=[]):
         # Figure definition
         grid_spec = {'height_ratios': [19,1]}
         fig, (ax1,ax2) = plt.subplots(2, 1, sharex=True, gridspec_kw=grid_spec)
 
         colors = plt.get_cmap('Set1').colors #type: ignore
+        line_types = ['-', '--', '-.', ':']
+
+        # Solver list
+        if isinstance(compare_with, ValueFunction) or isinstance(compare_with, PBVI):
+            compare_with_list = [compare_with] # Single item
+        else:
+            compare_with_list = compare_with # Already group of items
+        solver_list = [self] + compare_with_list
+        
+        assert len(solver_list) <= len(line_types), f"Plotting can only happen for up to {len(line_types)} solvers..."
+        line_types = line_types[:len(solver_list)]
+
+
+        def plot_on_ax(solver, frame_i:int, ax, line_type:str):
+            if isinstance(solver, ValueFunction):
+                value_function = solver
+            else:
+                assert solver._solve_history is not None
+                frame_i = frame_i if frame_i <= solver._solve_steps_count else (solver._solve_steps_count - 1)
+                history_i = solver._solve_history[frame_i]
+                value_function = history_i['alphas']
+
+            alpha_vects = np.array(value_function)
+
+            m = alpha_vects[:,1] - alpha_vects[:,0] # type: ignore
+            m = m.reshape(m.shape[0],1)
+
+            x = np.linspace(0, 1, 100)
+            x = x.reshape((1,x.shape[0])).repeat(m.shape[0],axis=0)
+            y = (m*x) + alpha_vects[:,0].reshape(m.shape[0],1)
+
+            for i, alpha in enumerate(value_function):
+                ax.plot(x[i,:], y[i,:], line_type, color=colors[alpha.action]) # type: ignore
 
         def animate(frame_i):
-            x = np.linspace(0, 1, 1000)
             ax1.clear()
 
+            # Alpha vector plotting
+            for solver, line_type in zip(([self] + compare_with_list), line_types):
+                plot_on_ax(solver, frame_i, ax1, line_type)
+
+            # Belief plotting
             assert self._solve_history is not None
             history_i = self._solve_history[frame_i]
 
-            for alpha in history_i['alphas']:
-                m = alpha[1] - alpha[0]
-                y = (m * x) + alpha[0]
-
-                ax1.plot(x,y,c=colors[alpha.action])
-
             beliefs_x = np.array(history_i['beliefs'])[:,1]
+            ax2.clear()
             ax2.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
             ax2.get_yaxis().set_visible(False)
             ax2.axhline(0, color='black')
 
         assert self._solve_history is not None
-        ani = FuncAnimation(fig, animate, frames=len(self._solve_history), interval=500, repeat=False)
+        max_steps = max([solver._solve_steps_count for solver in solver_list if not isinstance(solver,ValueFunction)])
+        ani = FuncAnimation(fig, animate, frames=max_steps, interval=500, repeat=False)
         
         # Title
         assert self._solve_run_ts is not None

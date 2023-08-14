@@ -117,20 +117,27 @@ class ValueFunction(list[AlphaVector]):
 
 
     def _plot_2D(self, size=5, belief_set=None):
-        x = np.linspace(0, 1, 1000)
+        x = np.linspace(0, 1, 100)
         colors = plt.get_cmap('Set1').colors # type: ignore
 
         plt.figure(figsize=(int(size*1.5),size))
         grid_spec = {'height_ratios': ([1] if belief_set is None else [19,1])}
         _, ax = plt.subplots((2 if belief_set is not None else 1),1,sharex=True,gridspec_kw=grid_spec)
 
-        for alpha in self:
-            m = alpha[1] - alpha[0]
-            y = (m * x) + alpha[0]
+        # Vector plotting
+        alpha_vects = np.array(self)
 
-            ax1 = ax[0] if belief_set is not None else ax
-            ax1.plot(x,y,color=colors[alpha.action]) # type: ignore
+        m = alpha_vects[:,1] - alpha_vects[:,0] # type: ignore
+        m = m.reshape(m.shape[0],1)
 
+        x = x.reshape((1,x.shape[0])).repeat(m.shape[0],axis=0)
+        y = (m*x) + alpha_vects[:,0].reshape(m.shape[0],1)
+
+        ax1 = ax[0] if belief_set is not None else ax
+        for i, alpha in enumerate(self):
+            ax1.plot(x[i,:], y[i,:], color=colors[alpha.action]) # type: ignore
+
+        # Belief plotting
         if belief_set is not None:
             beliefs_x = np.array(belief_set)[:,1]
             ax[1].scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
