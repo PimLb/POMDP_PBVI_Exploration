@@ -1,7 +1,12 @@
-import numpy as np
 from typing import Union
 
-class MDP_Model:
+import copy
+import datetime
+import numpy as np
+
+from src.framework import AlphaVector, ValueFunction, Solver
+
+class Model:
     '''
     MDP Model class.
 
@@ -78,3 +83,42 @@ class MDP_Model:
         '''
         s_p = int(np.argmax(np.random.multinomial(n=1, pvals=self.transition_table[s, a, :])))
         return s_p
+    
+
+class VI_Solver(Solver):
+    def __init__(self, model: Model):
+        super().__init__()
+        self.model = model
+
+
+    def solve(self, horizon:int=10000, gamma:float=0.99, eps:float=0.001):
+        # Initiallize V as a |S| x |A| matrix of the reward expected when being in state s and taking action a
+        V = ValueFunction([AlphaVector(self.model.reward_table[:,a], a) for a in self.model.actions])
+        V_opt = V[0]
+        converged = False
+
+        self._solve_run_ts = datetime.datetime.now()
+        self._solve_steps_count = 0
+        self._solve_history = [{'value_functions': V}]
+
+        while (not converged) and (self._solve_steps_count < horizon):
+            self._solve_steps_count += 1
+            
+            old_V_opt = copy.deepcopy(V_opt)
+
+            V = []
+            for a in self.model.actions:
+                alpha_vect = []
+                for s in self.model.states:
+                    summer = sum(self.model.transition_table[s, a, s_p] * old_V_opt[s_p] for s_p in self.model.states)
+                    alpha_vect.append(self.model.reward_table[s,a] + (gamma * summer))
+
+                V.append(AlphaVector(alpha_vect, a))
+
+            V_opt = np.max(np.array(V), axis=1)
+
+            self._solve_history.append({'value_functions': ValueFunction(V)})
+                
+            avg_delta = np.average(np.abs(V_opt - old_V_opt))
+            if avg_delta < eps:
+                return ValueFunction(V)

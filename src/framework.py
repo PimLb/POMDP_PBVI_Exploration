@@ -1,13 +1,40 @@
-import copy
-import numpy as np
-import random
-
 from matplotlib import pyplot as plt
 from scipy.optimize import milp, LinearConstraint
 from typing import Self, Union
 
-from src.POMDP.alpha_vector import AlphaVector
-from src.POMDP.belief import Belief
+import copy
+import datetime
+import numpy as np
+import random
+
+
+class AlphaVector(np.ndarray):
+    '''
+    A class to represent an Alpha Vector, a vector representing a plane in |S| dimension for POMDP models.
+
+    ...
+
+    Attributes
+    ----------
+    input_array: 
+        The actual vector with the value for each state.
+    action: int
+        The action associated with the vector.
+    '''
+    def __new__(cls, input_array, action:int):
+        obj = np.asarray(input_array).view(cls)
+        obj._action = action
+        return obj
+
+    def __array_finalize__(self, obj):
+        if obj is None: return
+        self._action = getattr(obj, '_action', None)
+
+    @property
+    def action(self) -> int:
+        assert self._action is not None
+        return self._action
+
 
 class ValueFunction(list[AlphaVector]):
     '''
@@ -98,7 +125,7 @@ class ValueFunction(list[AlphaVector]):
         return ValueFunction(alpha_set)
     
 
-    def plot(self, size:int=5, belief_set:Union[list[Belief],None]=None):
+    def plot(self, size:int=5, belief_set=None):
         '''
         Function to plot out the value function in 2 or 3 dimensions.
 
@@ -272,3 +299,22 @@ class ValueFunction(list[AlphaVector]):
         plt.colorbar()
 
         plt.show()
+
+
+class Solver:
+    def __init__(self):
+        self._solved = False
+        self._solve_run_ts = datetime.datetime.min
+        self._solve_steps_count = 0
+        self._solve_history = []
+
+
+    def solve(self):
+        pass
+
+    
+    @property
+    def solution(self) -> ValueFunction:
+        assert self._solved, "solve() has to be run first..."
+        return self._solve_history[-1]['value_functions']
+

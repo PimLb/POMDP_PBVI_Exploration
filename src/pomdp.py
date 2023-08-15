@@ -1,24 +1,162 @@
-import copy
-import datetime
-import matplotlib.ticker as MT
-import matplotlib.lines as L
-import matplotlib.cm as CM
-import matplotlib.colors as C
-import numpy as np
-import math
-import random
-
 from matplotlib import pyplot as plt
 from matplotlib import animation
 from matplotlib.animation import FuncAnimation
 from typing import Self, Union
 
-from src.Framework.solver import Solver
-from src.Util import arreq_in_list
-from src.POMDP.pomdp_model  import POMDP_Model
-from src.POMDP.belief import Belief
-from src.POMDP.alpha_vector import AlphaVector
-from src.POMDP.value_function import ValueFunction
+import copy
+import datetime
+import numpy as np
+import matplotlib.ticker as MT
+import matplotlib.lines as L
+import matplotlib.cm as CM
+import matplotlib.colors as C
+import math
+import random
+
+from src.framework import AlphaVector, ValueFunction, Solver
+from src.mdp import Model as MDP_Model
+
+class POMDP_Model(MDP_Model):
+    '''
+    POMDP Model class. Partially Observable Markov Decision Process Model.
+
+    ...
+
+    Attributes
+    ----------
+    states: int|list
+        A list of state labels or an amount of states to be used.
+    actions: int|list
+        A list of action labels or an amount of actions to be used.
+    transitions:
+        The transition matrix, has to be |S| x |A| x |S|. If none is provided, it will be randomly generated.
+    rewards:
+        The reward matrix, has to be |S| x |A|. If none is provided, it will be randomly generated.
+    observations:
+        The observation matrix, has to be |S| x |A| x |S|. If none is provided, it will be randomly generated.
+
+    Methods
+    -------
+    transition(s:int, a:int):
+        Returns a random state given a prior state and an action.
+    observe(s_p:int, a:int):
+        Returns a random observation based on the posterior state and the action that was taken.
+    '''
+    def __init__(self,
+                 states:Union[int, list],
+                 actions:Union[int, list],
+                 transitions=None,
+                 rewards=None,
+                 observations=None
+                 ):
+        
+        super(POMDP_Model, self).__init__(states, actions, transitions, rewards)
+
+        # Observations - specific to POMDPs 
+        if observations is None:
+            # If no observation matrix given, generate random one
+            random_probs = np.random.rand(self.state_count, self.action_count, self.state_count)
+            # Normalization to have s_p probabilies summing to 1
+            self.observation_table = random_probs / np.sum(random_probs, axis=2, keepdims=True)
+        else:
+            self.observation_table = np.array(observations)
+            assert self.observation_table.shape == (self.state_count, self.action_count, self.state_count), "observations table doesnt have the right shape, it should be SxAxS"
+    
+
+    def observe(self, s_p:int, a:int) -> int:
+        '''
+        Returns a random observation knowing action a is taken from state s, it is weighted by the observation probabilities.
+
+                Parameters:
+                        s_p (int): The state landed on after having done action a
+                        a (int): The action to take
+
+                Returns:
+                        o (int): An observation
+        '''
+        o = int(np.argmax(np.random.multinomial(n=1, pvals=self.observation_table[s_p, a, :])))
+        return o
+
+
+class Belief(np.ndarray):
+    '''
+    A class representing a belief in the space of a given model. It is the belief to be in any combination of states:
+    eg:
+        - In a 2 state POMDP: a belief of (0.5, 0.5) represent the complete ignorance of which state we are in. Where a (1.0, 0.0) belief is the certainty to be in state 0.
+
+    ...
+
+    Attributes
+    ----------
+    model: Model
+        The model on which the belief applies on.
+    state_probabilities: np.ndarray|None
+        A vector of the probabilities to be in each state of the model. The sum of the probabilities must sum to 1. If not specifies it will be 1/|S| for each state belief.
+
+    Methods
+    -------
+    update(a:int, o:int):
+        Function to provide a new Belief object updated using an action 'a' and observation 'o'.
+    random_state():
+        Function to give a random state based with the belief as the probability distribution. 
+    '''
+    def __new__(cls, model:POMDP_Model, state_probabilities:Union[np.ndarray,None]=None):
+        if state_probabilities is not None:
+            assert state_probabilities.shape[0] == model.state_count, "Belief must contain be of dimension |S|"
+            prob_sum = np.round(sum(state_probabilities), decimals=3)
+            assert prob_sum == 1, f"States probabilities in belief must sum to 1 (found: {prob_sum})"
+            obj = np.asarray(state_probabilities).view(cls)
+        else:
+            obj = np.ones(model.state_count) / model.state_count
+        obj._model = model # type: ignore
+        return obj
+
+    def __array_finalize__(self, obj):
+        if obj is None: return
+        self._model = getattr(obj, '_model', None)
+
+    @property
+    def model(self) -> POMDP_Model:
+        assert self._model is not None
+        return self._model
+
+
+    def update(self, a:int, o:int) -> Self:
+        '''
+        Returns a new belief based on this current belief, the most recent action (a) and the most recent observation (o).
+
+                Parameters:
+                        a (int): The most recent action
+                        o (int): The most recent observation
+
+                Returns:
+                        new_belief (Belief): An updated belief
+
+        '''
+        new_state_probabilities = np.zeros((self.model.state_count))
+        
+        for s_p in self.model.states:
+            new_state_probabilities[s_p] = sum([(self.model.observation_table[s_p, a, o] * self.model.transition_table[s, a, s_p] * self[s]) 
+                              for s in self.model.states])
+
+        # Formal definition of the normailizer as in paper
+        # normalizer = 0
+        # for s in STATES:
+        #     normalizer += b_prev[s] * sum([(transition_function(s, a, o) * observation_function(a, s_p, o)) for s_p in STATES])
+        new_state_probabilities /= np.sum(new_state_probabilities)
+        new_belief = Belief(self.model, new_state_probabilities)
+        return new_belief
+    
+
+    def random_state(self) -> int:
+        '''
+        Returns a random state of the model weighted by the belief probabily.
+
+                Returns:
+                        rand_s (int): A random state
+        '''
+        rand_s = int(np.argmax(np.random.multinomial(n=1, pvals=self)))
+        return rand_s
 
 
 class PBVI_Solver(Solver):
@@ -50,11 +188,11 @@ class PBVI_Solver(Solver):
         The general solving function that will call iteratively the expand and the backup function.
     '''
     def __init__(self, model:POMDP_Model):
-        super().__init__(model)
+        super().__init__()
         self.model = model
 
 
-    def backup(self, belief_set:list[Belief], value_function:ValueFunction, discount_factor:float=0.9) -> ValueFunction:
+    def backup(self, belief_set:list[Belief], value_function:ValueFunction, gamma:float=0.9) -> ValueFunction:
         '''
         This function has purpose to update the set of alpha vectors. It does so in 3 steps:
         1. It creates projections from each alpha vector for each possible action and each possible observation
@@ -67,7 +205,7 @@ class PBVI_Solver(Solver):
                 Parameters:
                         belief_set (list[Belief]): The belief set to use to generate the new alpha vectors with.
                         alpha_set (ValueFunction): The alpha vectors to generate the new set from.
-                        discount_factor (float): The discount factor used for training (also known as gamma), default: 0.9.
+                        gamma (float): The discount factor used for training, default: 0.9.
 
                 Returns:
                         new_alpha_set (ValueFunction): A list of updated alpha vectors.
@@ -85,7 +223,7 @@ class PBVI_Solver(Solver):
                     for s in self.model.states:
                         products = [(self.model.transition_table[s,a,s_p] * self.model.observation_table[s_p,a,o] * alpha_i[s_p])
                                     for s_p in self.model.states]
-                        alpa_a_o_vect.append(discount_factor * sum(products))
+                        alpa_a_o_vect.append(gamma * sum(products))
                         
                     alpa_a_o_set.append(alpa_a_o_vect)
                     
