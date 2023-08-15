@@ -1,9 +1,9 @@
 import numpy as np
 from typing import Union
 
-from src.MDP.mdp_model import MDPModel
+from src.MDP.mdp_model import MDP_Model
 
-class POMDPModel(MDPModel):
+class POMDP_Model(MDP_Model):
     '''
     POMDP Model class. Partially Observable Markov Decision Process Model.
 
@@ -37,7 +37,7 @@ class POMDPModel(MDPModel):
                  observations=None
                  ):
         
-        super(POMDPModel, self).__init__(states, actions, transitions, rewards)
+        super(POMDP_Model, self).__init__(states, actions, transitions, rewards)
 
         # Observations - specific to POMDPs 
         if observations is None:

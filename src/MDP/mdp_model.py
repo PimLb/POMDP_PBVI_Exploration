@@ -1,7 +1,7 @@
 import numpy as np
 from typing import Union
 
-class MDPModel:
+class MDP_Model:
     '''
     MDP Model class.
 

@@ -1,7 +1,7 @@
 import numpy as np
 from typing import Self,Union
 
-from src.POMDP.pomdp_model import POMDPModel
+from src.POMDP.pomdp_model import POMDP_Model
 
 class Belief(np.ndarray):
     '''
@@ -25,7 +25,7 @@ class Belief(np.ndarray):
     random_state():
         Function to give a random state based with the belief as the probability distribution. 
     '''
-    def __new__(cls, model:POMDPModel, state_probabilities:Union[np.ndarray,None]=None):
+    def __new__(cls, model:POMDP_Model, state_probabilities:Union[np.ndarray,None]=None):
         if state_probabilities is not None:
             assert state_probabilities.shape[0] == model.state_count, "Belief must contain be of dimension |S|"
             prob_sum = np.round(sum(state_probabilities), decimals=3)
@@ -41,7 +41,7 @@ class Belief(np.ndarray):
         self._model = getattr(obj, '_model', None)
 
     @property
-    def model(self) -> POMDPModel:
+    def model(self) -> POMDP_Model:
         assert self._model is not None
         return self._model
 

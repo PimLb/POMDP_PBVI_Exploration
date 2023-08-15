@@ -13,22 +13,23 @@ from matplotlib import animation
 from matplotlib.animation import FuncAnimation
 from typing import Self, Union
 
-from src.POMDP.pomdp_model  import POMDPModel
+from src.Framework.solver import Solver
+from src.Util import arreq_in_list
+from src.POMDP.pomdp_model  import POMDP_Model
 from src.POMDP.belief import Belief
 from src.POMDP.alpha_vector import AlphaVector
 from src.POMDP.value_function import ValueFunction
-from src.Util import arreq_in_list
 
 
-class PBVI:
+class PBVI_Solver(Solver):
     '''
-    The Point-Based Value Iteration for POMDP Models. It works in two steps, first the backup step that updates the alpha vector set that approximates the value function.
+    The Point-Based Value Iteration solver for POMDP Models. It works in two steps, first the backup step that updates the alpha vector set that approximates the value function.
     Then, the expand function that expands the belief set.
 
     ...
     Attributes
     ----------
-    model: Model
+    model: POMDP_Model
         The POMDP model the solver will be applied on.
 
     Methods
@@ -48,11 +49,9 @@ class PBVI:
     solve(expansions:int, horizon:int, expand_function:str='ssea', initial_belief=None):
         The general solving function that will call iteratively the expand and the backup function.
     '''
-    def __init__(self, model:POMDPModel):
+    def __init__(self, model:POMDP_Model):
+        super().__init__(model)
         self.model = model
-
-        self._solve_history = None
-        self._solve_run_ts = None
 
 
     def backup(self, belief_set:list[Belief], value_function:ValueFunction, discount_factor:float=0.9) -> ValueFunction:
@@ -294,8 +293,8 @@ class PBVI:
         '''
         Main loop of the Point-Based Value Iteration algorithm.
         It consists in 2 steps, Backup and Expand.
-        1. Backup: Updates the alpha vectors based on the current belief set
-        2. Expand: Expands the belief set base with a expansion strategy given by the parameter expand_function
+        1. Expand: Expands the belief set base with a expansion strategy given by the parameter expand_function
+        2. Backup: Updates the alpha vectors based on the current belief set
 
                 Parameters:
                         expansions (int): How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
@@ -316,7 +315,7 @@ class PBVI:
 
         # History tracking
         self._solve_history = [{
-            'alphas': value_function,
+            'value_functions': value_function,
             'beliefs': belief_set
         }]
         self._solve_run_ts = datetime.datetime.now()
@@ -331,24 +330,19 @@ class PBVI:
             for _ in range(horizon):
                 value_function = self.backup(belief_set, value_function)
                 self._solve_history.append({
-                    'alphas': value_function,
+                    'value_functions': value_function,
                     'beliefs': belief_set
                 })
                 self._solve_steps_count += 1
 
+        self._solved = True
         return value_function
 
 
     @property
     def explored_beliefs(self) -> list[Belief]:
-        assert self._solve_history is not None, "solve() has to be run first..."
+        assert self._solved, "solve() has to be run first..."
         return self._solve_history[-1]['beliefs']
-    
-
-    @property
-    def solution(self) -> ValueFunction:
-        assert self._solve_history is not None, "solve() has to be run first..."
-        return self._solve_history[-1]['alphas']
     
 
     def plot_belief_set(self, size:int=15):
@@ -496,7 +490,7 @@ class PBVI:
         line_types = ['-', '--', '-.', ':']
 
         # Solver list
-        if isinstance(compare_with, ValueFunction) or isinstance(compare_with, PBVI):
+        if isinstance(compare_with, ValueFunction) or isinstance(compare_with, PBVI_Solver):
             compare_with_list = [compare_with] # Single item
         else:
             compare_with_list = compare_with # Already group of items
@@ -513,7 +507,7 @@ class PBVI:
                 assert solver._solve_history is not None
                 frame_i = frame_i if frame_i <= solver._solve_steps_count else (solver._solve_steps_count - 1)
                 history_i = solver._solve_history[frame_i]
-                value_function = history_i['alphas']
+                value_function = history_i['value_functions']
 
             alpha_vects = np.array(value_function)
 
@@ -535,7 +529,7 @@ class PBVI:
                 plot_on_ax(solver, frame_i, ax1, line_type)
 
             # Belief plotting
-            assert self._solve_history is not None
+            assert self._solved
             history_i = self._solve_history[frame_i]
 
             beliefs_x = np.array(history_i['beliefs'])[:,1]
@@ -544,12 +538,12 @@ class PBVI:
             ax2.get_yaxis().set_visible(False)
             ax2.axhline(0, color='black')
 
-        assert self._solve_history is not None
+        assert self._solved
         max_steps = max([solver._solve_steps_count for solver in solver_list if not isinstance(solver,ValueFunction)])
         ani = FuncAnimation(fig, animate, frames=max_steps, interval=500, repeat=False)
         
         # Title
-        assert self._solve_run_ts is not None
+        assert self._solved
         solved_time = self._solve_run_ts.strftime('%Y%m%d_%H%M%S')
 
         video_title = f'{custom_name}-' if custom_name is not None else f's_{self.model.state_count}-a_{self.model.action_count}-'

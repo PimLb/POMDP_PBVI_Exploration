@@ -1,5 +1,5 @@
-from src.MDP.mdp_model import MDPModel
+from src.MDP.mdp_model import MDP_Model
 
 __all__ = (
-    'MDPModel',
+    'MDP_Model',
 )
