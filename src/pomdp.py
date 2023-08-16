@@ -45,22 +45,29 @@ class POMDP_Model(MDP_Model):
     def __init__(self,
                  states:Union[int, list],
                  actions:Union[int, list],
+                 observations:Union[int, list],
                  transitions=None,
                  rewards=None,
-                 observations=None
+                 observation_table=None
                  ):
         
         super(POMDP_Model, self).__init__(states, actions, transitions, rewards)
 
-        # Observations - specific to POMDPs 
-        if observations is None:
+        if isinstance(observations, int):
+            self.observation_labels = [f'o_{i}' for i in range(observations)]
+        else:
+            self.observation_labels = observations
+        self.observation_count = len(self.observation_labels)
+        self.observations = [obs for obs in range(self.observation_count)]
+
+        if observation_table is None:
             # If no observation matrix given, generate random one
-            random_probs = np.random.rand(self.state_count, self.action_count, self.state_count)
+            random_probs = np.random.rand(self.state_count, self.action_count, self.observation_count)
             # Normalization to have s_p probabilies summing to 1
             self.observation_table = random_probs / np.sum(random_probs, axis=2, keepdims=True)
         else:
-            self.observation_table = np.array(observations)
-            assert self.observation_table.shape == (self.state_count, self.action_count, self.state_count), "observations table doesnt have the right shape, it should be SxAxS"
+            self.observation_table = np.array(observation_table)
+            assert self.observation_table.shape == (self.state_count, self.action_count, self.observation_count), "observations table doesnt have the right shape, it should be SxAxS"
     
 
     def observe(self, s_p:int, a:int) -> int:
@@ -214,7 +221,7 @@ class PBVI_Solver(Solver):
         # Step 1
         gamma_a_o_t = {}
         for a in self.model.actions:
-            for o in self.model.states:
+            for o in self.model.observations:
                 alpa_a_o_set = []
                 
                 for alpha_i in value_function:
@@ -244,7 +251,7 @@ class PBVI_Solver(Solver):
                 
                 obs_alpha_sum = np.zeros(self.model.state_count)
                 
-                for o in self.model.states:
+                for o in self.model.observations:
                     
                     # Argmax of alphas
                     best_alpha_o = np.zeros(self.model.state_count)
@@ -588,7 +595,7 @@ class PBVI_Solver(Solver):
         plt.show()
 
 
-    def plot_solution(self, size:int=5):
+    def plot_solution(self, size:int=5, plot_belief:bool=True):
         '''
         Function to plot the value function of the solution.
         Note: only works for 2 and 3 states models
@@ -596,7 +603,7 @@ class PBVI_Solver(Solver):
                 Parameters:
                         size (int): The figure size and general scaling factor
         '''
-        self.solution.plot(size, self.explored_beliefs)
+        self.solution.plot(self.model.state_labels, self.model.action_labels, size, (self.explored_beliefs if plot_belief else None))
 
 
     def save_history_video(self, custom_name:Union[str,None]=None, compare_with:Union[list, ValueFunction, Self]=[]):
