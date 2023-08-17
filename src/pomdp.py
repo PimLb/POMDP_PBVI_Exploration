@@ -28,12 +28,14 @@ class POMDP_Model(MDP_Model):
         A list of state labels or an amount of states to be used.
     actions: int|list
         A list of action labels or an amount of actions to be used.
+    observations:
+        A list of observation labels or an amount of observations to be used
     transitions:
         The transition matrix, has to be |S| x |A| x |S|. If none is provided, it will be randomly generated.
     rewards:
         The reward matrix, has to be |S| x |A|. If none is provided, it will be randomly generated.
-    observations:
-        The observation matrix, has to be |S| x |A| x |S|. If none is provided, it will be randomly generated.
+    observation_table:
+        The observation matrix, has to be |S| x |A| x |O|. If none is provided, it will be randomly generated.
 
     Methods
     -------
@@ -193,6 +195,12 @@ class PBVI_Solver(Solver):
         The general expand function, used to call the other expand_* functions.
     solve(expansions:int, horizon:int, expand_function:str='ssea', initial_belief=None):
         The general solving function that will call iteratively the expand and the backup function.
+    plot_belief_set(size:int=15):
+        Once solve() has been run, the explored beliefs can be plot for 2- and 3- state models.
+    plot_solution(size:int=5, plot_belief:bool=True):
+        Once solve() has been run, the value function solution can be plot for 2- and 3- state models.
+    save_history_video(custom_name:Union[str,None]=None, compare_with:Union[list, ValueFunction, Self]=[]):
+        Once the solve has been run, we can save a video of the history of the solving process.
     '''
     def __init__(self, model:POMDP_Model):
         super().__init__()
@@ -434,7 +442,7 @@ class PBVI_Solver(Solver):
         return []
 
 
-    def solve(self, expansions:int, horizon:int, expand_function:str='ssea', initial_belief=None) -> ValueFunction:
+    def solve(self, expansions:int, horizon:int, expand_function:str='ssea', initial_belief=None, eps:float=0.001) -> ValueFunction:
         '''
         Main loop of the Point-Based Value Iteration algorithm.
         It consists in 2 steps, Backup and Expand.
@@ -471,14 +479,28 @@ class PBVI_Solver(Solver):
             # 1: Expand belief set
             belief_set = self.expand(belief_set=belief_set, value_function=value_function)
 
+            old_max_val_per_belief = None
+
             # 2: Backup, update value function (alpha vector set)
             for _ in range(horizon):
-                value_function = self.backup(belief_set, value_function)
+                old_value_function = copy.deepcopy(value_function)
+                value_function = self.backup(belief_set, old_value_function)
+
                 self._solve_history.append({
                     'value_functions': value_function,
                     'beliefs': belief_set
                 })
                 self._solve_steps_count += 1
+
+                # convergence check
+                max_val_per_belief = np.max(np.matmul(np.array(belief_set), np.array(value_function).T), axis=1)
+                if old_max_val_per_belief is not None:
+                    max_change = np.max(np.abs(max_val_per_belief - old_max_val_per_belief))
+                    if max_change < eps:
+                        print('Converged early...')
+                        self._solved = True
+                        return value_function
+                old_max_val_per_belief = max_val_per_belief
 
         self._solved = True
         return value_function
@@ -603,7 +625,7 @@ class PBVI_Solver(Solver):
                 Parameters:
                         size (int): The figure size and general scaling factor
         '''
-        self.solution.plot(self.model.state_labels, self.model.action_labels, size, (self.explored_beliefs if plot_belief else None))
+        self.solution.plot(size, self.model.state_labels, self.model.action_labels, (self.explored_beliefs if plot_belief else None))
 
 
     def save_history_video(self, custom_name:Union[str,None]=None, compare_with:Union[list, ValueFunction, Self]=[]):

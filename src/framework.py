@@ -1,6 +1,7 @@
 from matplotlib import pyplot as plt
+from matplotlib.patches import Rectangle
 from scipy.optimize import milp, LinearConstraint
-from typing import Self
+from typing import Self, Union
 
 import copy
 import datetime
@@ -46,6 +47,8 @@ class ValueFunction(list[AlphaVector]):
     -------
     prune(level:int=1):
         Provides a ValueFunction where the alpha vector set is pruned with a certain level of pruning.
+    plot(size:int=5, state_list:list[str], action_list:list[str], belief_set):
+        Function to plot the value function for 2- or 3-state models.
     '''
 
     def prune(self, level:int=1) -> Self:
@@ -125,25 +128,41 @@ class ValueFunction(list[AlphaVector]):
         return ValueFunction(alpha_set)
     
 
-    def plot(self, state_list:list[str], action_list:list[str], size:int=5, belief_set=None):
+    def plot(self,
+             size:int=5,
+             state_list:Union[list[str],None]=None,
+             action_list:Union[list[str],None]=None,
+             belief_set=None
+             ):
         '''
         Function to plot out the value function in 2 or 3 dimensions.
 
                 Parameters:
-                        size (int): The actual plot scale
+                        size (int): Default:5, The actual plot scale.
+                        state_list (list[str]): Optional, list of state labels.
+                        action_list (list[str]): Optional, list of action labels.
                         belief_set (list[Belief]): Optional, a set of belief to plot the belief points that were explored.
         '''
         assert len(self) > 0, "Value function is empty, plotting is impossible..."
         dimension = self[0].shape[0]
         assert dimension in [2,3], "Value function plotting only available for MDP's of 2 or 3 states."
 
-        if dimension == 2:
-            self._plot_2D(state_list, action_list, size, belief_set)
-        elif dimension == 3:
-            self._plot_3D(state_list, action_list, size, belief_set)
+        if state_list is None:
+            state_list = [f's_{i}' for i in range(dimension)]
+
+        if action_list is None:
+            actions = []
+            for alpha in self:
+                if alpha.action not in actions:
+                    actions.append(alpha.action)
+
+            action_list = [f'a_{i}' for i in actions]
+
+        func = self._plot_2D if dimension == 2 else self._plot_3D
+        func(size, state_list, action_list, belief_set)
 
 
-    def _plot_2D(self, state_list, action_list, size=5, belief_set=None):
+    def _plot_2D(self, size, state_list, action_list, belief_set=None):
         x = np.linspace(0, 1, 100)
         colors = plt.get_cmap('Set1').colors # type: ignore
 
@@ -164,6 +183,18 @@ class ValueFunction(list[AlphaVector]):
         for i, alpha in enumerate(self):
             ax1.plot(x[i,:], y[i,:], color=colors[alpha.action]) # type: ignore
 
+        # X-axis setting
+        ticks = [0,0.25,0.5,0.75,1]
+        x_ticks = [str(t) for t in ticks]
+        x_ticks[0] = state_list[0]
+        x_ticks[-1] = state_list[1]
+
+        ax1.set_xticks(ticks, x_ticks) # type: ignore
+
+        # Action legend
+        proxy = [Rectangle((0,0),1,1,fc = colors[a]) for a in range(len(action_list))]
+        ax1.legend(proxy, action_list) # type: ignore
+
         # Belief plotting
         if belief_set is not None:
             beliefs_x = np.array(belief_set)[:,1]
@@ -174,7 +205,7 @@ class ValueFunction(list[AlphaVector]):
         plt.show()
 
 
-    def _plot_3D(self, state_list, action_list, size=5, belief_set=None):
+    def _plot_3D(self, size, state_list, action_list, belief_set=None):
 
         def get_alpha_vect_z(xx, yy, alpha_vect):
             x0, y0, z0 = [0, 0, alpha_vect[0]]
@@ -253,7 +284,7 @@ class ValueFunction(list[AlphaVector]):
         if belief_set is not None:
             belief_points = np.array(belief_set)[:,1:]
                     
-        fig, ((ax0, ax1),(ax2,ax3)) = plt.subplots(2, 2, figsize=(size*4,size*3.5), sharex=True, sharey=True)
+        fig, ((ax1, ax2),(ax3,ax4)) = plt.subplots(2, 2, figsize=(size*4,size*3.5), sharex=True, sharey=True)
 
         # Set ticks
         ticks = [0,0.25,0.5,0.75,1]
@@ -265,38 +296,34 @@ class ValueFunction(list[AlphaVector]):
         y_ticks[0] = ''
         y_ticks[-1] = state_list[2]
 
-        plt.setp([ax0,ax1,ax2,ax3], xticks=ticks, xticklabels=x_ticks, yticks=ticks, yticklabels=y_ticks)
+        plt.setp([ax1,ax2,ax3,ax4], xticks=ticks, xticklabels=x_ticks, yticks=ticks, yticklabels=y_ticks)
 
         # Value function ax
-        ax0.set_title("Value function")
-        ax0_plot = ax0.contourf(x, y, max_z, 100, cmap="viridis")
-        plt.colorbar(ax0_plot, ax=ax0)
-        if belief_points is not None:
-            ax0.scatter(belief_points[:,0], belief_points[:,1], s=1, c='red')
+        ax1.set_title("Value function")
+        ax1_plot = ax1.contourf(x, y, max_z, 100, cmap="viridis")
+        plt.colorbar(ax1_plot, ax=ax1)
 
         # Alpha planes ax
-        ax1.set_title("Alpha planes")
-        ax1_plot = ax1.contourf(x, y, plane, 100, cmap="viridis")
-        plt.colorbar(ax1_plot, ax=ax1)
-        if belief_points is not None:
-            ax1.scatter(belief_points[:,0], belief_points[:,1], s=1, c='red')
+        ax2.set_title("Alpha planes")
+        ax2_plot = ax2.contourf(x, y, plane, 100, cmap="viridis")
+        plt.colorbar(ax2_plot, ax=ax2)
         
         # Gradient of planes ax
-        ax2.set_title("Gradients of planes")
-        ax2_plot = ax2.contourf(x, y, gradients, 100, cmap="Blues")
-        plt.colorbar(ax2_plot, ax=ax2)
-        if belief_points is not None:
-            ax2.scatter(belief_points[:,0], belief_points[:,1], s=1, c='red')
+        ax3.set_title("Gradients of planes")
+        ax3_plot = ax3.contourf(x, y, gradients, 100, cmap="Blues")
+        plt.colorbar(ax3_plot, ax=ax3)
 
         # Action policy ax
-        # actions colors
         colors = plt.get_cmap('Set1').colors #type: ignore
 
-        ax3.set_title("Action policy")
-        ax3_plot = ax3.contourf(x, y, best_a, 1, colors=colors)
-        plt.colorbar(ax3_plot, ax=ax3)
+        ax4.set_title("Action policy")
+        ax4.contourf(x, y, best_a, 1, colors=colors)
+        proxy = [Rectangle((0,0),1,1,fc = colors[a]) for a in range(len(action_list))]
+        ax4.legend(proxy, action_list)
+
         if belief_points is not None:
-            ax3.scatter(belief_points[:,0], belief_points[:,1], s=1, c='red')
+            for ax in [ax1,ax2,ax3,ax4]:
+                ax.scatter(belief_points[:,0], belief_points[:,1], s=1, c='black')
 
         plt.show()
 

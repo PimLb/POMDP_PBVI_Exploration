@@ -119,6 +119,6 @@ class VI_Solver(Solver):
 
             self._solve_history.append({'value_functions': ValueFunction(V)})
                 
-            avg_delta = np.average(np.abs(V_opt - old_V_opt))
+            avg_delta = np.max(np.abs(V_opt - old_V_opt))
             if avg_delta < eps:
                 return ValueFunction(V)
