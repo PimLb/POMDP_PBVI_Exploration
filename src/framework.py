@@ -343,5 +343,5 @@ class Solver:
     @property
     def solution(self) -> ValueFunction:
         assert self._solved, "solve() has to be run first..."
-        return self._solve_history[-1]['value_functions']
+        return self._solve_history[-1]['value_function']
 

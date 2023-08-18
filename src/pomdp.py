@@ -1,6 +1,7 @@
 from matplotlib import pyplot as plt
 from matplotlib import animation
 from matplotlib.animation import FuncAnimation
+from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 from typing import Self, Union
 
@@ -444,7 +445,6 @@ class PBVI_Solver(Solver):
         return []
 
 
-    # TODO: Add params and use params for video name
     def solve(self,
               expansions:int,
               horizon:int,
@@ -499,10 +499,15 @@ class PBVI_Solver(Solver):
 
         # History tracking
         self._solve_history = [{
-            'value_functions': value_function,
+            'value_function': value_function,
             'beliefs': belief_set
         }]
         self._solve_run_ts = datetime.datetime.now()
+        self._solve_params = {
+            'expand': expand_function,
+            'gamma': gamma,
+            'eps': eps
+        }
         self._solve_steps_count = 0
 
         # Loop
@@ -520,7 +525,7 @@ class PBVI_Solver(Solver):
                 value_function = self.backup(belief_set, old_value_function, gamma)
 
                 self._solve_history.append({
-                    'value_functions': value_function,
+                    'value_function': value_function,
                     'beliefs': belief_set
                 })
                 self._solve_steps_count += 1
@@ -689,10 +694,14 @@ class PBVI_Solver(Solver):
             print('Not implemented...')
 
 
-    def _save_history_video_2D(self, custom_name=None, compare_with=[]):
+    def _save_history_video_2D(self, custom_name=None, compare_with=[], graph_names:list[str]=[]):
         # Figure definition
         grid_spec = {'height_ratios': [19,1]}
         fig, (ax1,ax2) = plt.subplots(2, 1, sharex=True, gridspec_kw=grid_spec)
+
+        # Figure title
+        fig.suptitle(f"{self.model.state_count}-s {self.model.action_count}-a {self.model.observation_count}-o POMDP model solve history", fontsize=16)
+        title = f'{self._solve_params["expand"]} expand strat, {self._solve_params["gamma"]}-gamma, {self._solve_params["eps"]}-eps '
 
         # X-axis setting
         ticks = [0,0.25,0.5,0.75,1]
@@ -716,37 +725,52 @@ class PBVI_Solver(Solver):
         assert len(solver_list) <= len(line_types), f"Plotting can only happen for up to {len(line_types)} solvers..."
         line_types = line_types[:len(solver_list)]
 
+        assert len(graph_names) in [0, len(solver_list)], "Not enough graph names provided"
+        if len(graph_names) == 0:
+            graph_names.append('Main graph')
+            for i in range(1,len(solver_list)):
+                graph_names.append(f'Comparison {i}')
 
         def plot_on_ax(solver, frame_i:int, ax, line_type:str):
             if isinstance(solver, ValueFunction):
                 value_function = solver
             else:
-                assert solver._solve_history is not None
                 frame_i = frame_i if frame_i <= solver._solve_steps_count else (solver._solve_steps_count - 1)
                 history_i = solver._solve_history[frame_i]
-                value_function = history_i['value_functions']
+                value_function = history_i['value_function']
 
             alpha_vects = np.array(value_function)
-
-            m = alpha_vects[:,1] - alpha_vects[:,0] # type: ignore
+            m = np.subtract(alpha_vects[:,1], alpha_vects[:,0])
             m = m.reshape(m.shape[0],1)
 
             x = np.linspace(0, 1, 100)
             x = x.reshape((1,x.shape[0])).repeat(m.shape[0],axis=0)
-            y = (m*x) + alpha_vects[:,0].reshape(m.shape[0],1)
+            y = np.add((m*x), alpha_vects[:,0].reshape(m.shape[0],1))
 
             for i, alpha in enumerate(value_function):
-                ax.plot(x[i,:], y[i,:], line_type, color=colors[alpha.action]) # type: ignore
+                ax.plot(x[i,:], y[i,:], line_type, color=colors[alpha.action])
 
         def animate(frame_i):
             ax1.clear()
             ax2.clear()
 
-            ax1.legend(proxy, self.model.action_labels, loc='upper center')
+            # Subtitle
+            ax1.set_title(title + f'(Frame {frame_i})')
+
+            # Color legend
+            leg1 = ax1.legend(proxy, self.model.action_labels, loc='upper center')
             ax1.set_xticks(ticks, x_ticks)
+            ax1.add_artist(leg1)
+
+            # Line legend
+            lines = []
+            point = self._solve_history[frame_i]['value_function'][0][0]
+            for l in line_types:
+                lines.append(Line2D([0,point],[0,point],linestyle=l))
+            ax1.legend(lines, graph_names, loc='lower center')
 
             # Alpha vector plotting
-            for solver, line_type in zip(([self] + compare_with_list), line_types):
+            for solver, line_type in zip(solver_list, line_types):
                 plot_on_ax(solver, frame_i, ax1, line_type)
 
             # Belief plotting
@@ -762,11 +786,14 @@ class PBVI_Solver(Solver):
         max_steps = max([solver._solve_steps_count for solver in solver_list if not isinstance(solver,ValueFunction)])
         ani = FuncAnimation(fig, animate, frames=max_steps, interval=500, repeat=False)
         
-        # Title
+        # File Title
         assert self._solved
         solved_time = self._solve_run_ts.strftime('%Y%m%d_%H%M%S')
 
-        video_title = f'{custom_name}-' if custom_name is not None else f's_{self.model.state_count}-a_{self.model.action_count}-'
+        video_title = f'{custom_name}-' if custom_name is not None else '' # Base
+        video_title += f's{self.model.state_count}-a{self.model.action_count}-' # Model params
+        video_title += f'{self._solve_params["expand"]}-' # Expand function used
+        video_title += f'g{self._solve_params["gamma"]}-e{self._solve_params["eps"]}-' # Solving params
         video_title += f'{solved_time}.mp4'
 
         # Video saving

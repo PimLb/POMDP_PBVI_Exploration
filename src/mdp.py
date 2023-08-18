@@ -99,7 +99,7 @@ class VI_Solver(Solver):
 
         self._solve_run_ts = datetime.datetime.now()
         self._solve_steps_count = 0
-        self._solve_history = [{'value_functions': V}]
+        self._solve_history = [{'value_function': V}]
 
         while (not converged) and (self._solve_steps_count < horizon):
             self._solve_steps_count += 1
@@ -117,7 +117,7 @@ class VI_Solver(Solver):
 
             V_opt = np.max(np.array(V), axis=1)
 
-            self._solve_history.append({'value_functions': ValueFunction(V)})
+            self._solve_history.append({'value_function': ValueFunction(V)})
                 
             avg_delta = np.max(np.abs(V_opt - old_V_opt))
             if avg_delta < eps:
