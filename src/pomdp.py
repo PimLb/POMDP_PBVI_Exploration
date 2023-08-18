@@ -1,6 +1,7 @@
 from matplotlib import pyplot as plt
 from matplotlib import animation
 from matplotlib.animation import FuncAnimation
+from matplotlib.patches import Rectangle
 from typing import Self, Union
 
 import copy
@@ -193,7 +194,8 @@ class PBVI_Solver(Solver):
         Greedy error reduction, belief expansion strategy function.
     expand(expand_function:str='ssea', **kwargs):
         The general expand function, used to call the other expand_* functions.
-    solve(expansions:int, horizon:int, expand_function:str='ssea', initial_belief=None):
+    solve(expansions:int, horizon:int, initial_belief:Union[list[Belief], Belief, None]=None, initial_value_function:Union[ValueFunction,None]=None, 
+            gamma:float=0.9, eps:float=0.001, expand_function:str='ssea', expand_function_params):
         The general solving function that will call iteratively the expand and the backup function.
     plot_belief_set(size:int=15):
         Once solve() has been run, the explored beliefs can be plot for 2- and 3- state models.
@@ -330,7 +332,7 @@ class PBVI_Solver(Solver):
                 Parameters:
                         belief_set (list[Belief]): list of beliefs to expand on.
                         value_function (ValueFunction): Used to find the best action knowing the belief.
-                        epsilon (float): Parameter tuning how often we take a greedy approach and how often we move randomly.
+                        eps (float): Parameter tuning how often we take a greedy approach and how often we move randomly.
 
                 Returns:
                         belief_set_new (list[Belief]): union of the belief_set and the expansions of the beliefs in the belief_set
@@ -414,7 +416,7 @@ class PBVI_Solver(Solver):
             - Stochastic Simulation with Random Action (ssra)
             - Stochastic Simulation with Greedy Action (ssga)
             - Stochastic Simulation with Exploratory Action (ssea)
-            - Greedy Action Reduction (ger) - not implemented
+            - Greedy Error Reduction (ger) - not implemented
 
                 Parameters:
                         expand_function (str): One of ssra, ssga, ssea, ger; the expansion strategy
@@ -442,29 +444,58 @@ class PBVI_Solver(Solver):
         return []
 
 
-    def solve(self, expansions:int, horizon:int, expand_function:str='ssea', initial_belief=None, eps:float=0.001) -> ValueFunction:
+    # TODO: Add params and use params for video name
+    def solve(self,
+              expansions:int,
+              horizon:int,
+              initial_belief:Union[list[Belief], Belief, None]=None,
+              initial_value_function:Union[ValueFunction,None]=None,
+              gamma:float=0.9,
+              eps:float=0.001,
+              expand_function:str='ssea',
+              expand_function_params:dict={}
+              ) -> ValueFunction:
         '''
         Main loop of the Point-Based Value Iteration algorithm.
         It consists in 2 steps, Backup and Expand.
         1. Expand: Expands the belief set base with a expansion strategy given by the parameter expand_function
         2. Backup: Updates the alpha vectors based on the current belief set
 
+        Depending on the expand strategy chosen, various extra parameters are needed. List of the available expand strategies and their extra required parameters:
+            - ssra: Stochastic Simulation with Random Action. Extra params: /
+            - ssga: Stochastic Simulation with Greedy Action. Extra params: epsilon (float)
+            - ssea: Stochastic Simulation with Exploratory Action. Extra params: /
+            - ger: Greedy Error Reduction. Extra params: /
+
                 Parameters:
                         expansions (int): How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
                         horizon (int): How many times the alpha vector set must be updated every time the belief set is expanded.
-                
+                        initial_belief (list[Belief], Belief) - Optional: An initial list of beliefs to start with.
+                        initial_value_function (ValueFunction) - Optional: An initial value function to start the solving process with.
+                        gamma (float) - default 0.9: The learning rate, used to control how fast the value function will change after the each iterations.
+                        eps (float) - default 0.001: The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.
+                        expand_function (str) - default ssea: The type of expand strategy to use to expand the belief set.
+                        **kwargs: Other parameters will be directly sent to the expand function's particular parameters.
+
                 Returns:
                         value_function (ValueFunction): The alpha vectors approximating the value function.
 
         '''
+
+        # Initial belief
         if initial_belief is None:
             uni_prob = np.ones(self.model.state_count) / self.model.state_count
-            initial_belief = Belief(self.model, uni_prob)
+            belief_set = [Belief(self.model, uni_prob)]
+        elif isinstance(initial_belief, list):
+            belief_set = initial_belief
         else:
-            initial_belief = Belief(self.model, np.array(initial_belief))
+            belief_set = [Belief(self.model, np.array(initial_belief))]
         
-        belief_set = [initial_belief]
-        value_function = ValueFunction([AlphaVector(self.model.reward_table[:,a], a) for a in self.model.actions])
+        # Initial value function
+        if initial_value_function is None:
+            value_function = ValueFunction([AlphaVector(self.model.reward_table[:,a], a) for a in self.model.actions])
+        else:
+            value_function = initial_value_function
 
         # History tracking
         self._solve_history = [{
@@ -477,14 +508,16 @@ class PBVI_Solver(Solver):
         # Loop
         for _ in range(expansions):
             # 1: Expand belief set
-            belief_set = self.expand(belief_set=belief_set, value_function=value_function)
+            expand_function_params['belief_set'] = belief_set
+            expand_function_params['value_function'] = value_function
+            belief_set = self.expand(expand_function=expand_function, **expand_function_params)
 
             old_max_val_per_belief = None
 
             # 2: Backup, update value function (alpha vector set)
             for _ in range(horizon):
                 old_value_function = copy.deepcopy(value_function)
-                value_function = self.backup(belief_set, old_value_function)
+                value_function = self.backup(belief_set, old_value_function, gamma)
 
                 self._solve_history.append({
                     'value_functions': value_function,
@@ -535,7 +568,14 @@ class PBVI_Solver(Solver):
         plt.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c=list(range(beliefs_x.shape[0])), cmap='Blues')
         ax = plt.gca()
         ax.get_yaxis().set_visible(False)
-        plt.xticks(np.arange(0, 1.1, 0.1))
+
+        # X-axis setting
+        ticks = [0,0.25,0.5,0.75,1]
+        x_ticks = [str(t) for t in ticks]
+        x_ticks[0] = self.model.state_labels[0]
+        x_ticks[-1] = self.model.state_labels[1]
+
+        plt.xticks(ticks, x_ticks)
         plt.show()
 
 
@@ -570,7 +610,8 @@ class PBVI_Solver(Solver):
             return tripts
         
         # Plotting the simplex 
-        def plotSimplex(points, fig=None, 
+        def plotSimplex(points,
+                        fig=None,
                         vertexlabels=['s_0','s_1','s_2'],
                         **kwargs):
             """
@@ -600,7 +641,7 @@ class PBVI_Solver(Solver):
             fig.gca().set_xlim(-0.2, 1.2)
             fig.gca().set_ylim(-0.2, 1.2)
 
-            return fig    
+            return fig
 
         # Actual plot
         belief_set = self.explored_beliefs
@@ -653,8 +694,17 @@ class PBVI_Solver(Solver):
         grid_spec = {'height_ratios': [19,1]}
         fig, (ax1,ax2) = plt.subplots(2, 1, sharex=True, gridspec_kw=grid_spec)
 
+        # X-axis setting
+        ticks = [0,0.25,0.5,0.75,1]
+        x_ticks = [str(t) for t in ticks]
+        x_ticks[0] = self.model.state_labels[0]
+        x_ticks[-1] = self.model.state_labels[1]
+
+        # Colors and lines
         colors = plt.get_cmap('Set1').colors #type: ignore
         line_types = ['-', '--', '-.', ':']
+
+        proxy = [Rectangle((0,0),1,1,fc = colors[a]) for a in range(self.model.action_count)]
 
         # Solver list
         if isinstance(compare_with, ValueFunction) or isinstance(compare_with, PBVI_Solver):
@@ -690,6 +740,10 @@ class PBVI_Solver(Solver):
 
         def animate(frame_i):
             ax1.clear()
+            ax2.clear()
+
+            ax1.legend(proxy, self.model.action_labels, loc='upper center')
+            ax1.set_xticks(ticks, x_ticks)
 
             # Alpha vector plotting
             for solver, line_type in zip(([self] + compare_with_list), line_types):
@@ -700,7 +754,6 @@ class PBVI_Solver(Solver):
             history_i = self._solve_history[frame_i]
 
             beliefs_x = np.array(history_i['beliefs'])[:,1]
-            ax2.clear()
             ax2.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
             ax2.get_yaxis().set_visible(False)
             ax2.axhline(0, color='black')
