@@ -71,7 +71,7 @@ class POMDP_Model(MDP_Model):
             self.observation_table = random_probs / np.sum(random_probs, axis=2, keepdims=True)
         else:
             self.observation_table = np.array(observation_table)
-            assert self.observation_table.shape == (self.state_count, self.action_count, self.observation_count), "observations table doesnt have the right shape, it should be SxAxS"
+            assert self.observation_table.shape == (self.state_count, self.action_count, self.observation_count), "observations table doesnt have the right shape, it should be SxAxO"
     
 
     def observe(self, s_p:int, a:int) -> int:
