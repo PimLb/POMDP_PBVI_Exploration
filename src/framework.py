@@ -9,6 +9,10 @@ import numpy as np
 import random
 
 
+class Model:
+    pass
+
+
 class AlphaVector(np.ndarray):
     '''
     A class to represent an Alpha Vector, a vector representing a plane in |S| dimension for POMDP models.
@@ -293,7 +297,7 @@ class ValueFunction(list[AlphaVector]):
         x_ticks[-1] = state_list[1]
         
         y_ticks = [str(t) for t in ticks]
-        y_ticks[0] = ''
+        y_ticks[0] = state_list[0]
         y_ticks[-1] = state_list[2]
 
         plt.setp([ax1,ax2,ax3,ax4], xticks=ticks, xticklabels=x_ticks, yticks=ticks, yticklabels=y_ticks)
@@ -345,3 +349,7 @@ class Solver:
         assert self._solved, "solve() has to be run first..."
         return self._solve_history[-1]['value_function']
 
+
+class Agent:
+    def __init__(self):
+        self._trained = False

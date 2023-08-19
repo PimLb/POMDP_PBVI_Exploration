@@ -3,7 +3,7 @@ from matplotlib import animation
 from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
-from typing import Self, Union
+from typing import Self, Union, Set
 
 import copy
 import datetime
@@ -38,6 +38,8 @@ class POMDP_Model(MDP_Model):
         The reward matrix, has to be |S| x |A|. If none is provided, it will be randomly generated.
     observation_table:
         The observation matrix, has to be |S| x |A| x |O|. If none is provided, it will be randomly generated.
+    probabilistic_rewards: bool
+        Whether the rewards provided are probabilistic or pure rewards. If probabilist 0 or 1 will be the reward with a certain probability.
 
     Methods
     -------
@@ -52,10 +54,11 @@ class POMDP_Model(MDP_Model):
                  observations:Union[int, list],
                  transitions=None,
                  rewards=None,
-                 observation_table=None
+                 observation_table=None,
+                 probabilistic_rewards:bool=False
                  ):
         
-        super(POMDP_Model, self).__init__(states, actions, transitions, rewards)
+        super(POMDP_Model, self).__init__(states, actions, transitions, rewards, probabilistic_rewards)
 
         if isinstance(observations, int):
             self.observation_labels = [f'o_{i}' for i in range(observations)]
@@ -277,7 +280,7 @@ class PBVI_Solver(Solver):
                     # Sum of the alpha_obs vectors
                     obs_alpha_sum += best_alpha_o
                         
-                alpha_a_vect = self.model.reward_table[:,a] + obs_alpha_sum
+                alpha_a_vect = self.model.expected_rewards_table[:,a] + obs_alpha_sum
 
                 # Step 3
                 val = np.dot(alpha_a_vect, b)
@@ -493,7 +496,7 @@ class PBVI_Solver(Solver):
         
         # Initial value function
         if initial_value_function is None:
-            value_function = ValueFunction([AlphaVector(self.model.reward_table[:,a], a) for a in self.model.actions])
+            value_function = ValueFunction([AlphaVector(self.model.expected_rewards_table[:,a], a) for a in self.model.actions])
         else:
             value_function = initial_value_function
 
@@ -674,7 +677,11 @@ class PBVI_Solver(Solver):
         self.solution.plot(size, self.model.state_labels, self.model.action_labels, (self.explored_beliefs if plot_belief else None))
 
 
-    def save_history_video(self, custom_name:Union[str,None]=None, compare_with:Union[list, ValueFunction, Self]=[]):
+    def save_history_video(self,
+                           custom_name:Union[str,None]=None,
+                           compare_with:Union[list, ValueFunction, Solver]=[],
+                           graph_names:list[str]=[]
+                           ) -> None:
         '''
         Function to generate a video of the training history. Another solved solver or list of solvers can be put in the 'compare_with' parameter.
         These other solver's value function will be overlapped with the 1st value function.
@@ -686,15 +693,16 @@ class PBVI_Solver(Solver):
                 Parameters:
                         custom_name (str): Optional, the name the video will be saved with.
                         compare_with (PBVI, ValueFunction, list): Optional, value functions or other solvers to plot against the current solver's history
+                        graph_names (list[str]): Optional, names of the graphs for the legend of which graph is being plot.
         '''
         assert self.model.state_count in [2,3], "Can't plot for models with state count other than 2 or 3"
         if self.model.state_count == 2:
-            self._save_history_video_2D(custom_name, compare_with)
+            self._save_history_video_2D(custom_name, compare_with, copy.copy(graph_names))
         elif self.model.state_count == 3:
             print('Not implemented...')
 
 
-    def _save_history_video_2D(self, custom_name=None, compare_with=[], graph_names:list[str]=[]):
+    def _save_history_video_2D(self, custom_name=None, compare_with=[], graph_names=[]):
         # Figure definition
         grid_spec = {'height_ratios': [19,1]}
         fig, (ax1,ax2) = plt.subplots(2, 1, sharex=True, gridspec_kw=grid_spec)
@@ -716,7 +724,7 @@ class PBVI_Solver(Solver):
         proxy = [Rectangle((0,0),1,1,fc = colors[a]) for a in range(self.model.action_count)]
 
         # Solver list
-        if isinstance(compare_with, ValueFunction) or isinstance(compare_with, PBVI_Solver):
+        if isinstance(compare_with, ValueFunction) or isinstance(compare_with, Solver):
             compare_with_list = [compare_with] # Single item
         else:
             compare_with_list = compare_with # Already group of items
@@ -735,7 +743,7 @@ class PBVI_Solver(Solver):
             if isinstance(solver, ValueFunction):
                 value_function = solver
             else:
-                frame_i = frame_i if frame_i <= solver._solve_steps_count else (solver._solve_steps_count - 1)
+                frame_i = frame_i if frame_i < solver._solve_steps_count else (solver._solve_steps_count - 1)
                 history_i = solver._solve_history[frame_i]
                 value_function = history_i['value_function']
 
@@ -754,6 +762,8 @@ class PBVI_Solver(Solver):
             ax1.clear()
             ax2.clear()
 
+            self_frame_i = frame_i if frame_i < self._solve_steps_count else (self._solve_steps_count - 1)
+
             # Subtitle
             ax1.set_title(title + f'(Frame {frame_i})')
 
@@ -764,7 +774,7 @@ class PBVI_Solver(Solver):
 
             # Line legend
             lines = []
-            point = self._solve_history[frame_i]['value_function'][0][0]
+            point = self._solve_history[self_frame_i]['value_function'][0][0]
             for l in line_types:
                 lines.append(Line2D([0,point],[0,point],linestyle=l))
             ax1.legend(lines, graph_names, loc='lower center')
@@ -775,7 +785,7 @@ class PBVI_Solver(Solver):
 
             # Belief plotting
             assert self._solved
-            history_i = self._solve_history[frame_i]
+            history_i = self._solve_history[self_frame_i]
 
             beliefs_x = np.array(history_i['beliefs'])[:,1]
             ax2.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
@@ -801,3 +811,53 @@ class PBVI_Solver(Solver):
         ani.save('./Results/' + video_title, writer=writervideo)
         print(f'Video saved at \'Results/{video_title}\'...')
         plt.close()
+
+
+class Simulation:
+    '''
+    Class to reprensent a simulation process for a POMDP model.
+    An initial random state is given and action can be applied to the model that impact the actual state of the agent along with returning a reward and an observation.
+
+    ...
+    Attributes
+    ----------
+    model: POMDP_Model
+        The POMDP model the simulation will be applied on.
+
+    Methods
+    -------
+    initialize_simulation():
+        The function to initialize the simulation with a random state for the agent.
+    run_action(a:int):
+        Runs the action a on the current state of the agent.
+    '''
+
+    def __init__(self, model:POMDP_Model) -> None:
+        self.model = model
+
+        self.initialize_simulation()
+
+
+    def initialize_simulation(self) -> None:
+        '''
+        Function to initialize the simulation by setting a random start state to the agent.
+        '''
+        self.agent_state = random.choice(self.model.states)
+
+
+    def run_action(self, a:int) -> tuple[int, Union[int,float]]:
+        '''
+        Run one step of simulation with action a.
+
+                Parameters:
+                        a (int): the action to take in the simulation.
+
+                Returns:
+                        o (int): the observation following the action applied on the previous state
+                        r (int, float): the reward given when doing action a in state s and landing in state s_p. (s and s_p are hidden from agent)
+        '''
+        s = self.agent_state
+        s_p = self.model.transition(s,a)
+        r = self.model.reward(s,a,s_p)
+        o = self.model.observe(s_p, a)
+        return (o,r)
