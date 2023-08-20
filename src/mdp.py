@@ -133,29 +133,31 @@ class MDP_SolverHistory(list[dict]):
 
 
 class VI_Solver:
-    def __init__(self, model: MDP_Model):
+    def __init__(self, horizon:int=10000, gamma:float=0.99, eps:float=0.001):
         super().__init__()
-        self.model = model
+        self.horizon = horizon
+        self.gamma = gamma
+        self.eps = eps
 
 
-    def solve(self, horizon:int=10000, gamma:float=0.99, eps:float=0.001) -> tuple[ValueFunction, MDP_SolverHistory]:
+    def solve(self, model: MDP_Model) -> tuple[ValueFunction, MDP_SolverHistory]:
         # Initiallize V as a |S| x |A| matrix of the reward expected when being in state s and taking action a
-        V = ValueFunction([AlphaVector(self.model.expected_rewards_table[:,a], a) for a in self.model.actions])
+        V = ValueFunction([AlphaVector(model.expected_rewards_table[:,a], a) for a in model.actions])
         V_opt = V[0]
         converged = False
 
-        solve_history = MDP_SolverHistory(self.model)
+        solve_history = MDP_SolverHistory(model)
         solve_history.append({'value_function': V})
 
-        while (not converged) and (len(solve_history) <= horizon):
+        while (not converged) and (len(solve_history) <= self.horizon):
             old_V_opt = copy.deepcopy(V_opt)
 
             V = []
-            for a in self.model.actions:
+            for a in model.actions:
                 alpha_vect = []
-                for s in self.model.states:
-                    summer = sum(self.model.transition_table[s, a, s_p] * old_V_opt[s_p] for s_p in self.model.states)
-                    alpha_vect.append(self.model.expected_rewards_table[s,a] + (gamma * summer))
+                for s in model.states:
+                    summer = sum(model.transition_table[s, a, s_p] * old_V_opt[s_p] for s_p in model.states)
+                    alpha_vect.append(model.expected_rewards_table[s,a] + (self.gamma * summer))
 
                 V.append(AlphaVector(alpha_vect, a))
 
@@ -164,7 +166,7 @@ class VI_Solver:
             solve_history.append({'value_function': ValueFunction(V)})
                 
             avg_delta = np.max(np.abs(V_opt - old_V_opt))
-            if avg_delta < eps:
+            if avg_delta < self.eps:
                 break
 
         return ValueFunction(V), solve_history

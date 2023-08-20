@@ -15,7 +15,7 @@ import matplotlib.colors as C
 import math
 import random
 
-from src.framework import AlphaVector, ValueFunction
+from src.framework import AlphaVector, ValueFunction, Agent
 from src.mdp import MDP_Model, MDP_SolverHistory
 
 class POMDP_Model(MDP_Model):
@@ -174,6 +174,15 @@ class Belief(np.ndarray):
 
 
 class POMDP_SolverHistory(MDP_SolverHistory):
+    '''
+    
+    plot_belief_set(size:int=15):
+        Once solve() has been run, the explored beliefs can be plot for 2- and 3- state models.
+    plot_solution(size:int=5, plot_belief:bool=True):
+        Once solve() has been run, the value function solution can be plot for 2- and 3- state models.
+    save_history_video(custom_name:Union[str,None]=None, compare_with:Union[list, ValueFunction, Self]=[]):
+        Once the solve has been run, we can save a video of the history of the solving process.
+    '''
     def __init__(self, model, **params):
         super().__init__(model, **params)
 
@@ -447,39 +456,54 @@ class PBVI_Solver:
     ...
     Attributes
     ----------
-    model: POMDP_Model
-        The POMDP model the solver will be applied on.
+    expansions: int
+        How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
+    horizon: int
+        How many times the alpha vector set must be updated every time the belief set is expanded.
+    gamma: float (default 0.9)
+        The learning rate, used to control how fast the value function will change after the each iterations.
+    eps: float (default 0.001)
+        The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.
+    expand_function: str (default 'ssea')
+        The type of expand strategy to use to expand the belief set.
+    expand_function_params: dict (Optional)
+        Other required parameters to be sent to the expand function.
 
     Methods
     -------
-    backup(belief_set:list[Belief], alpha_set:list[AlphaVector], discount_factor:float=0.9):
+    backup(model:POMDP_Model, belief_set:list[Belief], alpha_set:list[AlphaVector], discount_factor:float=0.9):
         The backup function, responsible to update the alpha vector set.
-    expand_ssra(belief_set:list[Belief]):
+    expand_ssra(model:POMDP_Model, belief_set:list[Belief]):
         Random action, belief expansion strategy function.
-    expand_ssga(belief_set:list[Belief], alpha_set:list[AlphaVector], eps:float=0.1):
+    expand_ssga(model:POMDP_Model, belief_set:list[Belief], alpha_set:list[AlphaVector], eps:float=0.1):
         Expsilon greedy action, belief expansion strategy function.
-    expand_ssea(belief_set:list[Belief], alpha_set:list[AlphaVector]):
+    expand_ssea(model:POMDP_Model, belief_set:list[Belief], alpha_set:list[AlphaVector]):
         Exploratory action, belief expansion strategy function.
-    expand_ger(belief_set, alpha_set):
+    expand_ger(model:POMDP_Model, belief_set, alpha_set):
         Greedy error reduction, belief expansion strategy function.
-    expand(expand_function:str='ssea', **kwargs):
+    expand():
         The general expand function, used to call the other expand_* functions.
-    solve(expansions:int, horizon:int, initial_belief:Union[list[Belief], Belief, None]=None, initial_value_function:Union[ValueFunction,None]=None, 
-            gamma:float=0.9, eps:float=0.001, expand_function:str='ssea', expand_function_params):
+    solve(model:POMDP_Model, initial_belief:Union[list[Belief], Belief, None]=None, initial_value_function:Union[ValueFunction,None]=None):
         The general solving function that will call iteratively the expand and the backup function.
-    plot_belief_set(size:int=15):
-        Once solve() has been run, the explored beliefs can be plot for 2- and 3- state models.
-    plot_solution(size:int=5, plot_belief:bool=True):
-        Once solve() has been run, the value function solution can be plot for 2- and 3- state models.
-    save_history_video(custom_name:Union[str,None]=None, compare_with:Union[list, ValueFunction, Self]=[]):
-        Once the solve has been run, we can save a video of the history of the solving process.
     '''
-    def __init__(self, model:POMDP_Model):
-        super().__init__()
-        self.model = model
+    def __init__(self,
+                 expansions:int,
+                 horizon:int,
+                 gamma:float=0.9,
+                 eps:float=0.001,
+                 expand_function:str='ssea',
+                 expand_function_params:dict={}):
+
+        self.expansions = expansions
+        self.horizon = horizon
+        self.gamma = gamma
+        self.eps = eps
+        self.expand_function = expand_function
+        self.expand_function_params = expand_function_params
 
 
-    def backup(self, belief_set:list[Belief], value_function:ValueFunction, gamma:float=0.9) -> ValueFunction:
+
+    def backup(self, model:POMDP_Model, belief_set:list[Belief], value_function:ValueFunction) -> ValueFunction:
         '''
         This function has purpose to update the set of alpha vectors. It does so in 3 steps:
         1. It creates projections from each alpha vector for each possible action and each possible observation
@@ -490,6 +514,7 @@ class PBVI_Solver:
         The alpha vectors are also pruned to avoid duplicates and remove dominated ones.
 
                 Parameters:
+                        model (POMDP): The model on which to run the backup method on.
                         belief_set (list[Belief]): The belief set to use to generate the new alpha vectors with.
                         alpha_set (ValueFunction): The alpha vectors to generate the new set from.
                         gamma (float): The discount factor used for training, default: 0.9.
@@ -500,17 +525,17 @@ class PBVI_Solver:
         
         # Step 1
         gamma_a_o_t = {}
-        for a in self.model.actions:
-            for o in self.model.observations:
+        for a in model.actions:
+            for o in model.observations:
                 alpa_a_o_set = []
                 
                 for alpha_i in value_function:
                     alpa_a_o_vect = []
                     
-                    for s in self.model.states:
-                        products = [(self.model.transition_table[s,a,s_p] * self.model.observation_table[s_p,a,o] * alpha_i[s_p])
-                                    for s_p in self.model.states]
-                        alpa_a_o_vect.append(gamma * sum(products))
+                    for s in model.states:
+                        products = [(model.transition_table[s,a,s_p] * model.observation_table[s_p,a,o] * alpha_i[s_p])
+                                    for s_p in model.states]
+                        alpa_a_o_vect.append(self.gamma * sum(products))
                         
                     alpa_a_o_set.append(alpa_a_o_vect)
                     
@@ -527,14 +552,14 @@ class PBVI_Solver:
             best_alpha = None
             best_alpha_val = -np.inf
             
-            for a in self.model.actions:
+            for a in model.actions:
                 
-                obs_alpha_sum = np.zeros(self.model.state_count)
+                obs_alpha_sum = np.zeros(model.state_count)
                 
-                for o in self.model.observations:
+                for o in model.observations:
                     
                     # Argmax of alphas
-                    best_alpha_o = np.zeros(self.model.state_count)
+                    best_alpha_o = np.zeros(model.state_count)
                     best_alpha_o_val = -np.inf
                     
                     for alpha_o in gamma_a_o_t[a][o]:
@@ -546,7 +571,7 @@ class PBVI_Solver:
                     # Sum of the alpha_obs vectors
                     obs_alpha_sum += best_alpha_o
                         
-                alpha_a_vect = self.model.expected_rewards_table[:,a] + obs_alpha_sum
+                alpha_a_vect = model.expected_rewards_table[:,a] + obs_alpha_sum
 
                 # Step 3
                 val = np.dot(alpha_a_vect, b)
@@ -563,7 +588,7 @@ class PBVI_Solver:
         return new_value_function
     
     
-    def expand_ssra(self, belief_set:list[Belief]) -> list[Belief]:
+    def expand_ssra(self, model:POMDP_Model, belief_set:list[Belief]) -> list[Belief]:
         '''
         Stochastic Simulation with Random Action.
         Simulates running a single-step forward from the beliefs in the "belief_set".
@@ -571,6 +596,7 @@ class PBVI_Solver:
         From this action a and observation o we can update our belief. 
 
                 Parameters:
+                        model (POMDP): the POMDP model on which to expand the belief set on.
                         belief_set (list[Belief]): list of beliefs to expand on.
 
                 Returns:
@@ -580,9 +606,9 @@ class PBVI_Solver:
         
         for b in belief_set:
             s = b.random_state()
-            a = random.choice(self.model.actions)
-            s_p = self.model.transition(s, a)
-            o = self.model.observe(s_p, a)
+            a = random.choice(model.actions)
+            s_p = model.transition(s, a)
+            o = model.observe(s_p, a)
             b_new = b.update(a, o)
             
             belief_set_new.append(b_new)
@@ -590,7 +616,7 @@ class PBVI_Solver:
         return belief_set_new
     
 
-    def expand_ssga(self, belief_set:list[Belief], value_function:ValueFunction, eps:float=0.1) -> list[Belief]:
+    def expand_ssga(self, model:POMDP_Model, belief_set:list[Belief], value_function:ValueFunction, eps:float=0.1) -> list[Belief]:
         '''
         Stochastic Simulation with Greedy Action.
         Simulates running a single-step forward from the beliefs in the "belief_set".
@@ -600,6 +626,7 @@ class PBVI_Solver:
         From this action a and observation o we can update our belief. 
 
                 Parameters:
+                        model (POMDP): the POMDP model on which to expand the belief set on.
                         belief_set (list[Belief]): list of beliefs to expand on.
                         value_function (ValueFunction): Used to find the best action knowing the belief.
                         eps (float): Parameter tuning how often we take a greedy approach and how often we move randomly.
@@ -613,13 +640,13 @@ class PBVI_Solver:
             s = b.random_state()
             
             if random.random() < eps:
-                a = random.choice(self.model.actions)
+                a = random.choice(model.actions)
             else:
                 best_alpha_index = np.argmax([np.dot(alpha, b) for alpha in value_function])
                 a = value_function[best_alpha_index].action
             
-            s_p = self.model.transition(s, a)
-            o = self.model.observe(s_p, a)
+            s_p = model.transition(s, a)
+            o = model.observe(s_p, a)
             b_new = b.update(a, o)
             
             belief_set_new.append(b_new)
@@ -627,7 +654,7 @@ class PBVI_Solver:
         return belief_set_new
     
 
-    def expand_ssea(self, belief_set:list[Belief]) -> list[Belief]:
+    def expand_ssea(self, model:POMDP_Model, belief_set:list[Belief]) -> list[Belief]:
         '''
         Stochastic Simulation with Exploratory Action.
         Simulates running steps forward for each possible action knowing we are a state s, chosen randomly with according to the belief probability.
@@ -636,6 +663,7 @@ class PBVI_Solver:
         Then it takes the belief that is furthest away from other beliefs, meaning it explores the most the belief space.
 
                 Parameters:
+                        model (POMDP): the POMDP model on which to expand the belief set on.
                         belief_set (list[Belief]): list of beliefs to expand on.
 
                 Returns:
@@ -647,10 +675,10 @@ class PBVI_Solver:
             best_b = None
             max_dist = -math.inf
             
-            for a in self.model.actions:
+            for a in model.actions:
                 s = b.random_state()
-                s_p = self.model.transition(s, a)
-                o = self.model.observe(s_p, a)
+                s_p = model.transition(s, a)
+                o = model.observe(s_p, a)
                 b_a = b.update(a, o)
                 
                 # Check distance with other beliefs
@@ -665,11 +693,12 @@ class PBVI_Solver:
         return belief_set_new
     
 
-    def expand_ger(self, belief_set:list[Belief], value_function:ValueFunction) -> list[Belief]:
+    def expand_ger(self, model:POMDP_Model, belief_set:list[Belief], value_function:ValueFunction) -> list[Belief]:
         '''
         Greedy Error Reduction
 
                 Parameters:
+                        model (POMDP): the POMDP model on which to expand the belief set on.
                         belief_set (list[Belief]): list of beliefs to expand on.
                         value_function (ValueFunction): Used to find the best action knowing the belief.
 
@@ -680,49 +709,42 @@ class PBVI_Solver:
         return []
 
 
-    def expand(self, expand_function:str='ssea', **kwargs) -> list[Belief]:
+    def expand(self) -> list[Belief]:
         '''
         Central method to call one of the functions for a particular expansion strategy:
             - Stochastic Simulation with Random Action (ssra)
             - Stochastic Simulation with Greedy Action (ssga)
             - Stochastic Simulation with Exploratory Action (ssea)
             - Greedy Error Reduction (ger) - not implemented
-
-                Parameters:
-                        expand_function (str): One of ssra, ssga, ssea, ger; the expansion strategy
-                        kwargs: The arguments to pass to the expansion function
                 
                 Returns:
                         belief_set_new (list[Belief]): The belief set the expansion function returns. 
         '''
-        if expand_function in 'expand_ssra':
-            args = {arg: kwargs[arg] for arg in ['belief_set'] if arg in kwargs}
+        kwargs = self.expand_function_params
+
+        if self.expand_function in 'expand_ssra':
+            args = {arg: kwargs[arg] for arg in ['model', 'belief_set'] if arg in kwargs}
             return self.expand_ssra(**args)
         
-        elif expand_function in 'expand_ssga':
-            args = {arg: kwargs[arg] for arg in ['belief_set', 'value_function', 'eps'] if arg in kwargs}
+        elif self.expand_function in 'expand_ssga':
+            args = {arg: kwargs[arg] for arg in ['model', 'belief_set', 'value_function', 'eps'] if arg in kwargs}
             return self.expand_ssga(**args)
         
-        elif expand_function in 'expand_ssea':
-            args = {arg: kwargs[arg] for arg in ['belief_set'] if arg in kwargs}
+        elif self.expand_function in 'expand_ssea':
+            args = {arg: kwargs[arg] for arg in ['model', 'belief_set'] if arg in kwargs}
             return self.expand_ssea(**args)
         
-        elif expand_function in 'expand_ger':
-            args = {arg: kwargs[arg] for arg in ['belief_set', 'value_function'] if arg in kwargs}
+        elif self.expand_function in 'expand_ger':
+            args = {arg: kwargs[arg] for arg in ['model', 'belief_set', 'value_function'] if arg in kwargs}
             return self.expand_ger(**args)
         
         return []
 
 
     def solve(self,
-              expansions:int,
-              horizon:int,
+              model:POMDP_Model,
               initial_belief:Union[list[Belief], Belief, None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
-              gamma:float=0.9,
-              eps:float=0.001,
-              expand_function:str='ssea',
-              expand_function_params:dict={}
               ) -> tuple[ValueFunction, POMDP_SolverHistory]:
         '''
         Main loop of the Point-Based Value Iteration algorithm.
@@ -737,14 +759,9 @@ class PBVI_Solver:
             - ger: Greedy Error Reduction. Extra params: /
 
                 Parameters:
-                        expansions (int): How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
-                        horizon (int): How many times the alpha vector set must be updated every time the belief set is expanded.
+                        model (POMDP_Model) - The model to solve.
                         initial_belief (list[Belief], Belief) - Optional: An initial list of beliefs to start with.
                         initial_value_function (ValueFunction) - Optional: An initial value function to start the solving process with.
-                        gamma (float) - default 0.9: The learning rate, used to control how fast the value function will change after the each iterations.
-                        eps (float) - default 0.001: The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.
-                        expand_function (str) - default ssea: The type of expand strategy to use to expand the belief set.
-                        **kwargs: Other parameters will be directly sent to the expand function's particular parameters.
 
                 Returns:
                         value_function (ValueFunction): The alpha vectors approximating the value function.
@@ -753,72 +770,58 @@ class PBVI_Solver:
 
         # Initial belief
         if initial_belief is None:
-            uni_prob = np.ones(self.model.state_count) / self.model.state_count
-            belief_set = [Belief(self.model, uni_prob)]
+            uni_prob = np.ones(model.state_count) / model.state_count
+            belief_set = [Belief(model, uni_prob)]
         elif isinstance(initial_belief, list):
             belief_set = initial_belief
         else:
-            belief_set = [Belief(self.model, np.array(initial_belief))]
+            belief_set = [Belief(model, np.array(initial_belief))]
         
         # Initial value function
         if initial_value_function is None:
-            value_function = ValueFunction([AlphaVector(self.model.expected_rewards_table[:,a], a) for a in self.model.actions])
+            value_function = ValueFunction([AlphaVector(model.expected_rewards_table[:,a], a) for a in model.actions])
         else:
             value_function = initial_value_function
 
         # History tracking
-        solver_history = POMDP_SolverHistory(model=self.model, expand_function=expand_function, gamma=gamma, eps=eps)
+        solver_history = POMDP_SolverHistory(model=model,
+                                             expand_function=self.expand_function,
+                                             gamma=self.gamma,
+                                             eps=self.eps)
         solver_history.append({
             'value_function': value_function,
             'beliefs': belief_set
         })
-        # self._solve_history = [{
-        #     'value_function': value_function,
-        #     'beliefs': belief_set
-        # }]
-        # self._solve_run_ts = datetime.datetime.now()
-        # self._solve_params = {
-        #     'expand': expand_function,
-        #     'gamma': gamma,
-        #     'eps': eps
-        # }
-        # self._solve_steps_count = 0
 
         # Loop
-        for _ in range(expansions):
+        for _ in range(self.expansions):
             # 1: Expand belief set
-            expand_function_params['belief_set'] = belief_set
-            expand_function_params['value_function'] = value_function
-            belief_set = self.expand(expand_function=expand_function, **expand_function_params)
+            self.expand_function_params['model'] = model
+            self.expand_function_params['belief_set'] = belief_set
+            self.expand_function_params['value_function'] = value_function
+            belief_set = self.expand()
 
             old_max_val_per_belief = None
 
             # 2: Backup, update value function (alpha vector set)
-            for _ in range(horizon):
+            for _ in range(self.horizon):
                 old_value_function = copy.deepcopy(value_function)
-                value_function = self.backup(belief_set, old_value_function, gamma)
+                value_function = self.backup(model, belief_set, old_value_function)
 
                 solver_history.append({
                     'value_function': value_function,
                     'beliefs': belief_set
                 })
-                # self._solve_history.append({
-                #     'value_function': value_function,
-                #     'beliefs': belief_set
-                # })
-                # self._solve_steps_count += 1
 
                 # convergence check
                 max_val_per_belief = np.max(np.matmul(np.array(belief_set), np.array(value_function).T), axis=1)
                 if old_max_val_per_belief is not None:
                     max_change = np.max(np.abs(max_val_per_belief - old_max_val_per_belief))
-                    if max_change < eps:
+                    if max_change < self.eps:
                         print('Converged early...')
-                        # self._solved = True
                         return value_function, solver_history
                 old_max_val_per_belief = max_val_per_belief
 
-        # self._solved = True
         return value_function, solver_history
 
 
@@ -870,3 +873,15 @@ class Simulation:
         r = self.model.reward(s,a,s_p)
         o = self.model.observe(s_p, a)
         return (o,r)
+
+
+class POMDP_Agent(Agent):
+    def __init__(self, model):
+        super().__init__()
+
+        self.model = model
+
+
+    def train(self, solver:PBVI_Solver):
+        # solver.solve()
+        pass
