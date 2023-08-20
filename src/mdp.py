@@ -1,14 +1,14 @@
 import random
-from typing import Union
+from typing import Tuple, Union
 
 import copy
 import datetime
 import numpy as np
 
 from src.framework import Model as GeneralModel
-from src.framework import AlphaVector, ValueFunction, Solver
+from src.framework import AlphaVector, ValueFunction
 
-class Model(GeneralModel):
+class MDP_Model(GeneralModel):
     '''
     MDP Model class.
 
@@ -118,28 +118,36 @@ class Model(GeneralModel):
             return 1 if rnd < reward else 0
         else:
             return reward
-            
-    
 
-class VI_Solver(Solver):
-    def __init__(self, model: Model):
+
+class MDP_SolverHistory(list[dict]):
+    def __init__(self, model, **params):
+        self.model = model
+        self.params = params
+        self.run_ts = datetime.datetime.now()
+
+
+    @property
+    def solution(self) -> ValueFunction:
+        return self[-1]['value_function']
+
+
+class VI_Solver:
+    def __init__(self, model: MDP_Model):
         super().__init__()
         self.model = model
 
 
-    def solve(self, horizon:int=10000, gamma:float=0.99, eps:float=0.001):
+    def solve(self, horizon:int=10000, gamma:float=0.99, eps:float=0.001) -> tuple[ValueFunction, MDP_SolverHistory]:
         # Initiallize V as a |S| x |A| matrix of the reward expected when being in state s and taking action a
         V = ValueFunction([AlphaVector(self.model.expected_rewards_table[:,a], a) for a in self.model.actions])
         V_opt = V[0]
         converged = False
 
-        self._solve_run_ts = datetime.datetime.now()
-        self._solve_steps_count = 0
-        self._solve_history = [{'value_function': V}]
+        solve_history = MDP_SolverHistory(self.model)
+        solve_history.append({'value_function': V})
 
-        while (not converged) and (self._solve_steps_count < horizon):
-            self._solve_steps_count += 1
-            
+        while (not converged) and (len(solve_history) <= horizon):
             old_V_opt = copy.deepcopy(V_opt)
 
             V = []
@@ -153,9 +161,10 @@ class VI_Solver(Solver):
 
             V_opt = np.max(np.array(V), axis=1)
 
-            self._solve_history.append({'value_function': ValueFunction(V)})
+            solve_history.append({'value_function': ValueFunction(V)})
                 
             avg_delta = np.max(np.abs(V_opt - old_V_opt))
             if avg_delta < eps:
-                self._solved = True
-                return ValueFunction(V)
+                break
+
+        return ValueFunction(V), solve_history

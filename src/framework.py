@@ -332,24 +332,6 @@ class ValueFunction(list[AlphaVector]):
         plt.show()
 
 
-class Solver:
-    def __init__(self):
-        self._solved = False
-        self._solve_run_ts = datetime.datetime.min
-        self._solve_steps_count = 0
-        self._solve_history = []
-
-
-    def solve(self):
-        pass
-
-    
-    @property
-    def solution(self) -> ValueFunction:
-        assert self._solved, "solve() has to be run first..."
-        return self._solve_history[-1]['value_function']
-
-
 class Agent:
     def __init__(self):
         self._trained = False
