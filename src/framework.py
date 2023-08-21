@@ -332,6 +332,78 @@ class ValueFunction(list[AlphaVector]):
         plt.show()
 
 
-class Agent:
-    def __init__(self):
-        self._trained = False
+
+class RewardHistory(list):
+    '''
+    TODO
+    '''
+
+    def __init__(self, items:list=[]):
+        self.extend(items)
+
+    
+    def plot(self, type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
+
+        plt.figure(figsize=(size*2,size))
+        plt.title('Cummulative reward received of time')
+        colors = plt.get_cmap('Set1').colors #type: ignore
+
+        # Histories
+        reward_histories = [self]
+        if isinstance(compare_with, RewardHistory):
+            reward_histories.append(compare_with)
+        else:
+            reward_histories += compare_with
+        
+        assert len(reward_histories) < len(colors), "Not enough colors to plot all the comparisson graphs"
+
+        # Names
+        names = []
+        if len(graph_names) in [0, len(reward_histories)]:
+            names.append('Main graph')
+            for i in range(1, len(reward_histories)):
+                names.append(f'Comparisson {i}')
+        else:
+            names = copy.deepcopy(graph_names)
+
+        # Actual plot
+        if type in ['total', 't']:
+            self._plot_total(reward_histories, names, max_reward)
+        elif type in ['moving_average', 'ma']:
+            self._plot_moving_average(reward_histories, names, max_reward)
+
+        # Finalization
+        plt.legend(loc='upper left')
+        plt.show()
+
+
+    def _plot_total(self, reward_histories, names, max_reward=None):
+        x = np.arange(len(reward_histories[0]))
+
+        # If given plot upper bound
+        if max_reward is not None:
+            y_best = max_reward * x
+            plt.plot(x, y_best, color='red', linestyle='--', label='Max rewards')
+
+        colors = plt.get_cmap('Set1').colors #type: ignore
+
+        # Plot rewards
+        for i, (rh, name) in enumerate(zip(reward_histories, names)):
+            cum_rewards = np.cumsum(rh)
+            plt.plot(x, cum_rewards, label=name, c=colors[i])
+    
+
+    def _plot_moving_average(self, reward_histories, names, max_reward=None):
+        x = np.arange(len(reward_histories[0]))
+
+        # If given plot upper bound
+        if max_reward is not None:
+            y_best = np.ones(len(reward_histories[0])) * max_reward
+            plt.plot(x, y_best, color='red', linestyle='--', label='Max rewards')
+
+        colors = plt.get_cmap('Set1').colors #type: ignore
+
+        # Plot rewards
+        for i, (rh, name) in enumerate(zip(reward_histories, names)):
+            moving_avg = np.divide(np.cumsum(rh), (x+1))
+            plt.plot(x, moving_avg, label=name, c=colors[i])

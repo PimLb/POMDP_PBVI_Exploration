@@ -15,7 +15,7 @@ import matplotlib.colors as C
 import math
 import random
 
-from src.framework import AlphaVector, ValueFunction, Agent
+from src.framework import AlphaVector, ValueFunction, RewardHistory
 from src.mdp import MDP_Model, MDP_SolverHistory
 
 class POMDP_Model(MDP_Model):
@@ -121,7 +121,7 @@ class Belief(np.ndarray):
             assert prob_sum == 1, f"States probabilities in belief must sum to 1 (found: {prob_sum})"
             obj = np.asarray(state_probabilities).view(cls)
         else:
-            obj = np.ones(model.state_count) / model.state_count
+            obj = (np.ones(model.state_count) / model.state_count).view(cls)
         obj._model = model # type: ignore
         return obj
 
@@ -835,6 +835,8 @@ class Simulation:
     ----------
     model: POMDP_Model
         The POMDP model the simulation will be applied on.
+    done_on_reward: bool
+        If the simulation is to end whenever a reward other than zero is received.
 
     Methods
     -------
@@ -844,9 +846,9 @@ class Simulation:
         Runs the action a on the current state of the agent.
     '''
 
-    def __init__(self, model:POMDP_Model) -> None:
+    def __init__(self, model:POMDP_Model, done_on_reward:bool=False) -> None:
         self.model = model
-
+        self.done_on_reward = done_on_reward
         self.initialize_simulation()
 
 
@@ -855,9 +857,10 @@ class Simulation:
         Function to initialize the simulation by setting a random start state to the agent.
         '''
         self.agent_state = random.choice(self.model.states)
+        self.is_done = False
 
 
-    def run_action(self, a:int) -> tuple[int, Union[int,float]]:
+    def run_action(self, a:int) -> tuple[Union[int,float], int]:
         '''
         Run one step of simulation with action a.
 
@@ -865,23 +868,94 @@ class Simulation:
                         a (int): the action to take in the simulation.
 
                 Returns:
-                        o (int): the observation following the action applied on the previous state
                         r (int, float): the reward given when doing action a in state s and landing in state s_p. (s and s_p are hidden from agent)
+                        o (int): the observation following the action applied on the previous state
         '''
+        assert not self.is_done, "Action run when simulation is done."
+
         s = self.agent_state
         s_p = self.model.transition(s,a)
         r = self.model.reward(s,a,s_p)
         o = self.model.observe(s_p, a)
-        return (o,r)
+
+        # Update agent state
+        self.agent_state = s_p
+
+        # Done check
+        if self.done_on_reward and (r != 0):
+            self.is_done = True
+
+        return (r, o)
 
 
-class POMDP_Agent(Agent):
+class POMDP_Agent:
     def __init__(self, model):
         super().__init__()
 
         self.model = model
+        self.value_function = None
 
 
     def train(self, solver:PBVI_Solver):
-        # solver.solve()
-        pass
+        self.value_function, solve_history = solver.solve(self.model)
+
+
+    def get_best_action(self, belief:Belief) -> int:
+        '''
+        Function to retrieve the best action for a given belief based on the value function retrieved from the training.
+
+                Parameters:
+                        belief (Belief): The belief to get the best action with.
+                
+                Returns:
+                        best_action (int): The best action found.
+        '''
+        assert self.value_function is not None, "No value function, training probably has to be run..."
+
+        best_value = -np.inf
+        best_action = -1
+
+        for alpha in self.value_function:
+            value = np.dot(alpha, belief)
+            if best_value < value:
+                best_value = value
+                best_action = alpha.action
+
+        return best_action
+
+
+    def simulate(self, simulator:Simulation, max_steps:int=1000) -> RewardHistory:
+        simulator.initialize_simulation()
+        belief = Belief(self.model)
+
+        rewards = RewardHistory()
+
+        # Simulation loop
+        for i in range(max_steps):
+            # Play best action
+            a = self.get_best_action(belief)
+            r,o = simulator.run_action(a)
+
+            # Record the reward
+            rewards.append(r)
+
+            # DEBUG
+            # print(f'Belief: {belief} - action chosen {a} - reward {r} (actual state {simulator.agent_state})')
+
+            # Update the belief
+            belief = belief.update(a, o)
+
+            # For unique reward processes, quit when one is received
+            if simulator.is_done:
+                return RewardHistory([rewards[-1]])
+            
+        return rewards
+            
+
+    def run_n_simulations(self, simulator:Simulation, n:int):
+
+        all_rewards = []
+        for i in range(n):
+            rewards = self.simulate(simulator)
+
+            all_rewards += rewards
