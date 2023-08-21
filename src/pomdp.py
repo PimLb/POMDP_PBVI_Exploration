@@ -3,10 +3,9 @@ from matplotlib import animation
 from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
-from typing import Self, Union, Set
+from typing import Self, Union
 
 import copy
-import datetime
 import numpy as np
 import matplotlib.ticker as MT
 import matplotlib.lines as L
@@ -16,9 +15,10 @@ import math
 import random
 
 from src.framework import AlphaVector, ValueFunction, RewardHistory
-from src.mdp import MDP_Model, MDP_SolverHistory
+from src.mdp import Model as MDP_Model
+from src.mdp import SolverHistory as MDP_SolverHistory
 
-class POMDP_Model(MDP_Model):
+class Model(MDP_Model):
     '''
     POMDP Model class. Partially Observable Markov Decision Process Model.
 
@@ -58,7 +58,7 @@ class POMDP_Model(MDP_Model):
                  probabilistic_rewards:bool=False
                  ):
         
-        super(POMDP_Model, self).__init__(states, actions, transitions, rewards, probabilistic_rewards)
+        super().__init__(states, actions, transitions, rewards, probabilistic_rewards)
 
         if isinstance(observations, int):
             self.observation_labels = [f'o_{i}' for i in range(observations)]
@@ -114,7 +114,7 @@ class Belief(np.ndarray):
     random_state():
         Function to give a random state based with the belief as the probability distribution. 
     '''
-    def __new__(cls, model:POMDP_Model, state_probabilities:Union[np.ndarray,None]=None):
+    def __new__(cls, model:Model, state_probabilities:Union[np.ndarray,None]=None):
         if state_probabilities is not None:
             assert state_probabilities.shape[0] == model.state_count, "Belief must contain be of dimension |S|"
             prob_sum = np.round(sum(state_probabilities), decimals=3)
@@ -130,7 +130,7 @@ class Belief(np.ndarray):
         self._model = getattr(obj, '_model', None)
 
     @property
-    def model(self) -> POMDP_Model:
+    def model(self) -> Model:
         assert self._model is not None
         return self._model
 
@@ -173,7 +173,7 @@ class Belief(np.ndarray):
         return rand_s
 
 
-class POMDP_SolverHistory(MDP_SolverHistory):
+class SolverHistory(MDP_SolverHistory):
     '''
     
     plot_belief_set(size:int=15):
@@ -363,7 +363,7 @@ class POMDP_SolverHistory(MDP_SolverHistory):
         proxy = [Rectangle((0,0),1,1,fc = colors[a]) for a in range(self.model.action_count)]
 
         # Solver list
-        if isinstance(compare_with, ValueFunction) or isinstance(compare_with, MDP_SolverHistory):
+        if isinstance(compare_with, ValueFunction) or isinstance(compare_with, SolverHistory):
             compare_with_list = [compare_with] # Single item
         else:
             compare_with_list = compare_with # Already group of items
@@ -471,19 +471,19 @@ class PBVI_Solver:
 
     Methods
     -------
-    backup(model:POMDP_Model, belief_set:list[Belief], alpha_set:list[AlphaVector], discount_factor:float=0.9):
+    backup(model:pomdp.Model, belief_set:list[Belief], alpha_set:list[AlphaVector], discount_factor:float=0.9):
         The backup function, responsible to update the alpha vector set.
-    expand_ssra(model:POMDP_Model, belief_set:list[Belief]):
+    expand_ssra(model:pomdp.Model, belief_set:list[Belief]):
         Random action, belief expansion strategy function.
-    expand_ssga(model:POMDP_Model, belief_set:list[Belief], alpha_set:list[AlphaVector], eps:float=0.1):
+    expand_ssga(model:pomdp.Model, belief_set:list[Belief], alpha_set:list[AlphaVector], eps:float=0.1):
         Expsilon greedy action, belief expansion strategy function.
-    expand_ssea(model:POMDP_Model, belief_set:list[Belief], alpha_set:list[AlphaVector]):
+    expand_ssea(model:pomdp.Model, belief_set:list[Belief], alpha_set:list[AlphaVector]):
         Exploratory action, belief expansion strategy function.
-    expand_ger(model:POMDP_Model, belief_set, alpha_set):
+    expand_ger(model:pomdp.Model, belief_set, alpha_set):
         Greedy error reduction, belief expansion strategy function.
     expand():
         The general expand function, used to call the other expand_* functions.
-    solve(model:POMDP_Model, initial_belief:Union[list[Belief], Belief, None]=None, initial_value_function:Union[ValueFunction,None]=None):
+    solve(model:pomdp.Model, initial_belief:Union[list[Belief], Belief, None]=None, initial_value_function:Union[ValueFunction,None]=None):
         The general solving function that will call iteratively the expand and the backup function.
     '''
     def __init__(self,
@@ -503,7 +503,7 @@ class PBVI_Solver:
 
 
 
-    def backup(self, model:POMDP_Model, belief_set:list[Belief], value_function:ValueFunction) -> ValueFunction:
+    def backup(self, model:Model, belief_set:list[Belief], value_function:ValueFunction) -> ValueFunction:
         '''
         This function has purpose to update the set of alpha vectors. It does so in 3 steps:
         1. It creates projections from each alpha vector for each possible action and each possible observation
@@ -588,7 +588,7 @@ class PBVI_Solver:
         return new_value_function
     
     
-    def expand_ssra(self, model:POMDP_Model, belief_set:list[Belief]) -> list[Belief]:
+    def expand_ssra(self, model:Model, belief_set:list[Belief]) -> list[Belief]:
         '''
         Stochastic Simulation with Random Action.
         Simulates running a single-step forward from the beliefs in the "belief_set".
@@ -616,7 +616,7 @@ class PBVI_Solver:
         return belief_set_new
     
 
-    def expand_ssga(self, model:POMDP_Model, belief_set:list[Belief], value_function:ValueFunction, eps:float=0.1) -> list[Belief]:
+    def expand_ssga(self, model:Model, belief_set:list[Belief], value_function:ValueFunction, eps:float=0.1) -> list[Belief]:
         '''
         Stochastic Simulation with Greedy Action.
         Simulates running a single-step forward from the beliefs in the "belief_set".
@@ -654,7 +654,7 @@ class PBVI_Solver:
         return belief_set_new
     
 
-    def expand_ssea(self, model:POMDP_Model, belief_set:list[Belief]) -> list[Belief]:
+    def expand_ssea(self, model:Model, belief_set:list[Belief]) -> list[Belief]:
         '''
         Stochastic Simulation with Exploratory Action.
         Simulates running steps forward for each possible action knowing we are a state s, chosen randomly with according to the belief probability.
@@ -693,7 +693,7 @@ class PBVI_Solver:
         return belief_set_new
     
 
-    def expand_ger(self, model:POMDP_Model, belief_set:list[Belief], value_function:ValueFunction) -> list[Belief]:
+    def expand_ger(self, model:Model, belief_set:list[Belief], value_function:ValueFunction) -> list[Belief]:
         '''
         Greedy Error Reduction
 
@@ -742,10 +742,10 @@ class PBVI_Solver:
 
 
     def solve(self,
-              model:POMDP_Model,
+              model:Model,
               initial_belief:Union[list[Belief], Belief, None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
-              ) -> tuple[ValueFunction, POMDP_SolverHistory]:
+              ) -> tuple[ValueFunction, SolverHistory]:
         '''
         Main loop of the Point-Based Value Iteration algorithm.
         It consists in 2 steps, Backup and Expand.
@@ -759,7 +759,7 @@ class PBVI_Solver:
             - ger: Greedy Error Reduction. Extra params: /
 
                 Parameters:
-                        model (POMDP_Model) - The model to solve.
+                        model (pomdp.Model) - The model to solve.
                         initial_belief (list[Belief], Belief) - Optional: An initial list of beliefs to start with.
                         initial_value_function (ValueFunction) - Optional: An initial value function to start the solving process with.
 
@@ -784,7 +784,7 @@ class PBVI_Solver:
             value_function = initial_value_function
 
         # History tracking
-        solver_history = POMDP_SolverHistory(model=model,
+        solver_history = SolverHistory(model=model,
                                              expand_function=self.expand_function,
                                              gamma=self.gamma,
                                              eps=self.eps)
@@ -833,7 +833,7 @@ class Simulation:
     ...
     Attributes
     ----------
-    model: POMDP_Model
+    model: pomdp.Model
         The POMDP model the simulation will be applied on.
     done_on_reward: bool
         If the simulation is to end whenever a reward other than zero is received.
@@ -846,7 +846,7 @@ class Simulation:
         Runs the action a on the current state of the agent.
     '''
 
-    def __init__(self, model:POMDP_Model, done_on_reward:bool=False) -> None:
+    def __init__(self, model:Model, done_on_reward:bool=False) -> None:
         self.model = model
         self.done_on_reward = done_on_reward
         self.initialize_simulation()
@@ -888,7 +888,7 @@ class Simulation:
         return (r, o)
 
 
-class POMDP_Agent:
+class Agent:
     def __init__(self, model):
         super().__init__()
 

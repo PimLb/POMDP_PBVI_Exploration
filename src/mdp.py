@@ -5,10 +5,9 @@ import copy
 import datetime
 import numpy as np
 
-from src.framework import Model as GeneralModel
 from src.framework import AlphaVector, ValueFunction
 
-class MDP_Model(GeneralModel):
+class Model:
     '''
     MDP Model class.
 
@@ -120,7 +119,7 @@ class MDP_Model(GeneralModel):
             return reward
 
 
-class MDP_SolverHistory(list[dict]):
+class SolverHistory(list[dict]):
     def __init__(self, model, **params):
         self.model = model
         self.params = params
@@ -140,13 +139,13 @@ class VI_Solver:
         self.eps = eps
 
 
-    def solve(self, model: MDP_Model) -> tuple[ValueFunction, MDP_SolverHistory]:
+    def solve(self, model: Model) -> tuple[ValueFunction, SolverHistory]:
         # Initiallize V as a |S| x |A| matrix of the reward expected when being in state s and taking action a
         V = ValueFunction([AlphaVector(model.expected_rewards_table[:,a], a) for a in model.actions])
         V_opt = V[0]
         converged = False
 
-        solve_history = MDP_SolverHistory(model)
+        solve_history = SolverHistory(model)
         solve_history.append({'value_function': V})
 
         while (not converged) and (len(solve_history) <= self.horizon):

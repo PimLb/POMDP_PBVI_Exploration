@@ -4,13 +4,8 @@ from scipy.optimize import milp, LinearConstraint
 from typing import Self, Union
 
 import copy
-import datetime
 import numpy as np
 import random
-
-
-class Model:
-    pass
 
 
 class AlphaVector(np.ndarray):
@@ -335,7 +330,27 @@ class ValueFunction(list[AlphaVector]):
 
 class RewardHistory(list):
     '''
-    TODO
+    Class to represent a list of rewards received during a Simulation.
+    The main purpose of the class is to provide a set of visualization options of the rewards received.
+
+    Multiple types of plots can be done:
+        - Totals: to plot a graph of the accumulated rewards over time.
+        - Moving average: to plot the moving average of the rewards received over time.
+        - Histogram: to plot a histogram of the various rewards received.
+
+    ...
+
+    Attributes
+    ------------
+
+    items: list (Optional)
+        A set of rewards received.
+
+    Methods
+    -------
+
+    plot(type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
+
     '''
 
     def __init__(self, items:list=[]):
@@ -343,7 +358,13 @@ class RewardHistory(list):
 
     
     def plot(self, type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
-
+        '''
+        The method to plot summaries of the rewards received over time.
+        The plots available:
+            - Total ('total' or 't'): to plot the total reward as a cummulative sum over time.
+            - Moving average ('moving_average' or 'ma'): to plot the moving average of the rewards
+            - Hisotgram ('histogram' or 'h'): to plot the various reward in bins to plot a histogram of what was received
+        '''
         plt.figure(figsize=(size*2,size))
         plt.title('Cummulative reward received of time')
         colors = plt.get_cmap('Set1').colors #type: ignore
@@ -371,6 +392,8 @@ class RewardHistory(list):
             self._plot_total(reward_histories, names, max_reward)
         elif type in ['moving_average', 'ma']:
             self._plot_moving_average(reward_histories, names, max_reward)
+        elif type in ['histogram', 'h']:
+            self._plot_histogram(reward_histories, names, max_reward)
 
         # Finalization
         plt.legend(loc='upper left')
@@ -407,3 +430,19 @@ class RewardHistory(list):
         for i, (rh, name) in enumerate(zip(reward_histories, names)):
             moving_avg = np.divide(np.cumsum(rh), (x+1))
             plt.plot(x, moving_avg, label=name, c=colors[i])
+
+
+    def _plot_histogram(self, reward_histories, names, max_rewards=None):
+        colors = plt.get_cmap('Set1').colors #type: ignore
+
+        max_unique = -np.inf
+        for rh in reward_histories:
+            unique_count = np.unique(rh).shape[0]
+            if max_unique < unique_count:
+                max_unique = unique_count
+
+        bin_count = int(max_unique) if max_unique < 10 else 10
+
+        # Plot rewards
+        for i, (rh, name) in enumerate(zip(reward_histories, names)):
+            plt.hist(rh, bin_count, label=name, color=colors[i])
