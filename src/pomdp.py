@@ -175,7 +175,24 @@ class Belief(np.ndarray):
 
 class SolverHistory(MDP_SolverHistory):
     '''
-    
+    Class to represent the history of a solver for a POMDP solver.
+    It has mainly the purpose to have visualizations for the solution, belief set and the whole solving history.
+    The visualizations available are:
+        - Belief set plot
+        - Solution plot
+        - Video of value function and belief set evolution over training.
+
+    ...
+
+    Attributes
+    ----------
+    model: pomdp.Model
+        The model the solver has solved
+    params:
+        The solver parameters that have been used, to show better information on the visualizations.
+
+    Methods
+    -------
     plot_belief_set(size:int=15):
         Once solve() has been run, the explored beliefs can be plot for 2- and 3- state models.
     plot_solution(size:int=5, plot_belief:bool=True):
@@ -889,14 +906,42 @@ class Simulation:
 
 
 class Agent:
-    def __init__(self, model):
+    '''
+    The class of an Agent running on a POMDP model.
+    It has the ability to train using a given solver (here PBVI_Solver).
+    Then, once trained, it can simulate actions with a given Simulation,
+    either for a given amount of steps or until a single reward is received.
+
+    ...
+
+    Attributes
+    ----------
+    model: pomdp.Model
+        The model in which the agent can run
+    
+    Methods
+    -------
+    train(solver: PBVI_Solver):
+        Runs the solver on the agent's model in order to retrieve a value function.
+    get_best_action(belief:Belief):
+        Retrieves the best action from the value function given a belief (the belief of the agent being in a certain state).
+
+    '''
+    def __init__(self, model:Model) -> None:
         super().__init__()
 
         self.model = model
         self.value_function = None
 
 
-    def train(self, solver:PBVI_Solver):
+    def train(self, solver:PBVI_Solver) -> None:
+        '''
+        Method to train the agent using a given solver.
+        The solver will provide a value function that will map beliefs in belief space to actions.
+
+                Parameters:
+                        - solver (PBVI_Solver): The solver to run.
+        '''
         self.value_function, solve_history = solver.solve(self.model)
 
 
