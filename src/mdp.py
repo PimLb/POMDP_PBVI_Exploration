@@ -120,6 +120,20 @@ class Model:
 
 
 class SolverHistory(list[dict]):
+    '''
+    Class to represent the solving history of a solver.
+    The purpose of this class is to allow plotting of the solution and plotting the evolution of the value function over the training process.
+    This class is not meant to be instanciated manually, it meant to be used when returned by the solve() method of a Solver object.
+
+    ...
+
+    Attributes
+    ----------
+    model: mdp.Model
+        The model that has been solved by the Solver
+    params: dict
+        Additional Solver parameters used to make better visualizations
+    '''
     def __init__(self, model, **params):
         self.model = model
         self.params = params
@@ -131,9 +145,40 @@ class SolverHistory(list[dict]):
         return self[-1]['value_function']
 
 
-class VI_Solver:
+class Solver:
+    '''
+    MDP Model Solver - Abstract class.
+    '''
+    def __init__(self) -> None:
+        raise Exception("Not an implementable class, please use a subclass...")
+    
+    def solve(self, model: Model) -> tuple[ValueFunction, SolverHistory]:
+        raise Exception("Method has to be implemented by subclass...")
+
+
+class VI_Solver(Solver):
+    '''
+    Solver for MDP Models. This solver implements Value Iteration.
+    It works by iteratively updating the value function that maps states to actions.
+    
+    ...
+
+    Attributes
+    ----------
+    horizon: int
+        Controls for how many epochs the learning can run for (works as an infinite loop safety).
+    gamma: float
+        Controls the learning rate, how fast the rewards are discounted at each epoch.
+    eps: float
+        Controls the threshold to determine whether the value functions has settled. If the max change of value for a state is lower than eps, then it has converged.
+
+    Methods
+    -------
+    solve(model: mdp.Model):
+        The method to run the solving step that returns a value function.
+    '''
+
     def __init__(self, horizon:int=10000, gamma:float=0.99, eps:float=0.001):
-        super().__init__()
         self.horizon = horizon
         self.gamma = gamma
         self.eps = eps
@@ -169,3 +214,55 @@ class VI_Solver:
                 break
 
         return ValueFunction(V), solve_history
+
+
+class Simulation:
+    def __init__(self, model:Model, done_on_reward:bool=False, done_on_state:Union[int,list[int]]=[],done_on_action:Union[int,list[int]]=[]) -> None:
+        self.model = model
+        self.done_on_reward = done_on_reward
+        self.done_on_state = done_on_state if isinstance(done_on_state, list) else [done_on_state]
+        self.done_on_action = done_on_action if isinstance(done_on_action, list) else [done_on_action]
+
+        self.initialize_simulation()
+
+
+    def initialize_simulation(self) -> None:
+        '''
+        Function to initialize the simulation by setting a random start state to the agent.
+        '''
+        self.agent_state = random.choice(self.model.states)
+        self.is_done = False
+
+    
+    def run_action(self, a:int) -> Union[int, float]:
+        '''
+        Run one step of simulation with action a.
+
+                Parameters:
+                        a (int): the action to take in the simulation.
+
+                Returns:
+                        r (int, float): the reward given when doing action a in state s and landing in state s_p. (s and s_p are hidden from agent)
+        '''
+        assert not self.is_done, "Action run when simulation is done."
+
+        s = self.agent_state
+        s_p = self.model.transition(s,a)
+        r = self.model.reward(s,a,s_p)
+
+        # Update agent state
+        self.agent_state = s_p
+
+        # Reward Done check
+        if self.done_on_reward and (r != 0):
+            self.is_done = True
+
+        # State Done check
+        if s_p in self.done_on_state:
+            self.is_done = True
+
+        # Action Done check
+        if a in self.done_on_action:
+            self.is_done = True
+
+        return r

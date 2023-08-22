@@ -17,6 +17,8 @@ import random
 from src.framework import AlphaVector, ValueFunction, RewardHistory
 from src.mdp import Model as MDP_Model
 from src.mdp import SolverHistory as MDP_SolverHistory
+from src.mdp import Solver as MDP_Solver
+from src.mdp import Simulation as MDP_Simulation
 
 class Model(MDP_Model):
     '''
@@ -380,7 +382,7 @@ class SolverHistory(MDP_SolverHistory):
         proxy = [Rectangle((0,0),1,1,fc = colors[a]) for a in range(self.model.action_count)]
 
         # Solver list
-        if isinstance(compare_with, ValueFunction) or isinstance(compare_with, SolverHistory):
+        if isinstance(compare_with, ValueFunction) or isinstance(compare_with, MDP_SolverHistory):
             compare_with_list = [compare_with] # Single item
         else:
             compare_with_list = compare_with # Already group of items
@@ -465,7 +467,16 @@ class SolverHistory(MDP_SolverHistory):
         print(f'Video saved at \'Results/{video_title}\'...')
         plt.close()
 
-class PBVI_Solver:
+
+class Solver(MDP_Solver):
+    '''
+    POMDP Model Solver - abstract class
+    '''
+    def solve(self, model: Model) -> tuple[ValueFunction, SolverHistory]:
+        raise Exception("Method has to be implemented by subclass...")
+
+
+class PBVI_Solver(Solver):
     '''
     The Point-Based Value Iteration solver for POMDP Models. It works in two steps, first the backup step that updates the alpha vector set that approximates the value function.
     Then, the expand function that expands the belief set.
@@ -842,7 +853,7 @@ class PBVI_Solver:
         return value_function, solver_history
 
 
-class Simulation:
+class Simulation(MDP_Simulation):
     '''
     Class to reprensent a simulation process for a POMDP model.
     An initial random state is given and action can be applied to the model that impact the actual state of the agent along with returning a reward and an observation.
@@ -862,20 +873,10 @@ class Simulation:
     run_action(a:int):
         Runs the action a on the current state of the agent.
     '''
+    def __init__(self, model:Model, done_on_reward:bool=False, done_on_state: Union[int,list[int]]=[], done_on_action:Union[int,list[int]]=[]) -> None:
+        super().__init__(model, done_on_reward, done_on_state, done_on_action)
 
-    def __init__(self, model:Model, done_on_reward:bool=False) -> None:
         self.model = model
-        self.done_on_reward = done_on_reward
-        self.initialize_simulation()
-
-
-    def initialize_simulation(self) -> None:
-        '''
-        Function to initialize the simulation by setting a random start state to the agent.
-        '''
-        self.agent_state = random.choice(self.model.states)
-        self.is_done = False
-
 
     def run_action(self, a:int) -> tuple[Union[int,float], int]:
         '''
@@ -888,19 +889,9 @@ class Simulation:
                         r (int, float): the reward given when doing action a in state s and landing in state s_p. (s and s_p are hidden from agent)
                         o (int): the observation following the action applied on the previous state
         '''
-        assert not self.is_done, "Action run when simulation is done."
-
-        s = self.agent_state
-        s_p = self.model.transition(s,a)
-        r = self.model.reward(s,a,s_p)
-        o = self.model.observe(s_p, a)
-
-        # Update agent state
-        self.agent_state = s_p
-
-        # Done check
-        if self.done_on_reward and (r != 0):
-            self.is_done = True
+        
+        r = super().run_action(a)
+        o = self.model.observe(self.agent_state, a)
 
         return (r, o)
 
@@ -940,7 +931,7 @@ class Agent:
         The solver will provide a value function that will map beliefs in belief space to actions.
 
                 Parameters:
-                        - solver (PBVI_Solver): The solver to run.
+                        solver (PBVI_Solver): The solver to run.
         '''
         self.value_function, solve_history = solver.solve(self.model)
 
@@ -970,6 +961,19 @@ class Agent:
 
 
     def simulate(self, simulator:Simulation, max_steps:int=1000) -> RewardHistory:
+        '''
+        Function to run a simulation with the current agent for up to 'max_steps' amount of steps using a Simulation simulator.
+
+        Not yet implemented:
+            - Stats about how long the simulation took, how often the belief was right about the true state,...
+
+                Parameters:
+                        simulator (pomdp.Simulation): the simulation that will be used by the agent.
+                        max_steps (int): the max amount of steps the simulation can run for.
+
+                Returns:
+                        rewards (RewardHistory): A list of rewards with the additional functionality that the can be plot with the plot() function.
+        '''
         simulator.initialize_simulation()
         belief = Belief(self.model)
 
@@ -990,17 +994,32 @@ class Agent:
             # Update the belief
             belief = belief.update(a, o)
 
-            # For unique reward processes, quit when one is received
+            # If simulation is considered done, the rewards are simply returned
             if simulator.is_done:
-                return RewardHistory([rewards[-1]])
+                return rewards
             
         return rewards
-            
 
-    def run_n_simulations(self, simulator:Simulation, n:int):
 
-        all_rewards = []
-        for i in range(n):
+    def run_n_simulations(self, simulator:Simulation, n:int) -> RewardHistory:
+        '''
+        Function to run a set of simulations in a row.
+        This is useful when the simulation has a 'done' condition.
+        In this case, the rewards of individual simulations are summed together under a single number.
+
+        Not implemented:
+            - Overal simulation stats
+
+                Parameters:
+                        simulator (Simulation): the simulation that will be used by the agent.
+                        n (int): the amount of simulations to run.
+
+                Returns:
+                        rewards (RewardHistory): A list of rewards as the sum of rewards of individual simulations.
+        '''
+        all_rewards = RewardHistory()
+        for _ in range(n):
             rewards = self.simulate(simulator)
+            all_rewards.append(np.sum(rewards))
 
-            all_rewards += rewards
+        return all_rewards
