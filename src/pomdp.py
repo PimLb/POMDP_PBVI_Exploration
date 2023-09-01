@@ -36,8 +36,8 @@ class Model(MDP_Model):
         A list of observation labels or an amount of observations to be used
     transitions:
         The transition matrix, has to be |S| x |A| x |S|. If none is provided, it will be randomly generated.
-    rewards:
-        The reward matrix, has to be |S| x |A|. If none is provided, it will be randomly generated.
+    immediate_rewards:
+        The reward matrix, has to be |S| x |A| x |S| x |O|. If none is provided, it will be randomly generated.
     observation_table:
         The observation matrix, has to be |S| x |A| x |O|. If none is provided, it will be randomly generated.
     probabilistic_rewards: bool
@@ -55,12 +55,16 @@ class Model(MDP_Model):
                  actions:Union[int, list],
                  observations:Union[int, list],
                  transitions=None,
-                 rewards=None,
+                 immediate_rewards=None,
                  observation_table=None,
                  probabilistic_rewards:bool=False
                  ):
         
-        super().__init__(states, actions, transitions, rewards, probabilistic_rewards)
+        super().__init__(states=states,
+                         actions=actions,
+                         transitions=transitions,
+                         immediate_rewards=None,
+                         probabilistic_rewards=probabilistic_rewards)
 
         if isinstance(observations, int):
             self.observation_labels = [f'o_{i}' for i in range(observations)]
@@ -77,6 +81,48 @@ class Model(MDP_Model):
         else:
             self.observation_table = np.array(observation_table)
             assert self.observation_table.shape == (self.state_count, self.action_count, self.observation_count), "observations table doesnt have the right shape, it should be SxAxO"
+
+        # Rewards
+        if immediate_rewards is None:
+            # If no reward matrix given, generate random one
+            self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count, self.observation_count)
+        else:
+            self.immediate_reward_table = immediate_rewards
+            assert self.immediate_reward_table.shape == (self.state_count, self.action_count, self.state_count, self.observation_count), "rewards table doesnt have the right shape, it should be SxAxSxO"
+
+        # Expected rewards
+        self.expected_rewards_table = np.zeros((self.state_count, self.action_count))
+        for s in self.states:
+            for a in self.actions:
+                sum = 0
+                for s_p in self.states:
+                    inner_sum = 0
+                    for o in self.observations:
+                        inner_sum += (self.observation_table[s_p,a,o] * self.immediate_reward_table[s,a,s_p,o])
+                    sum += (self.transition_table[s,a,s_p] * inner_sum)
+                self.expected_rewards_table[s,a] = sum
+
+
+    def reward(self, s:int, a:int, s_p:int, o:int) -> Union[int,float]:
+        '''
+        Returns the rewards of playing action a when in state s and landing in state s_p.
+        If the rewards are probabilistic, it will return 0 or 1.
+
+                Parameters:
+                        s (int): The current state
+                        a (int): The action taking in state s
+                        s_p (int): The state landing in after taking action a in state s
+                        o (int): The observation that is done after having played action a in state s and landing in s_p
+
+                Returns:
+                        reward (int, float): The reward received.
+        '''
+        reward = self.immediate_reward_table[s,a,s_p,o]
+        if self.probabilistic_rewards:
+            rnd = random.random()
+            return 1 if rnd < reward else 0
+        else:
+            return reward
     
 
     def observe(self, s_p:int, a:int) -> int:
@@ -884,9 +930,27 @@ class Simulation(MDP_Simulation):
                         r (int, float): the reward given when doing action a in state s and landing in state s_p. (s and s_p are hidden from agent)
                         o (int): the observation following the action applied on the previous state
         '''
-        
-        r = super().run_action(a)
-        o = self.model.observe(self.agent_state, a)
+        assert not self.is_done, "Action run when simulation is done."
+
+        s = self.agent_state
+        s_p = self.model.transition(s, a)
+        o = self.model.observe(s_p, a)
+        r = self.model.reward(s, a, s_p, o)
+
+        # Update agent state
+        self.agent_state = s_p
+
+        # Reward Done check
+        if self.done_on_reward and (r != 0):
+            self.is_done = True
+
+        # State Done check
+        if s_p in self.done_on_state:
+            self.is_done = True
+
+        # Action Done check
+        if a in self.done_on_action:
+            self.is_done = True
 
         return (r, o)
 

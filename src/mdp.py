@@ -21,8 +21,8 @@ class Model:
         A list of action labels or an amount of actions to be used.
     transitions:
         The transition matrix, has to be |S| x |A| x |S|. If none is provided, it will be randomly generated.
-    rewards:
-        The reward matrix, has to be |S| x |A| x |S|. If none is provided, it will be randomly generated.
+    immediate_rewards:
+        The reward matrix, has to be |S| x |A| x |S|. If provided, it will be use in combination with the transition matrix to fill to expected rewards.
     probabilistic_rewards: bool
         Whether the rewards provided are probabilistic or pure rewards. If probabilist 0 or 1 will be the reward with a certain probability.
 
@@ -35,7 +35,7 @@ class Model:
                  states:Union[int, list],
                  actions:Union[int, list],
                  transitions=None,
-                 rewards=None,
+                 immediate_rewards=None,
                  probabilistic_rewards:bool=False
                  ):
         
@@ -66,18 +66,18 @@ class Model:
             assert self.transition_table.shape == (self.state_count, self.action_count, self.state_count), "transitions table doesnt have the right shape, it should be SxAxS"
 
         # Rewards
-        if rewards is None:
+        if immediate_rewards is None:
             # If no reward matrix given, generate random one
-            self.reward_table = np.random.rand(self.state_count, self.action_count, self.state_count)
+            self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count)
         else:
-            self.reward_table = rewards
-            assert self.reward_table.shape == (self.state_count, self.action_count, self.state_count), "rewards table doesnt have the right shape, it should be SxAxS"
+            self.immediate_reward_table = immediate_rewards
+            assert self.immediate_reward_table.shape == (self.state_count, self.action_count, self.state_count), "rewards table doesnt have the right shape, it should be SxAxS"
 
         # Expected rewards
         self.expected_rewards_table = np.zeros((self.state_count, self.action_count))
         for s in self.states:
             for a in self.actions:
-                self.expected_rewards_table[s,a] = np.dot(self.transition_table[s,a,:], self.reward_table[s,a,:])
+                self.expected_rewards_table[s,a] = np.dot(self.transition_table[s,a,:], self.immediate_reward_table[s,a,:])
 
         # Rewards are probabilistic
         self.probabilistic_rewards = probabilistic_rewards
@@ -111,7 +111,7 @@ class Model:
                 Returns:
                         reward (int, float): The reward received.
         '''
-        reward = self.reward_table[s,a,s_p] 
+        reward = self.immediate_reward_table[s,a,s_p]
         if self.probabilistic_rewards:
             rnd = random.random()
             return 1 if rnd < reward else 0
