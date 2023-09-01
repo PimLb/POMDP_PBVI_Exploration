@@ -1086,12 +1086,12 @@ class Agent:
         return all_rewards
     
 
-def load_from_file(file_name) -> Tuple[Model, Solver, Union[Belief,None]]:
+def load_from_file(file_name) -> Tuple[Model, PBVI_Solver, Union[Belief,None]]:
     loaded_params = {}
     reading:str = ''
     read_lines = 0
 
-    with open('./Example Models/4x3.95.POMDP') as file:
+    with open('./Example Models/tiger.95.POMDP') as file:
         for line in file:
             if line.startswith(('#', '\n')):
                 continue
@@ -1153,7 +1153,7 @@ def load_from_file(file_name) -> Tuple[Model, Solver, Union[Belief,None]]:
                 loaded_params['transition_table'] = np.full((loaded_params['state_count'], loaded_params['action_count'], loaded_params['state_count']), np.nan)
             
             if line.startswith('T'):
-                transition_params = line.replace(':','').split()[1:]
+                transition_params = line.replace(':',' ').split()[1:]
                 transition_params = transition_params[:-1] if (line.count(':') == 3) else transition_params
 
                 ids = []
@@ -1193,6 +1193,11 @@ def load_from_file(file_name) -> Tuple[Model, Solver, Union[Belief,None]]:
 
                 for a in ids[0]:
                     for s in ids[1]:
+                        # Uniform
+                        if 'uniform' in line_items:
+                            loaded_params['transition_table'][s, a, :] = np.ones(loaded_params['state_count']) / loaded_params['state_count']
+                            continue
+
                         for s_p, item in enumerate(line_items):
                             loaded_params['transition_table'][s, a, s_p] = float(item)
 
@@ -1212,10 +1217,23 @@ def load_from_file(file_name) -> Tuple[Model, Solver, Union[Belief,None]]:
                         ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
                 
                 for a in ids[0]:
+                    # Uniform
+                    if 'uniform' in line_items:
+                        loaded_params['transition_table'][:, a, :] = np.ones((loaded_params['state_count'], loaded_params['state_count'])) / loaded_params['state_count']
+                        reading = ''
+                        continue
+                    # Identity
+                    if 'identity' in line_items:
+                        loaded_params['transition_table'][:, a, :] = np.eye(loaded_params['state_count'])
+                        reading = ''
+                        continue
+
                     for s_p, item in enumerate(line_items):
                         loaded_params['transition_table'][s, a, s_p] = float(item)
 
-                read_lines += 1
+                if ('uniform' not in line_items) and ('identity' not in line_items):
+                    read_lines += 1
+                
                 if read_lines == loaded_params['state_count']:
                     reading = ''
                     read_lines = 0
@@ -1228,7 +1246,7 @@ def load_from_file(file_name) -> Tuple[Model, Solver, Union[Belief,None]]:
                 loaded_params['observation_table'] = np.full((loaded_params['state_count'], loaded_params['action_count'], loaded_params['observation_count']), np.nan)
 
             if line.startswith('O'):
-                observation_params = line.replace(':','').split()[1:]
+                observation_params = line.replace(':',' ').split()[1:]
                 observation_params = observation_params[:-1] if (line.count(':') == 3) else observation_params
 
                 ids = []
@@ -1270,6 +1288,11 @@ def load_from_file(file_name) -> Tuple[Model, Solver, Union[Belief,None]]:
 
                 for a in ids[0]:
                     for s_p in ids[1]:
+                        # Uniform
+                        if 'uniform' in line_items:
+                            loaded_params['observation_table'][s_p, a, :] = np.ones(loaded_params['observation_count']) / loaded_params['observation_count']
+                            continue
+
                         for o, item in enumerate(line_items):
                             loaded_params['observation_table'][s_p, a, o] = float(item)
 
@@ -1288,10 +1311,18 @@ def load_from_file(file_name) -> Tuple[Model, Solver, Union[Belief,None]]:
                         ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
 
                 for a in ids[0]:
+                    # Uniform
+                    if 'uniform' in line_items:
+                        loaded_params['observation_table'][:, a, :] = np.ones((loaded_params['state_count'], loaded_params['observation_count'])) / loaded_params['observation_count']
+                        reading = ''
+                        continue
+
                     for o, item in enumerate(line_items):
                         loaded_params['observation_table'][s_p, a, o] = float(item)
 
-                read_lines += 1
+                if 'uniform' not in line_items:
+                    read_lines += 1
+                
                 if read_lines == loaded_params['state_count']:
                     reading = ''
                     read_lines = 0
@@ -1304,7 +1335,7 @@ def load_from_file(file_name) -> Tuple[Model, Solver, Union[Belief,None]]:
                 loaded_params['reward_table'] = np.full((loaded_params['state_count'], loaded_params['action_count'], loaded_params['state_count'], loaded_params['observation_count']), np.nan)
 
             if line.startswith('R'):
-                reward_params = line.replace(':','').split()[1:]
+                reward_params = line.replace(':',' ').split()[1:]
                 reward_params = reward_params[:-1] if (line.count(':') == 4) else reward_params
 
                 ids = []
@@ -1379,18 +1410,6 @@ def load_from_file(file_name) -> Tuple[Model, Solver, Union[Belief,None]]:
                 if read_lines == loaded_params['state_count']:
                     reading = ''
                     read_lines = 0
-
-    # Convertion of rewards to expected rewards
-    rewards = np.full((loaded_params['state_count'], loaded_params['action_count']), np.nan)
-    for s in range(loaded_params['state_count']):
-        for a in range(loaded_params['action_count']):
-            sum = 0
-            for s_p in range(loaded_params['state_count']):
-                inner_sum = 0
-                for o in range(loaded_params['observation_count']):
-                    inner_sum += (loaded_params['observation_table'][s_p,a,o] * loaded_params['reward_table'][s, a, s_p, o])
-                sum += (loaded_params['transition_table'][s, a, s_p] * inner_sum)
-            rewards[s,a] = sum
 
     # Generation of output
     loaded_model = Model(loaded_params['states'],
