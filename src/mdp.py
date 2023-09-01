@@ -266,3 +266,8 @@ class Simulation:
             self.is_done = True
 
         return r
+    
+
+class Agent:
+    # TODO
+    pass

@@ -3,7 +3,7 @@ from matplotlib import animation
 from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
-from typing import Self, Union
+from typing import Self, Tuple, Union
 
 import copy
 import numpy as np
@@ -484,10 +484,6 @@ class PBVI_Solver(Solver):
     ...
     Attributes
     ----------
-    expansions: int
-        How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
-    horizon: int
-        How many times the alpha vector set must be updated every time the belief set is expanded.
     gamma: float (default 0.9)
         The learning rate, used to control how fast the value function will change after the each iterations.
     eps: float (default 0.001)
@@ -511,19 +507,14 @@ class PBVI_Solver(Solver):
         Greedy error reduction, belief expansion strategy function.
     expand():
         The general expand function, used to call the other expand_* functions.
-    solve(model:pomdp.Model, initial_belief:Union[list[Belief], Belief, None]=None, initial_value_function:Union[ValueFunction,None]=None):
+    solve(model:pomdp.Model, expansions:int, horizon:int, initial_belief:Union[list[Belief], Belief, None]=None, initial_value_function:Union[ValueFunction,None]=None):
         The general solving function that will call iteratively the expand and the backup function.
     '''
     def __init__(self,
-                 expansions:int,
-                 horizon:int,
                  gamma:float=0.9,
                  eps:float=0.001,
                  expand_function:str='ssea',
                  expand_function_params:dict={}):
-
-        self.expansions = expansions
-        self.horizon = horizon
         self.gamma = gamma
         self.eps = eps
         self.expand_function = expand_function
@@ -771,6 +762,8 @@ class PBVI_Solver(Solver):
 
     def solve(self,
               model:Model,
+              expansions:int,
+              horizon:int,
               initial_belief:Union[list[Belief], Belief, None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
               ) -> tuple[ValueFunction, SolverHistory]:
@@ -788,6 +781,8 @@ class PBVI_Solver(Solver):
 
                 Parameters:
                         model (pomdp.Model) - The model to solve.
+                        expansions (int) - How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
+                        horizon (int) - How many times the alpha vector set must be updated every time the belief set is expanded.
                         initial_belief (list[Belief], Belief) - Optional: An initial list of beliefs to start with.
                         initial_value_function (ValueFunction) - Optional: An initial value function to start the solving process with.
 
@@ -822,7 +817,7 @@ class PBVI_Solver(Solver):
         })
 
         # Loop
-        for _ in range(self.expansions):
+        for _ in range(expansions):
             # 1: Expand belief set
             self.expand_function_params['model'] = model
             self.expand_function_params['belief_set'] = belief_set
@@ -832,7 +827,7 @@ class PBVI_Solver(Solver):
             old_max_val_per_belief = None
 
             # 2: Backup, update value function (alpha vector set)
-            for _ in range(self.horizon):
+            for _ in range(horizon):
                 old_value_function = copy.deepcopy(value_function)
                 value_function = self.backup(model, belief_set, old_value_function)
 
@@ -925,15 +920,17 @@ class Agent:
         self.value_function = None
 
 
-    def train(self, solver:PBVI_Solver) -> None:
+    def train(self, solver:PBVI_Solver, expansions:int, horizon:int) -> None:
         '''
         Method to train the agent using a given solver.
         The solver will provide a value function that will map beliefs in belief space to actions.
 
                 Parameters:
                         solver (PBVI_Solver): The solver to run.
+                        expansions (int): How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
+                        horizon (int): How many times the alpha vector set must be updated every time the belief set is expanded.
         '''
-        self.value_function, solve_history = solver.solve(self.model)
+        self.value_function, solve_history = solver.solve(self.model, expansions, horizon)
 
 
     def get_best_action(self, belief:Belief) -> int:
@@ -1023,3 +1020,324 @@ class Agent:
             all_rewards.append(np.sum(rewards))
 
         return all_rewards
+    
+
+def load_from_file(file_name) -> Tuple[Model, Solver, Union[Belief,None]]:
+    loaded_params = {}
+    reading:str = ''
+    read_lines = 0
+
+    with open('./Example Models/4x3.95.POMDP') as file:
+        for line in file:
+            if line.startswith(('#', '\n')):
+                continue
+
+            # Split line
+            line_items = line.replace('\n','').strip().split()
+
+            # Discount factor
+            if line.startswith('discount'):
+                loaded_params['gamma'] = float(line_items[-1])
+            
+            # Value (either reward or cost)
+            elif line.startswith('values'):
+                loaded_params['values'] = line_items[-1] # To investigate
+
+            # States
+            elif line.startswith('states'):
+                if line_items[-1].isnumeric():
+                    loaded_params['state_count'] = int(line_items[-1])
+                    loaded_params['states'] = [f's{i}' for i in range(loaded_params['state_count'])]
+                else:
+                    loaded_params['states'] = line_items[1:]
+                    loaded_params['state_count'] = len(loaded_params['states'])
+
+            # Actions
+            elif line.startswith('actions'):
+                if line_items[-1].isnumeric():
+                    loaded_params['action_count'] = int(line_items[-1])
+                    loaded_params['actions'] = [f'a{i}' for i in range(loaded_params['action_count'])]
+                else:
+                    loaded_params['actions'] = line_items[1:]
+                    loaded_params['action_count'] = len(loaded_params['actions'])
+
+            # Observations
+            elif line.startswith('observations'):
+                if line_items[-1].isnumeric():
+                    loaded_params['observation_count'] = int(line_items[-1])
+                    loaded_params['observations'] = [f'o{i}' for i in range(loaded_params['observation_count'])]
+                else:
+                    loaded_params['observations'] = line_items[1:]
+                    loaded_params['observation_count'] = len(loaded_params['observations'])
+            
+            # Start
+            elif line.startswith('start'):
+                if len(line_items) == 1:
+                    reading = 'start'
+                else:
+                    assert len(line_items[1:]) == loaded_params['state_count'], 'Not enough states in initial belief'
+                    loaded_params['init_belief'] = np.array([float(item) for item in line_items[1:]])
+            elif reading == 'start':
+                assert len(line_items) == loaded_params['state_count'], 'Not enough states in initial belief'
+                loaded_params['init_belief'] = np.array([float(item) for item in line_items])
+                reading = 'None'
+
+            # ----------------------------------------------------------------------------------------------
+            # Transition table
+            # ----------------------------------------------------------------------------------------------
+            if ('states' in loaded_params) and ('actions' in loaded_params) and ('observations' in loaded_params) and not ('transition_table' in loaded_params):
+                loaded_params['transition_table'] = np.full((loaded_params['state_count'], loaded_params['action_count'], loaded_params['state_count']), np.nan)
+            
+            if line.startswith('T'):
+                transition_params = line.replace(':','').split()[1:]
+                transition_params = transition_params[:-1] if (line.count(':') == 3) else transition_params
+
+                ids = []
+                for i, param in enumerate(transition_params):
+                    if param.isnumeric():
+                        ids.append([int(param)])
+                    elif i == 0:
+                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                    elif i in [1,2]:
+                        ids.append(np.arange(loaded_params['state_count']) if param == '*' else [loaded_params['states'].index(param)])
+                    else:
+                        raise Exception('Cant load more than 3 parameters for transitions')
+
+                # single item
+                if len(transition_params) == 3:
+                    for s in ids[1]:
+                        for a in ids[0]:
+                            for s_p in ids[2]:
+                                loaded_params['transition_table'][s, a, s_p] = float(line_items[-1])
+                
+                # More items
+                else:
+                    reading = f'T{len(transition_params)} ' + ' '.join(transition_params)
+                    
+            # Reading action-state line
+            elif reading.startswith('T2'):
+                transition_params = reading.split()[1:]
+
+                ids = []
+                for i, param in enumerate(transition_params):
+                    if param.isnumeric():
+                        ids.append([int(param)])
+                    elif i == 0:
+                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                    else:
+                        ids.append(np.arange(loaded_params['state_count']) if param == '*' else [loaded_params['states'].index(param)])
+
+                for a in ids[0]:
+                    for s in ids[1]:
+                        for s_p, item in enumerate(line_items):
+                            loaded_params['transition_table'][s, a, s_p] = float(item)
+
+                reading = ''
+
+            # Reading action matrix
+            elif reading.startswith('T1'):
+                s = read_lines
+
+                transition_params = reading.split()[1:]
+
+                ids = []
+                for i, param in enumerate(transition_params):
+                    if param.isnumeric():
+                        ids.append([int(param)])
+                    elif i == 0:
+                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                
+                for a in ids[0]:
+                    for s_p, item in enumerate(line_items):
+                        loaded_params['transition_table'][s, a, s_p] = float(item)
+
+                read_lines += 1
+                if read_lines == loaded_params['state_count']:
+                    reading = ''
+                    read_lines = 0
+
+
+            # ----------------------------------------------------------------------------------------------
+            # Observation table
+            # ----------------------------------------------------------------------------------------------
+            if ('states' in loaded_params) and ('actions' in loaded_params) and ('observations' in loaded_params) and not ('observation_table' in loaded_params):
+                loaded_params['observation_table'] = np.full((loaded_params['state_count'], loaded_params['action_count'], loaded_params['observation_count']), np.nan)
+
+            if line.startswith('O'):
+                observation_params = line.replace(':','').split()[1:]
+                observation_params = observation_params[:-1] if (line.count(':') == 3) else observation_params
+
+                ids = []
+                for i, param in enumerate(observation_params):
+                    if param.isnumeric():
+                        ids.append([int(param)])
+                    elif i == 0:
+                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                    elif i == 1:
+                        ids.append(np.arange(loaded_params['state_count']) if param == '*' else [loaded_params['states'].index(param)])
+                    elif i == 2:
+                        ids.append(np.arange(loaded_params['observation_count']) if param == '*' else [loaded_params['observations'].index(param)])
+                    else:
+                        raise Exception('Cant load more than 3 parameters for observations')
+
+                # single item
+                if len(observation_params) == 3:
+                    for a in ids[0]:
+                        for s_p in ids[1]:
+                            for o in ids[2]:
+                                loaded_params['observation_table'][s_p, a, o] = float(line_items[-1])
+                
+                # More items
+                else:
+                    reading = f'O{len(observation_params)} ' + ' '.join(observation_params)
+                    
+            # Reading action-state line
+            elif reading.startswith('O2'):
+                observation_params = reading.split()[1:]
+
+                ids = []
+                for i, param in enumerate(observation_params):
+                    if param.isnumeric():
+                        ids.append([int(param)])
+                    elif i == 0:
+                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                    else:
+                        ids.append(np.arange(loaded_params['state_count']) if param == '*' else [loaded_params['states'].index(param)])
+
+                for a in ids[0]:
+                    for s_p in ids[1]:
+                        for o, item in enumerate(line_items):
+                            loaded_params['observation_table'][s_p, a, o] = float(item)
+
+                reading = ''
+
+            # Reading action matrix
+            elif reading.startswith('O1'):
+                s_p = read_lines
+
+                observation_params = reading.split()[1:]
+                ids = []
+                for i, param in enumerate(observation_params):
+                    if param.isnumeric():
+                        ids.append([int(param)])
+                    else:
+                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+
+                for a in ids[0]:
+                    for o, item in enumerate(line_items):
+                        loaded_params['observation_table'][s_p, a, o] = float(item)
+
+                read_lines += 1
+                if read_lines == loaded_params['state_count']:
+                    reading = ''
+                    read_lines = 0
+
+
+            # ----------------------------------------------------------------------------------------------
+            # Rewards table
+            # ----------------------------------------------------------------------------------------------
+            if ('states' in loaded_params) and ('actions' in loaded_params) and ('observations' in loaded_params) and not ('reward_table' in loaded_params):
+                loaded_params['reward_table'] = np.full((loaded_params['state_count'], loaded_params['action_count'], loaded_params['state_count'], loaded_params['observation_count']), np.nan)
+
+            if line.startswith('R'):
+                reward_params = line.replace(':','').split()[1:]
+                reward_params = reward_params[:-1] if (line.count(':') == 4) else reward_params
+
+                ids = []
+                for i, param in enumerate(reward_params):
+                    if param.isnumeric():
+                        ids.append([int(param)])
+                    elif i == 0:
+                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                    elif i in [1,2]:
+                        ids.append(np.arange(loaded_params['state_count']) if param == '*' else [loaded_params['states'].index(param)])
+                    elif i == 3:
+                        ids.append(np.arange(loaded_params['observation_count']) if param == '*' else [loaded_params['observations'].index(param)])
+                    else:
+                        raise Exception('Cant load more than 4 parameters for rewards')
+
+                # single item
+                if len(reward_params) == 4:
+                    for a in ids[0]:
+                        for s in ids[1]:
+                            for s_p in ids[2]:
+                                for o in ids[3]:
+                                    loaded_params['reward_table'][s, a, s_p, o] = float(line_items[-1])
+                
+                elif len(reward_params) == 1:
+                    raise Exception('Need more than 1 parameter for rewards')
+
+                # More items
+                else:
+                    reading = f'R{len(reward_params)} ' + ' '.join(reward_params)
+                    
+            # Reading action-state line
+            elif reading.startswith('R3'):
+                reward_params = reading.split()[1:]
+                
+                ids = []
+                for i, param in enumerate(reward_params):
+                    if param.isnumeric():
+                        ids.append([int(param)])
+                    elif i == 0:
+                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                    else:
+                        ids.append(np.arange(loaded_params['state_count']) if param == '*' else [loaded_params['states'].index(param)])
+
+                for a in ids[0]:
+                    for s in ids[1]:
+                        for s_p in ids[2]:
+                            for o, item in enumerate(line_items):
+                                loaded_params['reward_table'][s, a, s_p, o] = float(item)
+
+                reading = ''
+
+            # Reading action matrix
+            elif reading.startswith('R2'):
+                s_p = read_lines
+
+                reward_params = reading.split()[1:]
+                ids = []
+                for i, param in enumerate(reward_params):
+                    if param.isnumeric():
+                        ids.append([int(param)])
+                    elif i == 0:
+                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                    else:
+                        ids.append(np.arange(loaded_params['state_count']) if param == '*' else [loaded_params['states'].index(param)])
+
+                for a in ids[0]:
+                    for s in ids[1]:
+                        for o, item in enumerate(line_items):
+                            loaded_params['reward_table'][s, a, s_p, o] = float(item)
+
+                read_lines += 1
+                if read_lines == loaded_params['state_count']:
+                    reading = ''
+                    read_lines = 0
+
+    # Convertion of rewards to expected rewards
+    rewards = np.full((loaded_params['state_count'], loaded_params['action_count']), np.nan)
+    for s in range(loaded_params['state_count']):
+        for a in range(loaded_params['action_count']):
+            sum = 0
+            for s_p in range(loaded_params['state_count']):
+                inner_sum = 0
+                for o in range(loaded_params['observation_count']):
+                    inner_sum += (loaded_params['observation_table'][s_p,a,o] * loaded_params['reward_table'][s, a, s_p, o])
+                sum += (loaded_params['transition_table'][s, a, s_p] * inner_sum)
+            rewards[s,a] = sum
+
+    # Generation of output
+    loaded_model = Model(loaded_params['states'],
+                         loaded_params['actions'],
+                         loaded_params['observations'],
+                         loaded_params['transition_table'],
+                         loaded_params['reward_table'],
+                         loaded_params['observation_table'])
+
+    loaded_solver = PBVI_Solver(loaded_params['gamma'])
+
+    loaded_initial_belief = Belief(loaded_model, np.array(loaded_params['init_belief'])) if 'init_belief' in loaded_params else None
+
+    return (loaded_model, loaded_solver, loaded_initial_belief)
