@@ -15,8 +15,8 @@ class Model:
 
     Attributes
     ----------
-    states: int|list
-        A list of state labels or an amount of states to be used.
+    states: int | list[str] | list[list[str]]
+        A list of state labels or an amount of states to be used. Also allows to provide a matrix of states to define a grid model.
     actions: int|list
         A list of action labels or an amount of actions to be used.
     transitions:
@@ -32,7 +32,7 @@ class Model:
         Returns a random state given a prior state and an action.
     '''
     def __init__(self,
-                 states:Union[int, list],
+                 states:Union[int, list[str], list[list[str]]],
                  actions:Union[int, list],
                  transitions=None,
                  immediate_rewards=None,
@@ -40,8 +40,20 @@ class Model:
                  ):
         
         # States
+        self.is_grid = False
+        self.grid_dimensions = None
+        self.grid_states = None
         if isinstance(states, int):
             self.state_labels = [f's_{i}' for i in range(states)]
+        elif isinstance(states, list) and all(isinstance(item, list) for item in states):
+            dim1 = len(states)
+            dim2 = len(states[0])
+            assert all(len(state_dim) == dim2 for state_dim in states), "All sublists of states must be of equal size"
+            
+            self.is_grid = True
+            self.grid_dimensions = (dim1,dim2)
+            self.grid_states = states
+
         else:
             self.state_labels = states
         self.state_count = len(self.state_labels)
@@ -117,6 +129,35 @@ class Model:
             return 1 if rnd < reward else 0
         else:
             return reward
+        
+
+    def convert_to_grid(self, state_grid:list[list[Union[str,None]]]) -> None:
+        '''
+        Function to define the grid structure of the the MDP model.
+
+                Parameters:
+                        state_grid (list[list[Union[str,None]]]): A matrix of states (as their labels), None are allowed, it will just be a gap in the grid.
+        '''
+        dim1 = len(state_grid)
+        dim2 = len(state_grid[0])
+        assert all(len(state_dim) == dim2 for state_dim in state_grid), "All sublists of states must be of equal size"
+
+        states_convered = 0
+        for dim1_states in state_grid:
+            for state in dim1_states:
+                if state is None:
+                    continue
+
+                if state in self.state_labels:
+                    states_convered += 1
+                elif not (state in self.state_labels):
+                    raise Exception(f'Countains a state (\'{state}\') not in the list of states...')
+
+        assert states_convered == self.state_count, "Some states of the state list are missing..."
+
+        self.is_grid = True
+        self.grid_dimensions = (dim1, dim2)
+        self.grid_states = state_grid 
 
 
 class SolverHistory(list[dict]):

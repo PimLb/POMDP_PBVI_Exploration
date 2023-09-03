@@ -28,8 +28,8 @@ class Model(MDP_Model):
 
     Attributes
     ----------
-    states: int|list
-        A list of state labels or an amount of states to be used.
+    states: int | list[str] | list[list[str]]
+        A list of state labels or an amount of states to be used. Also allows to provide a matrix of states to define a grid model.
     actions: int|list
         A list of action labels or an amount of actions to be used.
     observations:
@@ -51,7 +51,7 @@ class Model(MDP_Model):
         Returns a random observation based on the posterior state and the action that was taken.
     '''
     def __init__(self,
-                 states:Union[int, list],
+                 states:Union[int, list[str], list[list[str]]],
                  actions:Union[int, list],
                  observations:Union[int, list],
                  transitions=None,
@@ -1091,7 +1091,7 @@ def load_from_file(file_name) -> Tuple[Model, PBVI_Solver, Union[Belief,None]]:
     reading:str = ''
     read_lines = 0
 
-    with open('./Example Models/tiger.95.POMDP') as file:
+    with open(file_name) as file:
         for line in file:
             if line.startswith(('#', '\n')):
                 continue
