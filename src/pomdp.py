@@ -219,6 +219,34 @@ class Belief(np.ndarray):
         '''
         rand_s = int(np.argmax(np.random.multinomial(n=1, pvals=self)))
         return rand_s
+    
+
+    def plot(self, size:int=5) -> None:
+        '''
+        Function to plot a heatmap of the belief distribution if the belief is of a grid model.
+
+                Parameters:
+                        size (int): The scale of the plot. (Default: 5)
+        '''
+        assert self.model.is_grid, "Only implemented for grid models"
+        assert self.model.grid_dimensions is not None
+        assert self.model.grid_states is not None
+
+        values = np.zeros(self.model.grid_dimensions)
+
+        for x in range(values.shape[0]):
+            for y in range(values.shape[1]):
+                state_label = self.model.grid_states[x][y]
+                
+                if state_label is not None:
+                    s = self.model.state_labels.index(state_label) # type: ignore
+                    values[x,y] = self[s]
+                
+
+        plt.figure(figsize=(size*1.2,size))
+        plt.imshow(values)
+        plt.colorbar()
+        plt.show()
 
 
 class SolverHistory(MDP_SolverHistory):
