@@ -4,7 +4,10 @@ from scipy.optimize import milp, LinearConstraint
 from typing import Self, Union
 
 import copy
+import datetime
 import numpy as np
+import os
+import pandas as pd
 import random
 
 
@@ -125,6 +128,53 @@ class ValueFunction(list[AlphaVector]):
             alpha_set = pruned_alphas
         
         return ValueFunction(alpha_set)
+    
+
+    def save(self, path:str='./ValueFunctions', file_name:Union[str,None]=None) -> None:
+        '''
+        Function to save the save function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
+        If no file_name is provided, it be saved as '<current_timestamp>_value_function.csv'.
+
+                Parameters:
+                        path (str): The path at which the csv will be saved.
+                        file_name (str): The file name used to save in.
+        '''
+        if not os.path.exists(path):
+            print('Folder does not exist yet, creating it...')
+            os.makedirs(path)
+            
+        if file_name is None:
+            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            file_name = timestamp + '_value_function.csv'
+
+        data = np.array([[alpha.action, *alpha] for alpha in self])
+        columns = ['action', *[f'state_{i}' for i in range(len(self[0]))]]
+
+        df = pd.DataFrame(data)
+        df.to_csv(path + '/' + file_name, index=False, header=columns)
+
+
+    @classmethod
+    def load_from_file(cls, file) -> Self:
+        '''
+        Function to load the value function from a csv file.
+
+                Parameters:
+                        file (str): The path and file_name of the value function to be loaded.
+                
+                Returns:
+                        loaded_value_function (ValueFunction): The loaded value function.
+        '''
+        df = pd.read_csv(file, header=0, index_col=False)
+        alpha_vectors = df.to_numpy()
+
+        vector_count = alpha_vectors.shape[0]
+
+        vector_list = []
+        for i in range(vector_count):
+            vector_list.append(AlphaVector(alpha_vectors[i,1:], action=int(alpha_vectors[i,0])))
+
+        return ValueFunction(vector_list)
     
 
     def plot(self,
