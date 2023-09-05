@@ -1,4 +1,6 @@
+from matplotlib import colors
 from matplotlib import pyplot as plt
+from matplotlib import patches
 from matplotlib.patches import Rectangle
 from scipy.optimize import milp, LinearConstraint
 from typing import Self, Union
@@ -10,6 +12,20 @@ import numpy as np
 import os
 import pandas as pd
 import random
+
+
+COLOR_LIST = []
+for item, value in colors.TABLEAU_COLORS.items(): # type: ignore
+    value = value.lstrip('#')
+    lv = len(value)
+    rgb_value = tuple(int(value[i:i + lv // 3], 16) for i in range(0, lv, lv // 3))
+
+    COLOR_LIST.append({
+        'name': item.replace('tab:',''),
+        'id': item,
+        'hex': value,
+        'rgb': rgb_value
+    })
 
 
 class Model:
@@ -422,17 +438,22 @@ class ValueFunction(list[AlphaVector]):
                         belief_set (list[Belief]): Optional, a set of belief to plot the belief points that were explored.
         '''
         assert len(self) > 0, "Value function is empty, plotting is impossible..."
-        dimension = self[0].shape[0]
-        assert dimension in [2,3], "Value function plotting only available for MDP's of 2 or 3 states."
 
+        func = None
+        if self.model.state_count == 2:
+            func = self._plot_2D
+        elif self.model.state_count == 3:
+            func = self._plot_3D
+        elif self.model.is_grid:
+            func = self._plot_grid
+        else:
+            raise Exception("Value function plotting only available for MDP's of 2 or 3 states or in grid configuration.")
 
-        func = self._plot_2D if dimension == 2 else self._plot_3D
         func(size, belief_set)
 
 
     def _plot_2D(self, size, belief_set=None):
         x = np.linspace(0, 1, 100)
-        colors = plt.get_cmap('Set1').colors # type: ignore
 
         plt.figure(figsize=(int(size*1.5),size))
         grid_spec = {'height_ratios': ([1] if belief_set is None else [19,1])}
@@ -449,7 +470,7 @@ class ValueFunction(list[AlphaVector]):
 
         ax1 = ax[0] if belief_set is not None else ax
         for i, alpha in enumerate(self):
-            ax1.plot(x[i,:], y[i,:], color=colors[alpha.action]) # type: ignore
+            ax1.plot(x[i,:], y[i,:], color=COLOR_LIST[alpha.action]['id']) # type: ignore
 
         # X-axis setting
         ticks = [0,0.25,0.5,0.75,1]
@@ -460,7 +481,7 @@ class ValueFunction(list[AlphaVector]):
         ax1.set_xticks(ticks, x_ticks) # type: ignore
 
         # Action legend
-        proxy = [Rectangle((0,0),1,1,fc = colors[a]) for a in self.model.actions]
+        proxy = [Rectangle((0,0),1,1,fc = COLOR_LIST[a]['id']) for a in self.model.actions]
         ax1.legend(proxy, self.model.action_labels) # type: ignore
 
         # Belief plotting
@@ -582,16 +603,49 @@ class ValueFunction(list[AlphaVector]):
         plt.colorbar(ax3_plot, ax=ax3)
 
         # Action policy ax
-        colors = plt.get_cmap('Set1').colors #type: ignore
-
         ax4.set_title("Action policy")
-        ax4.contourf(x, y, best_a, 1, colors=colors)
-        proxy = [Rectangle((0,0),1,1,fc = colors[a]) for a in self.model.actions]
+        ax4.contourf(x, y, best_a, 1, colors=[c['id'] for c in COLOR_LIST])
+        proxy = [Rectangle((0,0),1,1,fc = COLOR_LIST[a]['id']) for a in self.model.actions]
         ax4.legend(proxy, self.model.action_labels)
 
         if belief_points is not None:
             for ax in [ax1,ax2,ax3,ax4]:
                 ax.scatter(belief_points[:,0], belief_points[:,1], s=1, c='black')
+
+        plt.show()
+
+
+    def _plot_grid(self, size=5, belief_set=None):
+        assert self.model.grid_dimensions is not None, "Model is not in grid format"
+        assert self.model.grid_states is not None, "Model is not in grid format"
+
+        value_table = np.full(self.model.grid_dimensions, np.nan)
+        best_action_table = np.full([*self.model.grid_dimensions,3],0)
+
+        for x in range(value_table.shape[0]):
+            for y in range(value_table.shape[1]):
+                state_label = self.model.grid_states[x][y]
+                if state_label in self.model.state_labels:
+                    state_id = self.model.state_labels.index(state_label)
+
+                    best_vector = np.argmax(np.array(self)[:,state_id])
+                    value_table[x,y] = self[best_vector][state_id]
+                    best_action_table[x,y,:] = COLOR_LIST[self[best_vector].action]['rgb']
+
+        fig, (ax1,ax2) = plt.subplots(1,2, figsize=(size*2, size), width_ratios=(0.55,0.45))
+
+        ax1.set_title('Value function')
+        ax1_plot = ax1.imshow(value_table)
+        plt.colorbar(ax1_plot, ax=ax1)
+        ax1.set_xticks([i for i in range(self.model.grid_dimensions[1])])
+        ax1.set_yticks([i for i in range(self.model.grid_dimensions[0])])
+
+        ax2.set_title('Action policy')
+        ax2.imshow(best_action_table)
+        p = [ patches.Patch(color=COLOR_LIST[i]['id'], label=self.model.action_labels[i]) for i in self.model.actions]
+        ax2.legend(handles=p, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
+        ax2.set_xticks([i for i in range(self.model.grid_dimensions[1])])
+        ax2.set_yticks([i for i in range(self.model.grid_dimensions[0])])
 
         plt.show()
 

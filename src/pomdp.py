@@ -1,5 +1,5 @@
+from matplotlib import animation, cm, colors, ticker
 from matplotlib import pyplot as plt
-from matplotlib import animation
 from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
@@ -8,19 +8,28 @@ from typing import Self, Tuple, Union
 import copy
 import json
 import numpy as np
-import matplotlib.ticker as MT
-import matplotlib.lines as L
-import matplotlib.cm as CM
-import matplotlib.colors as C
 import math
 import random
 
-from src.framework import RewardHistory
 from src.mdp import AlphaVector, ValueFunction
 from src.mdp import Model as MDP_Model
 from src.mdp import SolverHistory as MDP_SolverHistory
 from src.mdp import Solver as MDP_Solver
 from src.mdp import Simulation as MDP_Simulation
+
+
+COLOR_LIST = []
+for item, value in colors.TABLEAU_COLORS.items(): # type: ignore
+    value = value.lstrip('#')
+    lv = len(value)
+    rgb_value = tuple(int(value[i:i + lv // 3], 16) for i in range(0, lv, lv // 3))
+
+    COLOR_LIST.append({
+        'name': item.replace('tab:',''),
+        'id': item,
+        'hex': value,
+        'rgb': rgb_value
+    })
 
 
 class Model(MDP_Model):
@@ -406,12 +415,12 @@ class SolverHistory(MDP_SolverHistory):
             if(fig == None):        
                 fig = plt.figure()
             # Draw the triangle
-            l1 = L.Line2D([0, 0.5, 1.0, 0], # xcoords
+            l1 = Line2D([0, 0.5, 1.0, 0], # xcoords
                         [0, np.sqrt(3) / 2, 0, 0], # ycoords
                         color='k')
             fig.gca().add_line(l1)
-            fig.gca().xaxis.set_major_locator(MT.NullLocator())
-            fig.gca().yaxis.set_major_locator(MT.NullLocator())
+            fig.gca().xaxis.set_major_locator(ticker.NullLocator())
+            fig.gca().yaxis.set_major_locator(ticker.NullLocator())
             # Draw vertex labels
             fig.gca().text(-0.05, -0.05, vertexlabels[0])
             fig.gca().text(1.05, -0.05, vertexlabels[1])
@@ -430,8 +439,8 @@ class SolverHistory(MDP_SolverHistory):
 
         fig = plt.figure(figsize=(size,size))
 
-        cmap = CM.get_cmap('Blues')
-        norm = C.Normalize(vmin=0, vmax=len(belief_set))
+        cmap = cm.get_cmap('Blues')
+        norm = colors.Normalize(vmin=0, vmax=len(belief_set))
         c = range(len(belief_set))
         # Do scatter plot
         fig = plotSimplex(np.array(belief_set), fig=fig, vertexlabels=self.model.state_labels, s=size, c=c,                      
@@ -492,10 +501,9 @@ class SolverHistory(MDP_SolverHistory):
         x_ticks[-1] = self.model.state_labels[1]
 
         # Colors and lines
-        colors = plt.get_cmap('Set1').colors #type: ignore
         line_types = ['-', '--', '-.', ':']
 
-        proxy = [Rectangle((0,0),1,1,fc = colors[a]) for a in range(self.model.action_count)]
+        proxy = [Rectangle((0,0),1,1,fc = COLOR_LIST[a]['id']) for a in range(self.model.action_count)]
 
         # Solver list
         if isinstance(compare_with, ValueFunction) or isinstance(compare_with, MDP_SolverHistory):
@@ -530,7 +538,7 @@ class SolverHistory(MDP_SolverHistory):
             y = np.add((m*x), alpha_vects[:,0].reshape(m.shape[0],1))
 
             for i, alpha in enumerate(value_function):
-                ax.plot(x[i,:], y[i,:], line_type, color=colors[alpha.action])
+                ax.plot(x[i,:], y[i,:], line_type, color=COLOR_LIST[alpha.action]['id'])
 
         def animate(frame_i):
             ax1.clear()
@@ -1023,6 +1031,119 @@ class Simulation(MDP_Simulation):
             self.is_done = True
 
         return (r, o)
+
+
+class RewardHistory(list):
+    '''
+    Class to represent a list of rewards received during a Simulation.
+    The main purpose of the class is to provide a set of visualization options of the rewards received.
+
+    Multiple types of plots can be done:
+        - Totals: to plot a graph of the accumulated rewards over time.
+        - Moving average: to plot the moving average of the rewards received over time.
+        - Histogram: to plot a histogram of the various rewards received.
+
+    ...
+
+    Attributes
+    ------------
+
+    items: list (Optional)
+        A set of rewards received.
+
+    Methods
+    -------
+
+    plot(type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
+
+    '''
+
+    def __init__(self, items:list=[]):
+        self.extend(items)
+
+    
+    def plot(self, type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
+        '''
+        The method to plot summaries of the rewards received over time.
+        The plots available:
+            - Total ('total' or 't'): to plot the total reward as a cummulative sum over time.
+            - Moving average ('moving_average' or 'ma'): to plot the moving average of the rewards
+            - Hisotgram ('histogram' or 'h'): to plot the various reward in bins to plot a histogram of what was received
+        '''
+        plt.figure(figsize=(size*2,size))
+        plt.title('Cummulative reward received of time')
+
+        # Histories
+        reward_histories = [self]
+        if isinstance(compare_with, RewardHistory):
+            reward_histories.append(compare_with)
+        else:
+            reward_histories += compare_with
+        
+        assert len(reward_histories) < len(COLOR_LIST), "Not enough colors to plot all the comparisson graphs"
+
+        # Names
+        names = []
+        if len(graph_names) in [0, len(reward_histories)]:
+            names.append('Main graph')
+            for i in range(1, len(reward_histories)):
+                names.append(f'Comparisson {i}')
+        else:
+            names = copy.deepcopy(graph_names)
+
+        # Actual plot
+        if type in ['total', 't']:
+            self._plot_total(reward_histories, names, max_reward)
+        elif type in ['moving_average', 'ma']:
+            self._plot_moving_average(reward_histories, names, max_reward)
+        elif type in ['histogram', 'h']:
+            self._plot_histogram(reward_histories, names, max_reward)
+
+        # Finalization
+        plt.legend(loc='upper left')
+        plt.show()
+
+
+    def _plot_total(self, reward_histories, names, max_reward=None):
+        x = np.arange(len(reward_histories[0]))
+
+        # If given plot upper bound
+        if max_reward is not None:
+            y_best = max_reward * x
+            plt.plot(x, y_best, color='red', linestyle='--', label='Max rewards')
+
+        # Plot rewards
+        for i, (rh, name) in enumerate(zip(reward_histories, names)):
+            cum_rewards = np.cumsum(rh)
+            plt.plot(x, cum_rewards, label=name, c=COLOR_LIST[i]['id'])
+    
+
+    def _plot_moving_average(self, reward_histories, names, max_reward=None):
+        x = np.arange(len(reward_histories[0]))
+
+        # If given plot upper bound
+        if max_reward is not None:
+            y_best = np.ones(len(reward_histories[0])) * max_reward
+            plt.plot(x, y_best, color='red', linestyle='--', label='Max rewards')
+
+        # Plot rewards
+        for i, (rh, name) in enumerate(zip(reward_histories, names)):
+            moving_avg = np.divide(np.cumsum(rh), (x+1))
+            plt.plot(x, moving_avg, label=name, c=COLOR_LIST[i]['id'])
+
+
+    def _plot_histogram(self, reward_histories, names, max_rewards=None):
+        max_unique = -np.inf
+        for rh in reward_histories:
+            unique_count = np.unique(rh).shape[0]
+            if max_unique < unique_count:
+                max_unique = unique_count
+
+        bin_count = int(max_unique) if max_unique < 10 else 10
+
+        # Plot rewards
+        for i, (rh, name) in enumerate(zip(reward_histories, names)):
+            plt.hist(rh, bin_count, label=name, color=COLOR_LIST[i]['id'])
 
 
 class Agent:
