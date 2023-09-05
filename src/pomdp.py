@@ -45,6 +45,8 @@ class Model(MDP_Model):
         The observation matrix, has to be |S| x |A| x |O|. If none is provided, it will be randomly generated.
     probabilistic_rewards: bool
         Whether the rewards provided are probabilistic or pure rewards. If probabilist 0 or 1 will be the reward with a certain probability.
+    grid_states: list[list[Union[str,None]]]
+        Optional, if provided, the model will be converted to a grid model. Allows for 'None' states if there is a gaps in the grid.
 
     Methods
     -------
@@ -60,14 +62,16 @@ class Model(MDP_Model):
                  transition_table=None,
                  immediate_reward_table=None,
                  observation_table=None,
-                 probabilistic_rewards:bool=False
+                 probabilistic_rewards:bool=False,
+                 grid_states:Union[None,list[list[Union[str,None]]]]=None
                  ):
         
         super().__init__(states=states,
                          actions=actions,
                          transition_table=transition_table,
-                         immediate_reward_table=None, # Defined here lower as immediate reward for MDP is different than for POMDP
-                         probabilistic_rewards=probabilistic_rewards)
+                         immediate_reward_table=None, # Defined here lower since immediate reward table has different shape for MDP is different than for POMDP
+                         probabilistic_rewards=probabilistic_rewards,
+                         grid_states=grid_states)
 
         if isinstance(observations, int):
             self.observation_labels = [f'o_{i}' for i in range(observations)]
@@ -160,12 +164,12 @@ class Model(MDP_Model):
     @classmethod
     def load_from_json(cls, file:str) -> Self:
         '''
-        Function to load a model from a json file. The json structure must contain the same items as in the constructor of this class.
+        Function to load a POMDP model from a json file. The json structure must contain the same items as in the constructor of this class.
 
                 Parameters:
                         file (str): The file and path of the model to be loaded.
                 Returns:
-                        loaded_model (Model): An instance of the loaded model.
+                        loaded_model (pomdp.Model): An instance of the loaded model.
         '''
         with open(file, 'r') as openfile:
             json_model = json.load(openfile)
@@ -444,7 +448,7 @@ class SolverHistory(MDP_SolverHistory):
                 Parameters:
                         size (int): The figure size and general scaling factor
         '''
-        self.solution.plot(size, self.model.state_labels, self.model.action_labels, (self.explored_beliefs if plot_belief else None))
+        self.solution.plot(size, (self.explored_beliefs if plot_belief else None))
 
 
     def save_history_video(self,
@@ -676,7 +680,7 @@ class PBVI_Solver(Solver):
                     gamma_a_o_t[a][o] = alpa_a_o_set
 
         # Step 2
-        new_value_function = ValueFunction([])
+        new_value_function = ValueFunction(model)
         
         for b in belief_set:
             
@@ -914,15 +918,15 @@ class PBVI_Solver(Solver):
         
         # Initial value function
         if initial_value_function is None:
-            value_function = ValueFunction([AlphaVector(model.expected_rewards_table[:,a], a) for a in model.actions])
+            value_function = ValueFunction(model, [AlphaVector(model.expected_rewards_table[:,a], a) for a in model.actions])
         else:
             value_function = initial_value_function
 
         # History tracking
         solver_history = SolverHistory(model=model,
-                                             expand_function=self.expand_function,
-                                             gamma=self.gamma,
-                                             eps=self.eps)
+                                       expand_function=self.expand_function,
+                                       gamma=self.gamma,
+                                       eps=self.eps)
         solver_history.append({
             'value_function': value_function,
             'beliefs': belief_set

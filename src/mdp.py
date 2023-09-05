@@ -12,375 +12,6 @@ import pandas as pd
 import random
 
 
-# from src.framework import AlphaVector, ValueFunction
-
-
-class AlphaVector(np.ndarray):
-    '''
-    A class to represent an Alpha Vector, a vector representing a plane in |S| dimension for POMDP models.
-
-    ...
-
-    Attributes
-    ----------
-    input_array: 
-        The actual vector with the value for each state.
-    action: int
-        The action associated with the vector.
-    '''
-    def __new__(cls, input_array, action:int):
-        obj = np.asarray(input_array).view(cls)
-        obj._action = action
-        return obj
-
-    def __array_finalize__(self, obj):
-        if obj is None: return
-        self._action = getattr(obj, '_action', None)
-
-    @property
-    def action(self) -> int:
-        assert self._action is not None
-        return self._action
-
-
-class ValueFunction(list[AlphaVector]):
-    '''
-    Class representing a set of AlphaVectors. One such set approximates the value function of the MDP model.
-
-    ...
-
-    Methods
-    -------
-    prune(level:int=1):
-        Provides a ValueFunction where the alpha vector set is pruned with a certain level of pruning.
-    plot(size:int=5, state_list:list[str], action_list:list[str], belief_set):
-        Function to plot the value function for 2- or 3-state models.
-    '''
-
-    def prune(self, level:int=1) -> Self:
-        '''
-        Function returning a new value function with the set of alpha vector composing it being it pruned.
-        The pruning is as thorough as the level:
-            - 0: No pruning, returns a value function with the alpha vector set being an exact copy of the current one.
-            - 1: Simple deduplication of the alpha vectors.
-            - 2: 1+ Check of absolute domination (check if dominated at each state).
-            - 3: 2+ Solves Linear Programming problem for each alpha vector to see if it is dominated by combinations of other vectors.
-        
-        Note that the higher the level, the heavier the time impact will be.
-
-                Parameters:
-                        level (int): Between 0 and 3, how thorough the alpha vector pruning should be.
-                
-                Returns:
-                        new_value_function (ValueFunction): A new value function with a pruned set of alpha vectors.
-        '''
-        if level < 1:
-            return copy.deepcopy(self)
-        
-        alpha_set = []
-
-        # Level 1 pruning: Check for duplicates
-        if level >= 1:
-            L = {array.tobytes(): array for array in self}
-            alpha_set = list(L.values())
-        
-        # Level 2 pruning: Check for absolute domination
-        if level >= 2:
-            new_alpha_set = []
-            for alpha_vector in alpha_set:
-                dominated = False
-                for compare_alpha_vector in alpha_set:
-                    if all(alpha_vector < compare_alpha_vector):
-                        dominated = True
-                if not dominated:
-                    new_alpha_set.append(alpha_vector)
-            alpha_set = new_alpha_set
-
-        # Level 3 pruning: LP to check for more complex domination
-        elif level >= 3:
-            pruned_alphas = []
-            state_count = alpha_set[0].shape[0]
-
-            for i, alpha_vect in enumerate(alpha_set):
-                other_alphas = alpha_set[:i] + alpha_set[(i+1):]
-
-                # Objective function
-                c = np.concatenate([np.array([1]), -1*alpha_vect])
-
-                # Alpha vector contraints
-                other_count = len(other_alphas)
-                A = np.c_[np.ones(other_count), np.multiply(np.array(other_alphas), -1)]
-                # b_l = np.zeros(other_count)
-                # b_u = np.full_like(b_l, np.inf)
-                alpha_constraints = LinearConstraint(A, 0, np.inf)
-
-                # Constraints that sum of beliefs is 1
-                belief_constraint = LinearConstraint(np.array([0] + ([1]*state_count)), 1, 1)
-
-                # Solve problem
-                res = milp(c=c, constraints=[alpha_constraints, belief_constraint])
-
-                # Check if dominated
-                is_dominated = (res.x[0] - np.dot(res.x[1:], alpha_vect)) >= 0
-                if is_dominated:
-                    print(alpha_vect)
-                    print(' -> Dominated\n')
-
-                else:
-                    pruned_alphas.append(alpha_vect)
-
-            alpha_set = pruned_alphas
-        
-        return ValueFunction(alpha_set)
-    
-
-    def save(self, path:str='./ValueFunctions', file_name:Union[str,None]=None) -> None:
-        '''
-        Function to save the save function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
-        If no file_name is provided, it be saved as '<current_timestamp>_value_function.csv'.
-
-                Parameters:
-                        path (str): The path at which the csv will be saved.
-                        file_name (str): The file name used to save in.
-        '''
-        if not os.path.exists(path):
-            print('Folder does not exist yet, creating it...')
-            os.makedirs(path)
-            
-        if file_name is None:
-            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-            file_name = timestamp + '_value_function.csv'
-
-        data = np.array([[alpha.action, *alpha] for alpha in self])
-        columns = ['action', *[f'state_{i}' for i in range(len(self[0]))]]
-
-        df = pd.DataFrame(data)
-        df.to_csv(path + '/' + file_name, index=False, header=columns)
-
-
-    @classmethod
-    def load_from_file(cls, file) -> Self:
-        '''
-        Function to load the value function from a csv file.
-
-                Parameters:
-                        file (str): The path and file_name of the value function to be loaded.
-                
-                Returns:
-                        loaded_value_function (ValueFunction): The loaded value function.
-        '''
-        df = pd.read_csv(file, header=0, index_col=False)
-        alpha_vectors = df.to_numpy()
-
-        vector_count = alpha_vectors.shape[0]
-
-        vector_list = []
-        for i in range(vector_count):
-            vector_list.append(AlphaVector(alpha_vectors[i,1:], action=int(alpha_vectors[i,0])))
-
-        return ValueFunction(vector_list)
-    
-
-    def plot(self,
-             size:int=5,
-             state_list:Union[list[str],None]=None,
-             action_list:Union[list[str],None]=None,
-             belief_set=None
-             ):
-        '''
-        Function to plot out the value function in 2 or 3 dimensions.
-
-                Parameters:
-                        size (int): Default:5, The actual plot scale.
-                        state_list (list[str]): Optional, list of state labels.
-                        action_list (list[str]): Optional, list of action labels.
-                        belief_set (list[Belief]): Optional, a set of belief to plot the belief points that were explored.
-        '''
-        assert len(self) > 0, "Value function is empty, plotting is impossible..."
-        dimension = self[0].shape[0]
-        assert dimension in [2,3], "Value function plotting only available for MDP's of 2 or 3 states."
-
-        if state_list is None:
-            state_list = [f's_{i}' for i in range(dimension)]
-
-        if action_list is None:
-            actions = []
-            for alpha in self:
-                if alpha.action not in actions:
-                    actions.append(alpha.action)
-
-            action_list = [f'a_{i}' for i in actions]
-
-        func = self._plot_2D if dimension == 2 else self._plot_3D
-        func(size, state_list, action_list, belief_set)
-
-
-    def _plot_2D(self, size, state_list, action_list, belief_set=None):
-        x = np.linspace(0, 1, 100)
-        colors = plt.get_cmap('Set1').colors # type: ignore
-
-        plt.figure(figsize=(int(size*1.5),size))
-        grid_spec = {'height_ratios': ([1] if belief_set is None else [19,1])}
-        _, ax = plt.subplots((2 if belief_set is not None else 1),1,sharex=True,gridspec_kw=grid_spec)
-
-        # Vector plotting
-        alpha_vects = np.array(self)
-
-        m = alpha_vects[:,1] - alpha_vects[:,0] # type: ignore
-        m = m.reshape(m.shape[0],1)
-
-        x = x.reshape((1,x.shape[0])).repeat(m.shape[0],axis=0)
-        y = (m*x) + alpha_vects[:,0].reshape(m.shape[0],1)
-
-        ax1 = ax[0] if belief_set is not None else ax
-        for i, alpha in enumerate(self):
-            ax1.plot(x[i,:], y[i,:], color=colors[alpha.action]) # type: ignore
-
-        # X-axis setting
-        ticks = [0,0.25,0.5,0.75,1]
-        x_ticks = [str(t) for t in ticks]
-        x_ticks[0] = state_list[0]
-        x_ticks[-1] = state_list[1]
-
-        ax1.set_xticks(ticks, x_ticks) # type: ignore
-
-        # Action legend
-        proxy = [Rectangle((0,0),1,1,fc = colors[a]) for a in range(len(action_list))]
-        ax1.legend(proxy, action_list) # type: ignore
-
-        # Belief plotting
-        if belief_set is not None:
-            beliefs_x = np.array(belief_set)[:,1]
-            ax[1].scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
-            ax[1].get_yaxis().set_visible(False)
-            ax[1].axhline(0, color='black')
-
-        plt.show()
-
-
-    def _plot_3D(self, size, state_list, action_list, belief_set=None):
-
-        def get_alpha_vect_z(xx, yy, alpha_vect):
-            x0, y0, z0 = [0, 0, alpha_vect[0]]
-            x1, y1, z1 = [1, 0, alpha_vect[1]]
-            x2, y2, z2 = [0, 1, alpha_vect[2]]
-
-            ux, uy, uz = u = [x1-x0, y1-y0, z1-z0]
-            vx, vy, vz = v = [x2-x0, y2-y0, z2-z0]
-
-            u_cross_v = [uy*vz-uz*vy, uz*vx-ux*vz, ux*vy-uy*vx]
-
-            point  = np.array([0, 0, alpha_vect[0]])
-            normal = np.array(u_cross_v)
-
-            d = -point.dot(normal)
-
-            z = (-normal[0] * xx - normal[1] * yy - d) * 1. / normal[2]
-            
-            return z
-
-        def get_plane_gradient(alpha_vect):
-        
-            x0, y0, z0 = [0, 0, alpha_vect[0]]
-            x1, y1, z1 = [1, 0, alpha_vect[1]]
-            x2, y2, z2 = [0, 1, alpha_vect[2]]
-
-            ux, uy, uz = u = [x1-x0, y1-y0, z1-z0]
-            vx, vy, vz = v = [x2-x0, y2-y0, z2-z0]
-
-            u_cross_v = [uy*vz-uz*vy, uz*vx-ux*vz, ux*vy-uy*vx]
-            
-            normal_vector = np.array(u_cross_v)
-            normal_vector_norm = float(np.linalg.norm(normal_vector))
-            normal_vector = np.divide(normal_vector, normal_vector_norm)
-            normal_vector[2] = 0
-            
-            return np.linalg.norm(normal_vector)
-
-        # Actual plotting
-        x = np.linspace(0, 1, 1000)
-        y = np.linspace(0, 1, 1000)
-
-        xx, yy = np.meshgrid(x, y)
-
-        max_z = np.zeros((xx.shape[0], yy.shape[0]))
-        best_a = (np.zeros((xx.shape[0], yy.shape[0])))
-        plane = (np.zeros((xx.shape[0], yy.shape[0])))
-        gradients = (np.zeros((xx.shape[0], yy.shape[0])))
-
-        for alpha in self:
-
-            z = get_alpha_vect_z(xx, yy, alpha)
-
-            # Action array update
-            new_a_mask = np.argmax(np.array([max_z, z]), axis=0)
-
-            best_a[new_a_mask == 1] = alpha.action
-            
-            plane[new_a_mask == 1] = random.randrange(100)
-            
-            alpha_gradient = get_plane_gradient(alpha)
-            gradients[new_a_mask == 1] = alpha_gradient
-
-            # Max z update
-            max_z = np.max(np.array([max_z, z]), axis=0)
-            
-        for x_i, x_val in enumerate(x):
-            for y_i, y_val in enumerate(y):
-                if (x_val+y_val) > 1:
-                    max_z[x_i, y_i] = np.nan
-                    plane[x_i, y_i] = np.nan
-                    gradients[x_i, y_i] = np.nan
-                    best_a[x_i, y_i] = np.nan
-
-        belief_points = None
-        if belief_set is not None:
-            belief_points = np.array(belief_set)[:,1:]
-                    
-        fig, ((ax1, ax2),(ax3,ax4)) = plt.subplots(2, 2, figsize=(size*4,size*3.5), sharex=True, sharey=True)
-
-        # Set ticks
-        ticks = [0,0.25,0.5,0.75,1]
-        x_ticks = [str(t) for t in ticks]
-        x_ticks[0] = state_list[0]
-        x_ticks[-1] = state_list[1]
-        
-        y_ticks = [str(t) for t in ticks]
-        y_ticks[0] = state_list[0]
-        y_ticks[-1] = state_list[2]
-
-        plt.setp([ax1,ax2,ax3,ax4], xticks=ticks, xticklabels=x_ticks, yticks=ticks, yticklabels=y_ticks)
-
-        # Value function ax
-        ax1.set_title("Value function")
-        ax1_plot = ax1.contourf(x, y, max_z, 100, cmap="viridis")
-        plt.colorbar(ax1_plot, ax=ax1)
-
-        # Alpha planes ax
-        ax2.set_title("Alpha planes")
-        ax2_plot = ax2.contourf(x, y, plane, 100, cmap="viridis")
-        plt.colorbar(ax2_plot, ax=ax2)
-        
-        # Gradient of planes ax
-        ax3.set_title("Gradients of planes")
-        ax3_plot = ax3.contourf(x, y, gradients, 100, cmap="Blues")
-        plt.colorbar(ax3_plot, ax=ax3)
-
-        # Action policy ax
-        colors = plt.get_cmap('Set1').colors #type: ignore
-
-        ax4.set_title("Action policy")
-        ax4.contourf(x, y, best_a, 1, colors=colors)
-        proxy = [Rectangle((0,0),1,1,fc = colors[a]) for a in range(len(action_list))]
-        ax4.legend(proxy, action_list)
-
-        if belief_points is not None:
-            for ax in [ax1,ax2,ax3,ax4]:
-                ax.scatter(belief_points[:,0], belief_points[:,1], s=1, c='black')
-
-        plt.show()
-
-
 class Model:
     '''
     MDP Model class.
@@ -399,6 +30,8 @@ class Model:
         The reward matrix, has to be |S| x |A| x |S|. If provided, it will be use in combination with the transition matrix to fill to expected rewards.
     probabilistic_rewards: bool
         Whether the rewards provided are probabilistic or pure rewards. If probabilist 0 or 1 will be the reward with a certain probability.
+    grid_states: list[list[Union[str,None]]]
+        Optional, if provided, the model will be converted to a grid model. Allows for 'None' states if there is a gaps in the grid.
 
     Methods
     -------
@@ -410,7 +43,8 @@ class Model:
                  actions:Union[int, list],
                  transition_table=None,
                  immediate_reward_table=None,
-                 probabilistic_rewards:bool=False
+                 probabilistic_rewards:bool=False,
+                 grid_states:Union[None,list[list[Union[str,None]]]]=None
                  ):
         
         # States
@@ -424,12 +58,17 @@ class Model:
             dim2 = len(states[0])
             assert all(len(state_dim) == dim2 for state_dim in states), "All sublists of states must be of equal size"
             
+            self.state_labels = []
+            for state_dim in states:
+                for state in state_dim:
+                    self.state_labels.append(state)
+
             self.is_grid = True
             self.grid_dimensions = (dim1,dim2)
             self.grid_states = states
-
         else:
-            self.state_labels = states
+            self.state_labels = [item for item in states if isinstance(item, str)]
+
         self.state_count = len(self.state_labels)
         self.states = [state for state in range(self.state_count)]
 
@@ -467,6 +106,10 @@ class Model:
 
         # Rewards are probabilistic
         self.probabilistic_rewards = probabilistic_rewards
+
+        # Convert to grid if grid_states is provided
+        if grid_states is not None:
+            self.convert_to_grid(grid_states)
 
     
     def transition(self, s:int, a:int) -> int:
@@ -580,12 +223,12 @@ class Model:
     @classmethod
     def load_from_json(cls, file:str) -> Self:
         '''
-        Function to load a model from a json file. The json structure must contain the same items as in the constructor of this class.
+        Function to load a MDP model from a json file. The json structure must contain the same items as in the constructor of this class.
 
                 Parameters:
                         file (str): The file and path of the model to be loaded.
                 Returns:
-                        loaded_model (Model): An instance of the loaded model.
+                        loaded_model (mdp.Model): An instance of the loaded model.
         '''
         with open(file, 'r') as openfile:
             json_model = json.load(openfile)
@@ -596,6 +239,361 @@ class Model:
             loaded_model.convert_to_grid(json_model['grid_states'])
 
         return loaded_model
+
+
+class AlphaVector(np.ndarray):
+    '''
+    A class to represent an Alpha Vector, a vector representing a plane in |S| dimension for POMDP models.
+
+    ...
+
+    Attributes
+    ----------
+    input_array: 
+        The actual vector with the value for each state.
+    action: int
+        The action associated with the vector.
+    '''
+    def __new__(cls, input_array, action:int):
+        obj = np.asarray(input_array).view(cls)
+        obj._action = action
+        return obj
+
+    def __array_finalize__(self, obj):
+        if obj is None: return
+        self._action = getattr(obj, '_action', None)
+
+    @property
+    def action(self) -> int:
+        assert self._action is not None
+        return self._action
+
+
+class ValueFunction(list[AlphaVector]):
+    '''
+    Class representing a set of AlphaVectors. One such set approximates the value function of the MDP model.
+
+    ...
+
+    Methods
+    -------
+    prune(level:int=1):
+        Provides a ValueFunction where the alpha vector set is pruned with a certain level of pruning.
+    plot(size:int=5, state_list:list[str], action_list:list[str], belief_set):
+        Function to plot the value function for 2- or 3-state models.
+    '''
+    def __init__(self, model:Model, alpha_vectors:list[AlphaVector]=[]):
+        self.model = model
+        for vector in alpha_vectors:
+            self.append(vector)
+
+
+    def prune(self, level:int=1) -> Self:
+        '''
+        Function returning a new value function with the set of alpha vector composing it being it pruned.
+        The pruning is as thorough as the level:
+            - 0: No pruning, returns a value function with the alpha vector set being an exact copy of the current one.
+            - 1: Simple deduplication of the alpha vectors.
+            - 2: 1+ Check of absolute domination (check if dominated at each state).
+            - 3: 2+ Solves Linear Programming problem for each alpha vector to see if it is dominated by combinations of other vectors.
+        
+        Note that the higher the level, the heavier the time impact will be.
+
+                Parameters:
+                        level (int): Between 0 and 3, how thorough the alpha vector pruning should be.
+                
+                Returns:
+                        new_value_function (ValueFunction): A new value function with a pruned set of alpha vectors.
+        '''
+        if level < 1:
+            return copy.deepcopy(self)
+        
+        pruned_alpha_set = ValueFunction(self.model)
+
+        # Level 1 pruning: Check for duplicates
+        if level >= 1:
+            L = {array.tobytes(): array for array in self}
+            pruned_alpha_set.extend(list(L.values()))
+        
+        # Level 2 pruning: Check for absolute domination
+        if level >= 2:
+            alpha_set = pruned_alpha_set
+            pruned_alpha_set = ValueFunction(self.model)
+            for alpha_vector in alpha_set:
+                dominated = False
+                for compare_alpha_vector in alpha_set:
+                    if all(alpha_vector < compare_alpha_vector):
+                        dominated = True
+                if not dominated:
+                    pruned_alpha_set.append(alpha_vector)
+
+        # Level 3 pruning: LP to check for more complex domination
+        elif level >= 3:
+            alpha_set = pruned_alpha_set
+            pruned_alpha_set = ValueFunction(self.model)
+
+            for i, alpha_vect in enumerate(alpha_set):
+                other_alphas = alpha_set[:i] + alpha_set[(i+1):]
+
+                # Objective function
+                c = np.concatenate([np.array([1]), -1*alpha_vect])
+
+                # Alpha vector contraints
+                other_count = len(other_alphas)
+                A = np.c_[np.ones(other_count), np.multiply(np.array(other_alphas), -1)]
+                # b_l = np.zeros(other_count)
+                # b_u = np.full_like(b_l, np.inf)
+                alpha_constraints = LinearConstraint(A, 0, np.inf)
+
+                # Constraints that sum of beliefs is 1
+                belief_constraint = LinearConstraint(np.array([0] + ([1]*self.model.state_count)), 1, 1)
+
+                # Solve problem
+                res = milp(c=c, constraints=[alpha_constraints, belief_constraint])
+
+                # Check if dominated
+                is_dominated = (res.x[0] - np.dot(res.x[1:], alpha_vect)) >= 0
+                if is_dominated:
+                    print(alpha_vect)
+                    print(' -> Dominated\n')
+                else:
+                    pruned_alpha_set.append(alpha_vect)
+        
+        return pruned_alpha_set
+    
+
+    def save(self, path:str='./ValueFunctions', file_name:Union[str,None]=None) -> None:
+        '''
+        Function to save the save function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
+        If no file_name is provided, it be saved as '<current_timestamp>_value_function.csv'.
+
+                Parameters:
+                        path (str): The path at which the csv will be saved.
+                        file_name (str): The file name used to save in.
+        '''
+        if not os.path.exists(path):
+            print('Folder does not exist yet, creating it...')
+            os.makedirs(path)
+            
+        if file_name is None:
+            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            file_name = timestamp + '_value_function.csv'
+
+        data = np.array([[alpha.action, *alpha] for alpha in self])
+        columns = ['action', *[f'state_{i}' for i in range(len(self[0]))]]
+
+        df = pd.DataFrame(data)
+        df.to_csv(path + '/' + file_name, index=False, header=columns)
+
+
+    @classmethod
+    def load_from_file(cls, file:str, model:Model) -> Self:
+        '''
+        Function to load the value function from a csv file.
+
+                Parameters:
+                        file (str): The path and file_name of the value function to be loaded.
+                        model (mdp.Model): The model the value function is linked to.
+                
+                Returns:
+                        loaded_value_function (ValueFunction): The loaded value function.
+        '''
+        df = pd.read_csv(file, header=0, index_col=False)
+        alpha_vectors = df.to_numpy()
+
+        vector_count = alpha_vectors.shape[0]
+
+        vector_list = []
+        for i in range(vector_count):
+            vector_list.append(AlphaVector(alpha_vectors[i,1:], action=int(alpha_vectors[i,0])))
+
+        return ValueFunction(model, vector_list)
+    
+
+    def plot(self,
+             size:int=5,
+             belief_set=None
+             ):
+        '''
+        Function to plot out the value function in 2 or 3 dimensions.
+
+                Parameters:
+                        size (int): Default:5, The actual plot scale.
+                        belief_set (list[Belief]): Optional, a set of belief to plot the belief points that were explored.
+        '''
+        assert len(self) > 0, "Value function is empty, plotting is impossible..."
+        dimension = self[0].shape[0]
+        assert dimension in [2,3], "Value function plotting only available for MDP's of 2 or 3 states."
+
+
+        func = self._plot_2D if dimension == 2 else self._plot_3D
+        func(size, belief_set)
+
+
+    def _plot_2D(self, size, belief_set=None):
+        x = np.linspace(0, 1, 100)
+        colors = plt.get_cmap('Set1').colors # type: ignore
+
+        plt.figure(figsize=(int(size*1.5),size))
+        grid_spec = {'height_ratios': ([1] if belief_set is None else [19,1])}
+        _, ax = plt.subplots((2 if belief_set is not None else 1),1,sharex=True,gridspec_kw=grid_spec)
+
+        # Vector plotting
+        alpha_vects = np.array(self)
+
+        m = alpha_vects[:,1] - alpha_vects[:,0] # type: ignore
+        m = m.reshape(m.shape[0],1)
+
+        x = x.reshape((1,x.shape[0])).repeat(m.shape[0],axis=0)
+        y = (m*x) + alpha_vects[:,0].reshape(m.shape[0],1)
+
+        ax1 = ax[0] if belief_set is not None else ax
+        for i, alpha in enumerate(self):
+            ax1.plot(x[i,:], y[i,:], color=colors[alpha.action]) # type: ignore
+
+        # X-axis setting
+        ticks = [0,0.25,0.5,0.75,1]
+        x_ticks = [str(t) for t in ticks]
+        x_ticks[0] = self.model.state_labels[0]
+        x_ticks[-1] = self.model.state_labels[1]
+
+        ax1.set_xticks(ticks, x_ticks) # type: ignore
+
+        # Action legend
+        proxy = [Rectangle((0,0),1,1,fc = colors[a]) for a in self.model.actions]
+        ax1.legend(proxy, self.model.action_labels) # type: ignore
+
+        # Belief plotting
+        if belief_set is not None:
+            beliefs_x = np.array(belief_set)[:,1]
+            ax[1].scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
+            ax[1].get_yaxis().set_visible(False)
+            ax[1].axhline(0, color='black')
+
+        plt.show()
+
+
+    def _plot_3D(self, size, belief_set=None):
+
+        def get_alpha_vect_z(xx, yy, alpha_vect):
+            x0, y0, z0 = [0, 0, alpha_vect[0]]
+            x1, y1, z1 = [1, 0, alpha_vect[1]]
+            x2, y2, z2 = [0, 1, alpha_vect[2]]
+
+            ux, uy, uz = u = [x1-x0, y1-y0, z1-z0]
+            vx, vy, vz = v = [x2-x0, y2-y0, z2-z0]
+
+            u_cross_v = [uy*vz-uz*vy, uz*vx-ux*vz, ux*vy-uy*vx]
+
+            point  = np.array([0, 0, alpha_vect[0]])
+            normal = np.array(u_cross_v)
+
+            d = -point.dot(normal)
+
+            z = (-normal[0] * xx - normal[1] * yy - d) * 1. / normal[2]
+            
+            return z
+
+        def get_plane_gradient(alpha_vect):
+        
+            x0, y0, z0 = [0, 0, alpha_vect[0]]
+            x1, y1, z1 = [1, 0, alpha_vect[1]]
+            x2, y2, z2 = [0, 1, alpha_vect[2]]
+
+            ux, uy, uz = u = [x1-x0, y1-y0, z1-z0]
+            vx, vy, vz = v = [x2-x0, y2-y0, z2-z0]
+
+            u_cross_v = [uy*vz-uz*vy, uz*vx-ux*vz, ux*vy-uy*vx]
+            
+            normal_vector = np.array(u_cross_v)
+            normal_vector_norm = float(np.linalg.norm(normal_vector))
+            normal_vector = np.divide(normal_vector, normal_vector_norm)
+            normal_vector[2] = 0
+            
+            return np.linalg.norm(normal_vector)
+
+        # Actual plotting
+        x = np.linspace(0, 1, 1000)
+        y = np.linspace(0, 1, 1000)
+
+        xx, yy = np.meshgrid(x, y)
+
+        max_z = np.zeros((xx.shape[0], yy.shape[0]))
+        best_a = (np.zeros((xx.shape[0], yy.shape[0])))
+        plane = (np.zeros((xx.shape[0], yy.shape[0])))
+        gradients = (np.zeros((xx.shape[0], yy.shape[0])))
+
+        for alpha in self:
+
+            z = get_alpha_vect_z(xx, yy, alpha)
+
+            # Action array update
+            new_a_mask = np.argmax(np.array([max_z, z]), axis=0)
+
+            best_a[new_a_mask == 1] = alpha.action
+            
+            plane[new_a_mask == 1] = random.randrange(100)
+            
+            alpha_gradient = get_plane_gradient(alpha)
+            gradients[new_a_mask == 1] = alpha_gradient
+
+            # Max z update
+            max_z = np.max(np.array([max_z, z]), axis=0)
+            
+        for x_i, x_val in enumerate(x):
+            for y_i, y_val in enumerate(y):
+                if (x_val+y_val) > 1:
+                    max_z[x_i, y_i] = np.nan
+                    plane[x_i, y_i] = np.nan
+                    gradients[x_i, y_i] = np.nan
+                    best_a[x_i, y_i] = np.nan
+
+        belief_points = None
+        if belief_set is not None:
+            belief_points = np.array(belief_set)[:,1:]
+                    
+        fig, ((ax1, ax2),(ax3,ax4)) = plt.subplots(2, 2, figsize=(size*4,size*3.5), sharex=True, sharey=True)
+
+        # Set ticks
+        ticks = [0,0.25,0.5,0.75,1]
+        x_ticks = [str(t) for t in ticks]
+        x_ticks[0] = self.model.state_labels[0]
+        x_ticks[-1] = self.model.state_labels[1]
+        
+        y_ticks = [str(t) for t in ticks]
+        y_ticks[0] = self.model.state_labels[0]
+        y_ticks[-1] = self.model.state_labels[2]
+
+        plt.setp([ax1,ax2,ax3,ax4], xticks=ticks, xticklabels=x_ticks, yticks=ticks, yticklabels=y_ticks)
+
+        # Value function ax
+        ax1.set_title("Value function")
+        ax1_plot = ax1.contourf(x, y, max_z, 100, cmap="viridis")
+        plt.colorbar(ax1_plot, ax=ax1)
+
+        # Alpha planes ax
+        ax2.set_title("Alpha planes")
+        ax2_plot = ax2.contourf(x, y, plane, 100, cmap="viridis")
+        plt.colorbar(ax2_plot, ax=ax2)
+        
+        # Gradient of planes ax
+        ax3.set_title("Gradients of planes")
+        ax3_plot = ax3.contourf(x, y, gradients, 100, cmap="Blues")
+        plt.colorbar(ax3_plot, ax=ax3)
+
+        # Action policy ax
+        colors = plt.get_cmap('Set1').colors #type: ignore
+
+        ax4.set_title("Action policy")
+        ax4.contourf(x, y, best_a, 1, colors=colors)
+        proxy = [Rectangle((0,0),1,1,fc = colors[a]) for a in self.model.actions]
+        ax4.legend(proxy, self.model.action_labels)
+
+        if belief_points is not None:
+            for ax in [ax1,ax2,ax3,ax4]:
+                ax.scatter(belief_points[:,0], belief_points[:,1], s=1, c='black')
+
+        plt.show()
 
 
 class SolverHistory(list[dict]):
@@ -665,7 +663,7 @@ class VI_Solver(Solver):
 
     def solve(self, model: Model) -> tuple[ValueFunction, SolverHistory]:
         # Initiallize V as a |S| x |A| matrix of the reward expected when being in state s and taking action a
-        V = ValueFunction([AlphaVector(model.expected_rewards_table[:,a], a) for a in model.actions])
+        V = ValueFunction(model, [AlphaVector(model.expected_rewards_table[:,a], a) for a in model.actions])
         V_opt = V[0]
         converged = False
 
@@ -675,7 +673,7 @@ class VI_Solver(Solver):
         while (not converged) and (len(solve_history) <= self.horizon):
             old_V_opt = copy.deepcopy(V_opt)
 
-            V = []
+            V = ValueFunction(model)
             for a in model.actions:
                 alpha_vect = []
                 for s in model.states:
@@ -686,13 +684,13 @@ class VI_Solver(Solver):
 
             V_opt = np.max(np.array(V), axis=1)
 
-            solve_history.append({'value_function': ValueFunction(V)})
+            solve_history.append({'value_function': V})
                 
             avg_delta = np.max(np.abs(V_opt - old_V_opt))
             if avg_delta < self.eps:
                 break
 
-        return ValueFunction(V), solve_history
+        return V, solve_history
 
 
 class Simulation:
