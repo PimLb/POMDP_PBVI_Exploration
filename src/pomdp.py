@@ -3,6 +3,7 @@ from matplotlib import pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
+from tqdm import tqdm, trange
 from typing import Self, Tuple, Union
 
 import copy
@@ -890,6 +891,7 @@ class PBVI_Solver(Solver):
               horizon:int,
               initial_belief:Union[list[Belief], Belief, None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
+              print_progress:bool=True
               ) -> tuple[ValueFunction, SolverHistory]:
         '''
         Main loop of the Point-Based Value Iteration algorithm.
@@ -909,10 +911,10 @@ class PBVI_Solver(Solver):
                         horizon (int) - How many times the alpha vector set must be updated every time the belief set is expanded.
                         initial_belief (list[Belief], Belief) - Optional: An initial list of beliefs to start with.
                         initial_value_function (ValueFunction) - Optional: An initial value function to start the solving process with.
+                        print_progress (bool): Whether or not to print out the progress of the value iteration process. (Default: True)
 
                 Returns:
                         value_function (ValueFunction): The alpha vectors approximating the value function.
-
         '''
 
         # Initial belief
@@ -941,7 +943,7 @@ class PBVI_Solver(Solver):
         })
 
         # Loop
-        for _ in range(expansions):
+        for expansion_i in range(expansions) if not print_progress else trange(expansions, desc='Expansions'):
             # 1: Expand belief set
             self.expand_function_params['model'] = model
             self.expand_function_params['belief_set'] = belief_set
@@ -951,7 +953,7 @@ class PBVI_Solver(Solver):
             old_max_val_per_belief = None
 
             # 2: Backup, update value function (alpha vector set)
-            for _ in range(horizon):
+            for _ in range(horizon) if not print_progress else trange(horizon, desc=f'Backups {expansion_i}'):
                 old_value_function = copy.deepcopy(value_function)
                 value_function = self.backup(model, belief_set, old_value_function)
 

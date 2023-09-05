@@ -3,6 +3,7 @@ from matplotlib import pyplot as plt
 from matplotlib import patches
 from matplotlib.patches import Rectangle
 from scipy.optimize import milp, LinearConstraint
+from tqdm import tqdm, trange
 from typing import Self, Union
 
 import copy
@@ -708,23 +709,40 @@ class VI_Solver(Solver):
     solve(model: mdp.Model):
         The method to run the solving step that returns a value function.
     '''
-
     def __init__(self, horizon:int=10000, gamma:float=0.99, eps:float=0.001):
         self.horizon = horizon
         self.gamma = gamma
         self.eps = eps
 
 
-    def solve(self, model: Model) -> tuple[ValueFunction, SolverHistory]:
-        # Initiallize V as a |S| x |A| matrix of the reward expected when being in state s and taking action a
-        V = ValueFunction(model, [AlphaVector(model.expected_rewards_table[:,a], a) for a in model.actions])
+    def solve(self, 
+              model: Model,
+              initial_value_function:Union[ValueFunction,None]=None,
+              print_progress:bool=True
+              ) -> tuple[ValueFunction, SolverHistory]:
+        '''
+        Function to solve an MDP model using Value Iteration.
+        If an initial value function is not provided, the value function will be initiated with the expected rewards.
+
+                Parameters:
+                        model (mdp.Model): The model on which to run value iteration.
+                        initial_value_function (ValueFunction): An optional initial value function to kick-start the value iteration process. (Optional)
+                        print_progress (bool): Whether or not to print out the progress of the value iteration process. (Default: True)
+
+                Returns:
+                        value_function (ValueFunction): The resulting value function solution to the model.
+                        history (SolverHistory): The tracking of the solution over time.
+        '''
+        if not initial_value_function:
+            V = ValueFunction(model, [AlphaVector(model.expected_rewards_table[:,a], a) for a in model.actions])
+        else:
+            V = copy.deepcopy(initial_value_function)
         V_opt = V[0]
-        converged = False
 
         solve_history = SolverHistory(model)
         solve_history.append({'value_function': V})
 
-        while (not converged) and (len(solve_history) <= self.horizon):
+        for _ in trange(self.horizon) if print_progress else range(self.horizon):
             old_V_opt = copy.deepcopy(V_opt)
 
             V = ValueFunction(model)
