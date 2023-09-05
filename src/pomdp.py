@@ -6,6 +6,7 @@ from matplotlib.patches import Rectangle
 from typing import Self, Tuple, Union
 
 import copy
+import json
 import numpy as np
 import matplotlib.ticker as MT
 import matplotlib.lines as L
@@ -14,11 +15,13 @@ import matplotlib.colors as C
 import math
 import random
 
-from src.framework import AlphaVector, ValueFunction, RewardHistory
+from src.framework import RewardHistory
+from src.mdp import AlphaVector, ValueFunction
 from src.mdp import Model as MDP_Model
 from src.mdp import SolverHistory as MDP_SolverHistory
 from src.mdp import Solver as MDP_Solver
 from src.mdp import Simulation as MDP_Simulation
+
 
 class Model(MDP_Model):
     '''
@@ -34,7 +37,7 @@ class Model(MDP_Model):
         A list of action labels or an amount of actions to be used.
     observations:
         A list of observation labels or an amount of observations to be used
-    transitions:
+    transition_table:
         The transition matrix, has to be |S| x |A| x |S|. If none is provided, it will be randomly generated.
     immediate_rewards:
         The reward matrix, has to be |S| x |A| x |S| x |O|. If none is provided, it will be randomly generated.
@@ -54,16 +57,16 @@ class Model(MDP_Model):
                  states:Union[int, list[str], list[list[str]]],
                  actions:Union[int, list],
                  observations:Union[int, list],
-                 transitions=None,
-                 immediate_rewards=None,
+                 transition_table=None,
+                 immediate_reward_table=None,
                  observation_table=None,
                  probabilistic_rewards:bool=False
                  ):
         
         super().__init__(states=states,
                          actions=actions,
-                         transitions=transitions,
-                         immediate_rewards=None,
+                         transition_table=transition_table,
+                         immediate_reward_table=None, # Defined here lower as immediate reward for MDP is different than for POMDP
                          probabilistic_rewards=probabilistic_rewards)
 
         if isinstance(observations, int):
@@ -83,11 +86,11 @@ class Model(MDP_Model):
             assert self.observation_table.shape == (self.state_count, self.action_count, self.observation_count), "observations table doesnt have the right shape, it should be SxAxO"
 
         # Rewards
-        if immediate_rewards is None:
+        if immediate_reward_table is None:
             # If no reward matrix given, generate random one
             self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count, self.observation_count)
         else:
-            self.immediate_reward_table = immediate_rewards
+            self.immediate_reward_table = np.array(immediate_reward_table)
             assert self.immediate_reward_table.shape == (self.state_count, self.action_count, self.state_count, self.observation_count), "rewards table doesnt have the right shape, it should be SxAxSxO"
 
         # Expected rewards
@@ -138,6 +141,41 @@ class Model(MDP_Model):
         '''
         o = int(np.argmax(np.random.multinomial(n=1, pvals=self.observation_table[s_p, a, :])))
         return o
+    
+
+    def to_dict(self) -> dict:
+        '''
+        Function to return a python dictionary with all the information of the model.
+
+                Returns:
+                        model_dict (dict): The representation of the model in a dictionary format.
+        '''
+        model_dict = super().to_dict()
+        model_dict['observations'] = self.observation_labels
+        model_dict['observation_table'] = self.observation_table.tolist()
+
+        return model_dict
+    
+    
+    @classmethod
+    def load_from_json(cls, file:str) -> Self:
+        '''
+        Function to load a model from a json file. The json structure must contain the same items as in the constructor of this class.
+
+                Parameters:
+                        file (str): The file and path of the model to be loaded.
+                Returns:
+                        loaded_model (Model): An instance of the loaded model.
+        '''
+        with open(file, 'r') as openfile:
+            json_model = json.load(openfile)
+
+        loaded_model = Model(**json_model)
+
+        if 'grid_states' in json_model:
+            loaded_model.convert_to_grid(json_model['grid_states'])
+
+        return loaded_model
 
 
 class Belief(np.ndarray):
@@ -1114,7 +1152,22 @@ class Agent:
         return all_rewards
     
 
-def load_from_file(file_name) -> Tuple[Model, PBVI_Solver, Union[Belief,None]]:
+def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,None]]:
+    '''
+    Function to load files of .POMDP format.
+    This file format was implemented by Cassandra and the specifications of the format can be found here: https://pomdp.org/code/pomdp-file-spec.html
+     
+    Then, example models can be found on the following page: https://pomdp.org/examples/
+
+            Parameters:
+                    file_name (str): The name and path of the file to be loaded.
+
+            Returns:
+                    loaded_model (pomdp.Model): A POMDP model with the parameters found in the POMDP file. 
+                    loaded_solver (PBVI_Solver): A solver with the gamma parameter from the POMDP file.
+                    loaded_initial_belief (Belief): Optional, if provided, the initial belief in the particular model, used for example if the agent can't start in some state such as goal states.
+
+    '''
     loaded_params = {}
     reading:str = ''
     read_lines = 0
