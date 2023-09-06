@@ -65,12 +65,11 @@ class Model:
                  ):
         
         # States
-        self.is_grid = False
-        self.grid_dimensions = None
-        self.grid_states = None
-        if isinstance(states, int):
+        if isinstance(states, int): # State count
             self.state_labels = [f's_{i}' for i in range(states)]
-        elif isinstance(states, list) and all(isinstance(item, list) for item in states):
+            self.grid_states = [self.state_labels]
+
+        elif isinstance(states, list) and all(isinstance(item, list) for item in states): # 2D list of states
             dim1 = len(states)
             dim2 = len(states[0])
             assert all(len(state_dim) == dim2 for state_dim in states), "All sublists of states must be of equal size"
@@ -80,11 +79,11 @@ class Model:
                 for state in state_dim:
                     self.state_labels.append(state)
 
-            self.is_grid = True
-            self.grid_dimensions = (dim1,dim2)
             self.grid_states = states
-        else:
+
+        else: # Default: single of list of string items
             self.state_labels = [item for item in states if isinstance(item, str)]
+            self.grid_states = [self.state_labels]
 
         self.state_count = len(self.state_labels)
         self.states = [state for state in range(self.state_count)]
@@ -123,6 +122,7 @@ class Model:
 
         # Rewards are probabilistic
         self.probabilistic_rewards = probabilistic_rewards
+
 
         # Convert to grid if grid_states is provided
         if grid_states is not None:
@@ -165,32 +165,27 @@ class Model:
             return reward
         
 
-    def convert_to_grid(self, state_grid:list[list[Union[str,None]]]) -> None:
+    def convert_to_grid(self, state_grid:list[list]) -> None:
         '''
         Function to define the grid structure of the the MDP model.
 
                 Parameters:
-                        state_grid (list[list[Union[str,None]]]): A matrix of states (as their labels), None are allowed, it will just be a gap in the grid.
+                        state_grid (list[list]): A matrix of states (as their labels), None are allowed, it will just be a gap in the grid.
         '''
-        dim1 = len(state_grid)
-        dim2 = len(state_grid[0])
-        assert all(len(state_dim) == dim2 for state_dim in state_grid), "All sublists of states must be of equal size"
+        assert all(len(state_dim) == len(state_grid[0]) for state_dim in state_grid), "All sublists of states must be of equal size"
 
-        states_convered = 0
+        states_covered = 0
         for dim1_states in state_grid:
             for state in dim1_states:
                 if state is None:
                     continue
 
                 if state in self.state_labels:
-                    states_convered += 1
+                    states_covered += 1
                 elif not (state in self.state_labels):
                     raise Exception(f'Countains a state (\'{state}\') not in the list of states...')
 
-        assert states_convered == self.state_count, "Some states of the state list are missing..."
-
-        self.is_grid = True
-        self.grid_dimensions = (dim1, dim2)
+        assert states_covered == self.state_count, "Some states of the state list are missing..."
         self.grid_states = state_grid
 
 
@@ -206,11 +201,9 @@ class Model:
             'actions': self.action_labels,
             'transition_table': self.transition_table.tolist(),
             'immediate_reward_table': self.immediate_reward_table.tolist(),
-            'probabilistic_rewards': self.probabilistic_rewards
+            'probabilistic_rewards': self.probabilistic_rewards,
+            'grid_states': self.grid_states
         }
-
-        if self.is_grid:
-            model_dict['grid_states'] = self.grid_states
 
         return model_dict
     
@@ -428,6 +421,7 @@ class ValueFunction(list[AlphaVector]):
     
 
     def plot(self,
+             as_grid:bool=False,
              size:int=5,
              belief_set=None
              ):
@@ -441,14 +435,15 @@ class ValueFunction(list[AlphaVector]):
         assert len(self) > 0, "Value function is empty, plotting is impossible..."
 
         func = None
-        if self.model.state_count == 2:
+        if as_grid:
+            func = self._plot_grid
+        elif self.model.state_count == 2:
             func = self._plot_2D
         elif self.model.state_count == 3:
             func = self._plot_3D
-        elif self.model.is_grid:
-            func = self._plot_grid
         else:
-            raise Exception("Value function plotting only available for MDP's of 2 or 3 states or in grid configuration.")
+            print('Warning: as_grid parameter set to False but state count is >3 so it will be plotted as a grid')
+            func = self._plot_grid
 
         func(size, belief_set)
 
@@ -617,11 +612,12 @@ class ValueFunction(list[AlphaVector]):
 
 
     def _plot_grid(self, size=5, belief_set=None):
-        assert self.model.grid_dimensions is not None, "Model is not in grid format"
         assert self.model.grid_states is not None, "Model is not in grid format"
 
-        value_table = np.full(self.model.grid_dimensions, np.nan)
-        best_action_table = np.full([*self.model.grid_dimensions,3],0)
+        dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
+
+        value_table = np.full(dimensions, np.nan)
+        best_action_table = np.full([*dimensions,3],0)
 
         for x in range(value_table.shape[0]):
             for y in range(value_table.shape[1]):
@@ -638,15 +634,15 @@ class ValueFunction(list[AlphaVector]):
         ax1.set_title('Value function')
         ax1_plot = ax1.imshow(value_table)
         plt.colorbar(ax1_plot, ax=ax1)
-        ax1.set_xticks([i for i in range(self.model.grid_dimensions[1])])
-        ax1.set_yticks([i for i in range(self.model.grid_dimensions[0])])
+        ax1.set_xticks([i for i in range(dimensions[1])])
+        ax1.set_yticks([i for i in range(dimensions[0])])
 
         ax2.set_title('Action policy')
         ax2.imshow(best_action_table)
         p = [ patches.Patch(color=COLOR_LIST[i]['id'], label=self.model.action_labels[i]) for i in self.model.actions]
         ax2.legend(handles=p, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
-        ax2.set_xticks([i for i in range(self.model.grid_dimensions[1])])
-        ax2.set_yticks([i for i in range(self.model.grid_dimensions[0])])
+        ax2.set_xticks([i for i in range(dimensions[1])])
+        ax2.set_yticks([i for i in range(dimensions[0])])
 
         plt.show()
 
@@ -768,6 +764,25 @@ class VI_Solver(Solver):
 
 
 class Simulation:
+    '''
+    Class to reprensent a simulation process for a POMDP model.
+    An initial random state is given and action can be applied to the model that impact the actual state of the agent along with returning a reward and an observation.
+
+    ...
+    Attributes
+    ----------
+    model: pomdp.Model
+        The POMDP model the simulation will be applied on.
+    done_on_reward: bool
+        If the simulation is to end whenever a reward other than zero is received.
+
+    Methods
+    -------
+    initialize_simulation():
+        The function to initialize the simulation with a random state for the agent.
+    run_action(a:int):
+        Runs the action a on the current state of the agent.
+    '''
     def __init__(self, model:Model, done_on_reward:bool=False, done_on_state:Union[int,list[int]]=[],done_on_action:Union[int,list[int]]=[]) -> None:
         self.model = model
         self.done_on_reward = done_on_reward

@@ -280,11 +280,10 @@ class Belief(np.ndarray):
                 Parameters:
                         size (int): The scale of the plot. (Default: 5)
         '''
-        assert self.model.is_grid, "Only implemented for grid models"
-        assert self.model.grid_dimensions is not None
         assert self.model.grid_states is not None
+        dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
 
-        values = np.zeros(self.model.grid_dimensions)
+        values = np.zeros(dimensions)
 
         for x in range(values.shape[0]):
             for y in range(values.shape[1]):
@@ -458,7 +457,7 @@ class SolverHistory(MDP_SolverHistory):
                 Parameters:
                         size (int): The figure size and general scaling factor
         '''
-        self.solution.plot(size, (self.explored_beliefs if plot_belief else None))
+        self.solution.plot(size=size, belief_set=(self.explored_beliefs if plot_belief else None))
 
 
     def save_history_video(self,
