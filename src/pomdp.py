@@ -58,6 +58,8 @@ class Model(MDP_Model):
         Whether the rewards provided are probabilistic or pure rewards. If probabilist 0 or 1 will be the reward with a certain probability.
     grid_states: list[list[Union[str,None]]]
         Optional, if provided, the model will be converted to a grid model. Allows for 'None' states if there is a gaps in the grid.
+    start_probabilities: list
+        Optional, the distribution of chances to start in each state. If not provided, there will be an uniform chance for each state. It is also used to represent a belief of complete uncertainty.
 
     Methods
     -------
@@ -74,7 +76,8 @@ class Model(MDP_Model):
                  immediate_reward_table=None,
                  observation_table=None,
                  probabilistic_rewards:bool=False,
-                 grid_states:Union[None,list[list[Union[str,None]]]]=None
+                 grid_states:Union[None,list[list[Union[str,None]]]]=None,
+                 start_probabilities:Union[list,None]=None
                  ):
         
         super().__init__(states=states,
@@ -82,7 +85,8 @@ class Model(MDP_Model):
                          transition_table=transition_table,
                          immediate_reward_table=None, # Defined here lower since immediate reward table has different shape for MDP is different than for POMDP
                          probabilistic_rewards=probabilistic_rewards,
-                         grid_states=grid_states)
+                         grid_states=grid_states,
+                         start_probabilities=start_probabilities)
 
         if isinstance(observations, int):
             self.observation_labels = [f'o_{i}' for i in range(observations)]
@@ -213,7 +217,9 @@ class Belief(np.ndarray):
     update(a:int, o:int):
         Function to provide a new Belief object updated using an action 'a' and observation 'o'.
     random_state():
-        Function to give a random state based with the belief as the probability distribution. 
+        Function to give a random state based with the belief as the probability distribution.
+    plot(size:int=5):
+        Function to plot a value function as a grid heatmap.
     '''
     def __new__(cls, model:Model, state_probabilities:Union[np.ndarray,None]=None):
         if state_probabilities is not None:
@@ -222,13 +228,14 @@ class Belief(np.ndarray):
             assert prob_sum == 1, f"States probabilities in belief must sum to 1 (found: {prob_sum})"
             obj = np.asarray(state_probabilities).view(cls)
         else:
-            obj = (np.ones(model.state_count) / model.state_count).view(cls)
+            obj = model.start_probabilities.view(cls)
         obj._model = model # type: ignore
         return obj
 
     def __array_finalize__(self, obj):
         if obj is None: return
         self._model = getattr(obj, '_model', None)
+
 
     @property
     def model(self) -> Model:
@@ -254,7 +261,7 @@ class Belief(np.ndarray):
             new_state_probabilities[s_p] = sum([(self.model.observation_table[s_p, a, o] * self.model.transition_table[s, a, s_p] * self[s]) 
                               for s in self.model.states])
 
-        # Formal definition of the normailizer as in paper
+        # Formal definition of the normalizer as in paper
         # normalizer = 0
         # for s in STATES:
         #     normalizer += b_prev[s] * sum([(transition_function(s, a, o) * observation_function(a, s_p, o)) for s_p in STATES])
@@ -293,10 +300,9 @@ class Belief(np.ndarray):
                 if state_label is not None:
                     s = self.model.state_labels.index(state_label) # type: ignore
                     values[x,y] = self[s]
-                
 
         plt.figure(figsize=(size*1.2,size))
-        plt.imshow(values)
+        plt.imshow(values,cmap='Blues')
         plt.colorbar()
         plt.show()
 
@@ -919,8 +925,7 @@ class PBVI_Solver(Solver):
 
         # Initial belief
         if initial_belief is None:
-            uni_prob = np.ones(model.state_count) / model.state_count
-            belief_set = [Belief(model, uni_prob)]
+            belief_set = [Belief(model)]
         elif isinstance(initial_belief, list):
             belief_set = initial_belief
         else:
@@ -996,10 +1001,16 @@ class Simulation(MDP_Simulation):
     run_action(a:int):
         Runs the action a on the current state of the agent.
     '''
-    def __init__(self, model:Model, done_on_reward:bool=False, done_on_state: Union[int,list[int]]=[], done_on_action:Union[int,list[int]]=[]) -> None:
+    def __init__(self,
+                 model:Model,
+                 done_on_reward:bool=False,
+                 done_on_state: Union[int,list[int]]=[],
+                 done_on_action:Union[int,list[int]]=[]
+                 ) -> None:
+        
         super().__init__(model, done_on_reward, done_on_state, done_on_action)
-
         self.model = model
+
 
     def run_action(self, a:int) -> tuple[Union[int,float], int]:
         '''
@@ -1181,7 +1192,7 @@ class Agent:
         return all_histories
     
 
-def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,None]]:
+def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
     '''
     Function to load files of .POMDP format.
     This file format was implemented by Cassandra and the specifications of the format can be found here: https://pomdp.org/code/pomdp-file-spec.html
@@ -1194,10 +1205,15 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
             Returns:
                     loaded_model (pomdp.Model): A POMDP model with the parameters found in the POMDP file. 
                     loaded_solver (PBVI_Solver): A solver with the gamma parameter from the POMDP file.
-                    loaded_initial_belief (Belief): Optional, if provided, the initial belief in the particular model, used for example if the agent can't start in some state such as goal states.
-
     '''
-    loaded_params = {}
+    # Working params
+    gamma_param = 1.0
+    values_param = '' # To investigate
+    state_count = -1
+    action_count = -1
+    observation_count = -1
+
+    model_params = {}
     reading:str = ''
     read_lines = 0
 
@@ -1211,56 +1227,56 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
 
             # Discount factor
             if line.startswith('discount'):
-                loaded_params['gamma'] = float(line_items[-1])
+                gamma_param = float(line_items[-1])
             
             # Value (either reward or cost)
             elif line.startswith('values'):
-                loaded_params['values'] = line_items[-1] # To investigate
+                values_param = line_items[-1] # To investigate
 
             # States
             elif line.startswith('states'):
                 if line_items[-1].isnumeric():
-                    loaded_params['state_count'] = int(line_items[-1])
-                    loaded_params['states'] = [f's{i}' for i in range(loaded_params['state_count'])]
+                    state_count = int(line_items[-1])
+                    model_params['states'] = [f's{i}' for i in range(state_count)]
                 else:
-                    loaded_params['states'] = line_items[1:]
-                    loaded_params['state_count'] = len(loaded_params['states'])
+                    model_params['states'] = line_items[1:]
+                    state_count = len(model_params['states'])
 
             # Actions
             elif line.startswith('actions'):
                 if line_items[-1].isnumeric():
-                    loaded_params['action_count'] = int(line_items[-1])
-                    loaded_params['actions'] = [f'a{i}' for i in range(loaded_params['action_count'])]
+                    action_count = int(line_items[-1])
+                    model_params['actions'] = [f'a{i}' for i in range(action_count)]
                 else:
-                    loaded_params['actions'] = line_items[1:]
-                    loaded_params['action_count'] = len(loaded_params['actions'])
+                    model_params['actions'] = line_items[1:]
+                    action_count = len(model_params['actions'])
 
             # Observations
             elif line.startswith('observations'):
                 if line_items[-1].isnumeric():
-                    loaded_params['observation_count'] = int(line_items[-1])
-                    loaded_params['observations'] = [f'o{i}' for i in range(loaded_params['observation_count'])]
+                    observation_count = int(line_items[-1])
+                    model_params['observations'] = [f'o{i}' for i in range(observation_count)]
                 else:
-                    loaded_params['observations'] = line_items[1:]
-                    loaded_params['observation_count'] = len(loaded_params['observations'])
+                    model_params['observations'] = line_items[1:]
+                    observation_count = len(model_params['observations'])
             
             # Start
             elif line.startswith('start'):
                 if len(line_items) == 1:
                     reading = 'start'
                 else:
-                    assert len(line_items[1:]) == loaded_params['state_count'], 'Not enough states in initial belief'
-                    loaded_params['init_belief'] = np.array([float(item) for item in line_items[1:]])
+                    assert len(line_items[1:]) == state_count, 'Not enough states in initial belief'
+                    model_params['start_probabilities'] = np.array([float(item) for item in line_items[1:]])
             elif reading == 'start':
-                assert len(line_items) == loaded_params['state_count'], 'Not enough states in initial belief'
-                loaded_params['init_belief'] = np.array([float(item) for item in line_items])
+                assert len(line_items) == state_count, 'Not enough states in initial belief'
+                model_params['start_probabilities'] = np.array([float(item) for item in line_items])
                 reading = 'None'
 
             # ----------------------------------------------------------------------------------------------
             # Transition table
             # ----------------------------------------------------------------------------------------------
-            if ('states' in loaded_params) and ('actions' in loaded_params) and ('observations' in loaded_params) and not ('transition_table' in loaded_params):
-                loaded_params['transition_table'] = np.full((loaded_params['state_count'], loaded_params['action_count'], loaded_params['state_count']), np.nan)
+            if ('states' in model_params) and ('actions' in model_params) and ('observations' in model_params) and not ('transition_table' in model_params):
+                model_params['transition_table'] = np.full((state_count, action_count, state_count), 0.0)
             
             if line.startswith('T'):
                 transition_params = line.replace(':',' ').split()[1:]
@@ -1271,9 +1287,9 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
                     if param.isnumeric():
                         ids.append([int(param)])
                     elif i == 0:
-                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                        ids.append(np.arange(action_count) if param == '*' else [model_params['actions'].index(param)])
                     elif i in [1,2]:
-                        ids.append(np.arange(loaded_params['state_count']) if param == '*' else [loaded_params['states'].index(param)])
+                        ids.append(np.arange(state_count) if param == '*' else [model_params['states'].index(param)])
                     else:
                         raise Exception('Cant load more than 3 parameters for transitions')
 
@@ -1282,7 +1298,7 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
                     for s in ids[1]:
                         for a in ids[0]:
                             for s_p in ids[2]:
-                                loaded_params['transition_table'][s, a, s_p] = float(line_items[-1])
+                                model_params['transition_table'][s, a, s_p] = float(line_items[-1])
                 
                 # More items
                 else:
@@ -1297,19 +1313,19 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
                     if param.isnumeric():
                         ids.append([int(param)])
                     elif i == 0:
-                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                        ids.append(np.arange(action_count) if param == '*' else [model_params['actions'].index(param)])
                     else:
-                        ids.append(np.arange(loaded_params['state_count']) if param == '*' else [loaded_params['states'].index(param)])
+                        ids.append(np.arange(state_count) if param == '*' else [model_params['states'].index(param)])
 
                 for a in ids[0]:
                     for s in ids[1]:
                         # Uniform
                         if 'uniform' in line_items:
-                            loaded_params['transition_table'][s, a, :] = np.ones(loaded_params['state_count']) / loaded_params['state_count']
+                            model_params['transition_table'][s, a, :] = np.ones(state_count) / state_count
                             continue
 
                         for s_p, item in enumerate(line_items):
-                            loaded_params['transition_table'][s, a, s_p] = float(item)
+                            model_params['transition_table'][s, a, s_p] = float(item)
 
                 reading = ''
 
@@ -1324,27 +1340,27 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
                     if param.isnumeric():
                         ids.append([int(param)])
                     elif i == 0:
-                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                        ids.append(np.arange(action_count) if param == '*' else [model_params['actions'].index(param)])
                 
                 for a in ids[0]:
                     # Uniform
                     if 'uniform' in line_items:
-                        loaded_params['transition_table'][:, a, :] = np.ones((loaded_params['state_count'], loaded_params['state_count'])) / loaded_params['state_count']
+                        model_params['transition_table'][:, a, :] = np.ones((state_count, state_count)) / state_count
                         reading = ''
                         continue
                     # Identity
                     if 'identity' in line_items:
-                        loaded_params['transition_table'][:, a, :] = np.eye(loaded_params['state_count'])
+                        model_params['transition_table'][:, a, :] = np.eye(state_count)
                         reading = ''
                         continue
 
                     for s_p, item in enumerate(line_items):
-                        loaded_params['transition_table'][s, a, s_p] = float(item)
+                        model_params['transition_table'][s, a, s_p] = float(item)
 
                 if ('uniform' not in line_items) and ('identity' not in line_items):
                     read_lines += 1
                 
-                if read_lines == loaded_params['state_count']:
+                if read_lines == state_count:
                     reading = ''
                     read_lines = 0
 
@@ -1352,8 +1368,8 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
             # ----------------------------------------------------------------------------------------------
             # Observation table
             # ----------------------------------------------------------------------------------------------
-            if ('states' in loaded_params) and ('actions' in loaded_params) and ('observations' in loaded_params) and not ('observation_table' in loaded_params):
-                loaded_params['observation_table'] = np.full((loaded_params['state_count'], loaded_params['action_count'], loaded_params['observation_count']), np.nan)
+            if ('states' in model_params) and ('actions' in model_params) and ('observations' in model_params) and not ('observation_table' in model_params):
+                model_params['observation_table'] = np.full((state_count, action_count, observation_count), 0.0)
 
             if line.startswith('O'):
                 observation_params = line.replace(':',' ').split()[1:]
@@ -1364,11 +1380,11 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
                     if param.isnumeric():
                         ids.append([int(param)])
                     elif i == 0:
-                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                        ids.append(np.arange(action_count) if param == '*' else [model_params['actions'].index(param)])
                     elif i == 1:
-                        ids.append(np.arange(loaded_params['state_count']) if param == '*' else [loaded_params['states'].index(param)])
+                        ids.append(np.arange(state_count) if param == '*' else [model_params['states'].index(param)])
                     elif i == 2:
-                        ids.append(np.arange(loaded_params['observation_count']) if param == '*' else [loaded_params['observations'].index(param)])
+                        ids.append(np.arange(observation_count) if param == '*' else [model_params['observations'].index(param)])
                     else:
                         raise Exception('Cant load more than 3 parameters for observations')
 
@@ -1377,7 +1393,7 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
                     for a in ids[0]:
                         for s_p in ids[1]:
                             for o in ids[2]:
-                                loaded_params['observation_table'][s_p, a, o] = float(line_items[-1])
+                                model_params['observation_table'][s_p, a, o] = float(line_items[-1])
                 
                 # More items
                 else:
@@ -1392,19 +1408,19 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
                     if param.isnumeric():
                         ids.append([int(param)])
                     elif i == 0:
-                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                        ids.append(np.arange(action_count) if param == '*' else [model_params['actions'].index(param)])
                     else:
-                        ids.append(np.arange(loaded_params['state_count']) if param == '*' else [loaded_params['states'].index(param)])
+                        ids.append(np.arange(state_count) if param == '*' else [model_params['states'].index(param)])
 
                 for a in ids[0]:
                     for s_p in ids[1]:
                         # Uniform
                         if 'uniform' in line_items:
-                            loaded_params['observation_table'][s_p, a, :] = np.ones(loaded_params['observation_count']) / loaded_params['observation_count']
+                            model_params['observation_table'][s_p, a, :] = np.ones(observation_count) / observation_count
                             continue
 
                         for o, item in enumerate(line_items):
-                            loaded_params['observation_table'][s_p, a, o] = float(item)
+                            model_params['observation_table'][s_p, a, o] = float(item)
 
                 reading = ''
 
@@ -1418,22 +1434,22 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
                     if param.isnumeric():
                         ids.append([int(param)])
                     else:
-                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                        ids.append(np.arange(action_count) if param == '*' else [model_params['actions'].index(param)])
 
                 for a in ids[0]:
                     # Uniform
                     if 'uniform' in line_items:
-                        loaded_params['observation_table'][:, a, :] = np.ones((loaded_params['state_count'], loaded_params['observation_count'])) / loaded_params['observation_count']
+                        model_params['observation_table'][:, a, :] = np.ones((state_count, observation_count)) / observation_count
                         reading = ''
                         continue
 
                     for o, item in enumerate(line_items):
-                        loaded_params['observation_table'][s_p, a, o] = float(item)
+                        model_params['observation_table'][s_p, a, o] = float(item)
 
                 if 'uniform' not in line_items:
                     read_lines += 1
                 
-                if read_lines == loaded_params['state_count']:
+                if read_lines == state_count:
                     reading = ''
                     read_lines = 0
 
@@ -1441,8 +1457,8 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
             # ----------------------------------------------------------------------------------------------
             # Rewards table
             # ----------------------------------------------------------------------------------------------
-            if ('states' in loaded_params) and ('actions' in loaded_params) and ('observations' in loaded_params) and not ('reward_table' in loaded_params):
-                loaded_params['reward_table'] = np.full((loaded_params['state_count'], loaded_params['action_count'], loaded_params['state_count'], loaded_params['observation_count']), np.nan)
+            if ('states' in model_params) and ('actions' in model_params) and ('observations' in model_params) and not ('immediate_reward_table' in model_params):
+                model_params['immediate_reward_table'] = np.full((state_count, action_count, state_count, observation_count), 0.0)
 
             if line.startswith('R'):
                 reward_params = line.replace(':',' ').split()[1:]
@@ -1453,11 +1469,11 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
                     if param.isnumeric():
                         ids.append([int(param)])
                     elif i == 0:
-                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                        ids.append(np.arange(action_count) if param == '*' else [model_params['actions'].index(param)])
                     elif i in [1,2]:
-                        ids.append(np.arange(loaded_params['state_count']) if param == '*' else [loaded_params['states'].index(param)])
+                        ids.append(np.arange(state_count) if param == '*' else [model_params['states'].index(param)])
                     elif i == 3:
-                        ids.append(np.arange(loaded_params['observation_count']) if param == '*' else [loaded_params['observations'].index(param)])
+                        ids.append(np.arange(observation_count) if param == '*' else [model_params['observations'].index(param)])
                     else:
                         raise Exception('Cant load more than 4 parameters for rewards')
 
@@ -1467,7 +1483,7 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
                         for s in ids[1]:
                             for s_p in ids[2]:
                                 for o in ids[3]:
-                                    loaded_params['reward_table'][s, a, s_p, o] = float(line_items[-1])
+                                    model_params['immediate_reward_table'][s, a, s_p, o] = float(line_items[-1])
                 
                 elif len(reward_params) == 1:
                     raise Exception('Need more than 1 parameter for rewards')
@@ -1485,15 +1501,15 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
                     if param.isnumeric():
                         ids.append([int(param)])
                     elif i == 0:
-                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                        ids.append(np.arange(action_count) if param == '*' else [model_params['actions'].index(param)])
                     else:
-                        ids.append(np.arange(loaded_params['state_count']) if param == '*' else [loaded_params['states'].index(param)])
+                        ids.append(np.arange(state_count) if param == '*' else [model_params['states'].index(param)])
 
                 for a in ids[0]:
                     for s in ids[1]:
                         for s_p in ids[2]:
                             for o, item in enumerate(line_items):
-                                loaded_params['reward_table'][s, a, s_p, o] = float(item)
+                                model_params['immediate_reward_table'][s, a, s_p, o] = float(item)
 
                 reading = ''
 
@@ -1507,30 +1523,22 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,Non
                     if param.isnumeric():
                         ids.append([int(param)])
                     elif i == 0:
-                        ids.append(np.arange(loaded_params['action_count']) if param == '*' else [loaded_params['actions'].index(param)])
+                        ids.append(np.arange(action_count) if param == '*' else [model_params['actions'].index(param)])
                     else:
-                        ids.append(np.arange(loaded_params['state_count']) if param == '*' else [loaded_params['states'].index(param)])
+                        ids.append(np.arange(state_count) if param == '*' else [model_params['states'].index(param)])
 
                 for a in ids[0]:
                     for s in ids[1]:
                         for o, item in enumerate(line_items):
-                            loaded_params['reward_table'][s, a, s_p, o] = float(item)
+                            model_params['immediate_reward_table'][s, a, s_p, o] = float(item)
 
                 read_lines += 1
-                if read_lines == loaded_params['state_count']:
+                if read_lines == state_count:
                     reading = ''
                     read_lines = 0
 
     # Generation of output
-    loaded_model = Model(loaded_params['states'],
-                         loaded_params['actions'],
-                         loaded_params['observations'],
-                         loaded_params['transition_table'],
-                         loaded_params['reward_table'],
-                         loaded_params['observation_table'])
+    loaded_model = Model(**model_params)
+    loaded_solver = PBVI_Solver(gamma=gamma_param)
 
-    loaded_solver = PBVI_Solver(loaded_params['gamma'])
-
-    loaded_initial_belief = Belief(loaded_model, np.array(loaded_params['init_belief'])) if 'init_belief' in loaded_params else None
-
-    return (loaded_model, loaded_solver, loaded_initial_belief)
+    return (loaded_model, loaded_solver)

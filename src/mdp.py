@@ -47,9 +47,11 @@ class Model:
         The reward matrix, has to be |S| x |A| x |S|. If provided, it will be use in combination with the transition matrix to fill to expected rewards.
     probabilistic_rewards: bool
         Whether the rewards provided are probabilistic or pure rewards. If probabilist 0 or 1 will be the reward with a certain probability.
-    grid_states: list[list[Union[str,None]]]
+    grid_states: list[list]]
         Optional, if provided, the model will be converted to a grid model. Allows for 'None' states if there is a gaps in the grid.
-
+    start_probabilities: list
+        Optional, the distribution of chances to start in each state. If not provided, there will be an uniform chance for each state.
+        
     Methods
     -------
     transition(s:int, a:int):
@@ -61,7 +63,8 @@ class Model:
                  transition_table=None,
                  immediate_reward_table=None,
                  probabilistic_rewards:bool=False,
-                 grid_states:Union[None,list[list[Union[str,None]]]]=None
+                 grid_states:Union[None,list[list[Union[str,None]]]]=None,
+                 start_probabilities:Union[list,None]=None
                  ):
         
         # States
@@ -127,6 +130,13 @@ class Model:
         # Convert to grid if grid_states is provided
         if grid_states is not None:
             self.convert_to_grid(grid_states)
+
+        # Start state probabilities
+        if start_probabilities is not None:
+            assert len(start_probabilities) == self.state_count
+            self.start_probabilities = np.array(start_probabilities,dtype=float)
+        else:
+            self.start_probabilities = np.ones(self.state_count) / self.state_count
 
     
     def transition(self, s:int, a:int) -> int:
@@ -794,12 +804,12 @@ class Simulation:
 
     def initialize_simulation(self) -> int:
         '''
-        Function to initialize the simulation by setting a random start state to the agent.
+        Function to initialize the simulation by setting a random start state (according to the start probabilities) to the agent.
 
                 Returns:
                         state (int): The state the agent will start in.
         '''
-        self.agent_state = random.choice(self.model.states)
+        self.agent_state = int(np.argmax(np.random.multinomial(n=1, pvals=self.model.start_probabilities)))
         self.is_done = False
         return self.agent_state
 
