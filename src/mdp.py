@@ -345,7 +345,7 @@ class ValueFunction(list[AlphaVector]):
                     pruned_alpha_set.append(alpha_vector)
 
         # Level 3 pruning: LP to check for more complex domination
-        elif level >= 3:
+        if level >= 3:
             alpha_set = pruned_alpha_set
             pruned_alpha_set = ValueFunction(self.model)
 
@@ -742,6 +742,8 @@ class VI_Solver(Solver):
         solve_history = SolverHistory(model)
         solve_history.append({'value_function': V})
 
+        max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
+
         for _ in trange(self.horizon) if print_progress else range(self.horizon):
             old_V_opt = copy.deepcopy(V_opt)
 
@@ -758,8 +760,8 @@ class VI_Solver(Solver):
 
             solve_history.append({'value_function': V})
                 
-            avg_delta = np.max(np.abs(V_opt - old_V_opt))
-            if avg_delta < self.eps:
+            max_change = np.max(np.abs(V_opt - old_V_opt))
+            if max_change < max_allowed_change:
                 break
 
         return V, solve_history

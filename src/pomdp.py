@@ -932,6 +932,8 @@ class PBVI_Solver(Solver):
         else:
             value_function = initial_value_function
 
+        max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
+
         # History tracking
         solver_history = SolverHistory(model=model,
                                        expand_function=self.expand_function,
@@ -966,7 +968,7 @@ class PBVI_Solver(Solver):
                 max_val_per_belief = np.max(np.matmul(np.array(belief_set), np.array(value_function).T), axis=1)
                 if old_max_val_per_belief is not None:
                     max_change = np.max(np.abs(max_val_per_belief - old_max_val_per_belief))
-                    if max_change < self.eps:
+                    if max_change < max_allowed_change:
                         print('Converged early...')
                         return value_function, solver_history
                 old_max_val_per_belief = max_val_per_belief
