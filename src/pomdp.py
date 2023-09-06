@@ -14,6 +14,7 @@ import random
 
 from src.mdp import AlphaVector, ValueFunction
 from src.mdp import Model as MDP_Model
+from src.mdp import SimulationHistory
 from src.mdp import SolverHistory as MDP_SolverHistory
 from src.mdp import Solver as MDP_Solver
 from src.mdp import Simulation as MDP_Simulation
@@ -1036,119 +1037,6 @@ class Simulation(MDP_Simulation):
         return (r, o)
 
 
-class RewardHistory(list):
-    '''
-    Class to represent a list of rewards received during a Simulation.
-    The main purpose of the class is to provide a set of visualization options of the rewards received.
-
-    Multiple types of plots can be done:
-        - Totals: to plot a graph of the accumulated rewards over time.
-        - Moving average: to plot the moving average of the rewards received over time.
-        - Histogram: to plot a histogram of the various rewards received.
-
-    ...
-
-    Attributes
-    ------------
-
-    items: list (Optional)
-        A set of rewards received.
-
-    Methods
-    -------
-
-    plot(type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
-
-    '''
-
-    def __init__(self, items:list=[]):
-        self.extend(items)
-
-    
-    def plot(self, type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
-        '''
-        The method to plot summaries of the rewards received over time.
-        The plots available:
-            - Total ('total' or 't'): to plot the total reward as a cummulative sum over time.
-            - Moving average ('moving_average' or 'ma'): to plot the moving average of the rewards
-            - Hisotgram ('histogram' or 'h'): to plot the various reward in bins to plot a histogram of what was received
-        '''
-        plt.figure(figsize=(size*2,size))
-        plt.title('Cummulative reward received of time')
-
-        # Histories
-        reward_histories = [self]
-        if isinstance(compare_with, RewardHistory):
-            reward_histories.append(compare_with)
-        else:
-            reward_histories += compare_with
-        
-        assert len(reward_histories) < len(COLOR_LIST), "Not enough colors to plot all the comparisson graphs"
-
-        # Names
-        names = []
-        if len(graph_names) in [0, len(reward_histories)]:
-            names.append('Main graph')
-            for i in range(1, len(reward_histories)):
-                names.append(f'Comparisson {i}')
-        else:
-            names = copy.deepcopy(graph_names)
-
-        # Actual plot
-        if type in ['total', 't']:
-            self._plot_total(reward_histories, names, max_reward)
-        elif type in ['moving_average', 'ma']:
-            self._plot_moving_average(reward_histories, names, max_reward)
-        elif type in ['histogram', 'h']:
-            self._plot_histogram(reward_histories, names, max_reward)
-
-        # Finalization
-        plt.legend(loc='upper left')
-        plt.show()
-
-
-    def _plot_total(self, reward_histories, names, max_reward=None):
-        x = np.arange(len(reward_histories[0]))
-
-        # If given plot upper bound
-        if max_reward is not None:
-            y_best = max_reward * x
-            plt.plot(x, y_best, color='red', linestyle='--', label='Max rewards')
-
-        # Plot rewards
-        for i, (rh, name) in enumerate(zip(reward_histories, names)):
-            cum_rewards = np.cumsum(rh)
-            plt.plot(x, cum_rewards, label=name, c=COLOR_LIST[i]['id'])
-    
-
-    def _plot_moving_average(self, reward_histories, names, max_reward=None):
-        x = np.arange(len(reward_histories[0]))
-
-        # If given plot upper bound
-        if max_reward is not None:
-            y_best = np.ones(len(reward_histories[0])) * max_reward
-            plt.plot(x, y_best, color='red', linestyle='--', label='Max rewards')
-
-        # Plot rewards
-        for i, (rh, name) in enumerate(zip(reward_histories, names)):
-            moving_avg = np.divide(np.cumsum(rh), (x+1))
-            plt.plot(x, moving_avg, label=name, c=COLOR_LIST[i]['id'])
-
-
-    def _plot_histogram(self, reward_histories, names, max_rewards=None):
-        max_unique = -np.inf
-        for rh in reward_histories:
-            unique_count = np.unique(rh).shape[0]
-            if max_unique < unique_count:
-                max_unique = unique_count
-
-        bin_count = int(max_unique) if max_unique < 10 else 10
-
-        # Plot rewards
-        for i, (rh, name) in enumerate(zip(reward_histories, names)):
-            plt.hist(rh, bin_count, label=name, color=COLOR_LIST[i]['id'])
-
-
 class Agent:
     '''
     The class of an Agent running on a POMDP model.
@@ -1215,7 +1103,7 @@ class Agent:
         return best_action
 
 
-    def simulate(self, simulator:Simulation, max_steps:int=1000) -> RewardHistory:
+    def simulate(self, simulator:Simulation, max_steps:int=1000) -> SimulationHistory:
         '''
         Function to run a simulation with the current agent for up to 'max_steps' amount of steps using a Simulation simulator.
 
@@ -1227,36 +1115,49 @@ class Agent:
                         max_steps (int): the max amount of steps the simulation can run for.
 
                 Returns:
-                        rewards (RewardHistory): A list of rewards with the additional functionality that the can be plot with the plot() function.
+                        history (SimulationHistory): A list of rewards with the additional functionality that the can be plot with the plot() function.
         '''
         simulator.initialize_simulation()
         belief = Belief(self.model)
 
-        rewards = RewardHistory()
+        history = SimulationHistory()
 
         # Simulation loop
         for i in range(max_steps):
+            # Iteration history dict
+            history_dict = {
+                'belief': belief,
+                'state': simulator.agent_state
+            }
+
             # Play best action
             a = self.get_best_action(belief)
             r,o = simulator.run_action(a)
 
-            # Record the reward
-            rewards.append(r)
-
-            # DEBUG
-            # print(f'Belief: {belief} - action chosen {a} - reward {r} (actual state {simulator.agent_state})')
-
             # Update the belief
-            belief = belief.update(a, o)
+            new_belief = belief.update(a, o)
+
+            # Post action history recording
+            history_dict.update({
+                'action': a,
+                'next_state': simulator.agent_state,
+                'next_belief': new_belief,
+                'reward': r,
+                'observation': o
+            })
+            history.append(history_dict)
+
+            # Replace belief
+            belief = new_belief
 
             # If simulation is considered done, the rewards are simply returned
             if simulator.is_done:
-                return rewards
+                break
             
-        return rewards
+        return history
 
 
-    def run_n_simulations(self, simulator:Simulation, n:int) -> RewardHistory:
+    def run_n_simulations(self, simulator:Simulation, n:int) -> list[SimulationHistory]:
         '''
         Function to run a set of simulations in a row.
         This is useful when the simulation has a 'done' condition.
@@ -1270,14 +1171,14 @@ class Agent:
                         n (int): the amount of simulations to run.
 
                 Returns:
-                        rewards (RewardHistory): A list of rewards as the sum of rewards of individual simulations.
+                        all_histories (list[SimulationHistory]): A list of simulation histories.
         '''
-        all_rewards = RewardHistory()
+        all_histories = []
         for _ in range(n):
-            rewards = self.simulate(simulator)
-            all_rewards.append(np.sum(rewards))
+            history = self.simulate(simulator)
+            all_histories.append(np.sum(history))
 
-        return all_rewards
+        return all_histories
     
 
 def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver, Union[Belief,None]]:

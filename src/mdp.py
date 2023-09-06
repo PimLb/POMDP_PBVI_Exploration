@@ -4,7 +4,7 @@ from matplotlib import patches
 from matplotlib.patches import Rectangle
 from scipy.optimize import milp, LinearConstraint
 from tqdm import tqdm, trange
-from typing import Self, Union
+from typing import Self, Union, Tuple
 
 import copy
 import datetime
@@ -792,15 +792,19 @@ class Simulation:
         self.initialize_simulation()
 
 
-    def initialize_simulation(self) -> None:
+    def initialize_simulation(self) -> int:
         '''
         Function to initialize the simulation by setting a random start state to the agent.
+
+                Returns:
+                        state (int): The state the agent will start in.
         '''
         self.agent_state = random.choice(self.model.states)
         self.is_done = False
+        return self.agent_state
 
     
-    def run_action(self, a:int) -> Union[int, float]:
+    def run_action(self, a:int) -> Tuple[Union[int, float], int]:
         '''
         Run one step of simulation with action a.
 
@@ -831,9 +835,244 @@ class Simulation:
         if a in self.done_on_action:
             self.is_done = True
 
-        return r
+        return r, s_p
+
+
+class SimulationHistory(list):
+    '''
+    Class to represent a list of rewards received during a Simulation.
+    The main purpose of the class is to provide a set of visualization options of the rewards received.
+
+    Multiple types of plots can be done:
+        - Totals: to plot a graph of the accumulated rewards over time.
+        - Moving average: to plot the moving average of the rewards received over time.
+        - Histogram: to plot a histogram of the various rewards received.
+
+    ...
+
+    Attributes
+    ------------
+
+    items: list (Optional)
+        A set of rewards received.
+
+    Methods
+    -------
+
+    plot(type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
+
+    '''
+
+    def __init__(self, items:list=[]):
+        self.extend(items)
+
+    
+    def plot_rewards(self, type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
+        '''
+        The method to plot summaries of the rewards received over time.
+        The plots available:
+            - Total ('total' or 't'): to plot the total reward as a cummulative sum over time.
+            - Moving average ('moving_average' or 'ma'): to plot the moving average of the rewards
+            - Hisotgram ('histogram' or 'h'): to plot the various reward in bins to plot a histogram of what was received
+        '''
+        plt.figure(figsize=(size*2,size))
+        plt.title('Cummulative reward received of time')
+
+        # Histories
+        sim_histories = [self]
+        if isinstance(compare_with, SimulationHistory):
+            sim_histories.append(compare_with)
+        else:
+            sim_histories += compare_with
+        
+        assert len(sim_histories) < len(COLOR_LIST), "Not enough colors to plot all the comparisson graphs"
+
+        # Names
+        names = []
+        if len(graph_names) in [0, len(sim_histories)]:
+            names.append('Main graph')
+            for i in range(1, len(sim_histories)):
+                names.append(f'Comparisson {i}')
+        else:
+            names = copy.deepcopy(graph_names)
+
+        # Actual plot
+        if type in ['total', 't']:
+            self._plot_total(sim_histories, names, max_reward)
+        elif type in ['moving_average', 'ma']:
+            self._plot_moving_average(sim_histories, names, max_reward)
+        elif type in ['histogram', 'h']:
+            self._plot_histogram(sim_histories, names, max_reward)
+
+        # Finalization
+        plt.legend(loc='upper left')
+        plt.show()
+
+
+    def _plot_total(self, sim_histories, names, max_reward=None):
+        x = np.arange(len(sim_histories[0]))
+
+        # If given plot upper bound
+        if max_reward is not None:
+            y_best = max_reward * x
+            plt.plot(x, y_best, color='red', linestyle='--', label='Max rewards')
+
+        # Plot rewards
+        for i, (rh, name) in enumerate(zip(sim_histories, names)):
+            cum_rewards = np.cumsum([r['reward'] for r in rh])
+            plt.plot(x, cum_rewards, label=name, c=COLOR_LIST[i]['id'])
     
 
+    def _plot_moving_average(self, reward_histories, names, max_reward=None):
+        x = np.arange(len(reward_histories[0]))
+
+        # If given plot upper bound
+        if max_reward is not None:
+            y_best = np.ones(len(reward_histories[0])) * max_reward
+            plt.plot(x, y_best, color='red', linestyle='--', label='Max rewards')
+
+        # Plot rewards
+        for i, (rh, name) in enumerate(zip(reward_histories, names)):
+            moving_avg = np.divide(np.cumsum([r['reward'] for r in rh]), (x+1))
+            plt.plot(x, moving_avg, label=name, c=COLOR_LIST[i]['id'])
+
+
+    def _plot_histogram(self, reward_histories, names, max_rewards=None):
+        max_unique = -np.inf
+        for rh in reward_histories:
+            unique_count = np.unique([r['reward'] for r in rh]).shape[0]
+            if max_unique < unique_count:
+                max_unique = unique_count
+
+        bin_count = int(max_unique) if max_unique < 10 else 10
+
+        # Plot rewards
+        for i, (rh, name) in enumerate(zip(reward_histories, names)):
+            plt.hist([r['reward'] for r in rh], bin_count, label=name, color=COLOR_LIST[i]['id'])
+
+
 class Agent:
-    # TODO
-    pass
+    '''
+    The class of an Agent running on a MDP model.
+    It has the ability to train using a given mdp solver.
+    Then, once trained, it can simulate actions with a given Simulation,
+    either for a given amount of steps or until a single reward is received.
+
+    ...
+
+    Attributes
+    ----------
+    model: mdp.Model
+        The model in which the agent can run
+    
+    Methods
+    -------
+    train(solver: Solver):
+        Runs the solver on the agent's model in order to retrieve a value function.
+    get_best_action(state:int):
+        Retrieves the best action from the value function given a state.
+    simulate(simulator:Simulation, max_steps:int=1000):
+        Simulate the process on the Agent's model with the given simulator for up to max_steps iterations.
+    run_n_simulations(simulator:Simulation, n:int):
+        Runs n times the simulate() function.
+    '''
+    def __init__(self, model:Model) -> None:
+        super().__init__()
+
+        self.model = model
+        self.value_function = None
+
+
+    def train(self, solver:Solver) -> None:
+        '''
+        Method to train the agent using a given solver.
+        The solver will provide a value function that will map states to actions.
+
+                Parameters:
+                        solver (Solver): The solver to run.
+        '''
+        self.value_function, solve_history = solver.solve(self.model)
+
+
+    def get_best_action(self, state:int) -> int:
+        '''
+        Function to retrieve the best action for a given state based on the value function retrieved from the training.
+
+                Parameters:
+                        state (int): The state to get the best action with.
+                
+                Returns:
+                        best_action (int): The best action found.
+        '''
+        assert self.value_function is not None, "No value function, training probably has to be run..."
+
+        best_vector = np.argmax(np.array(self.value_function)[:,state])
+        best_action = self.value_function[best_vector].action
+
+        return best_action
+
+
+    def simulate(self, simulator:Simulation, max_steps:int=1000) -> SimulationHistory:
+        '''
+        Function to run a simulation with the current agent for up to 'max_steps' amount of steps using a Simulation simulator.
+
+        Not yet implemented:
+            - Stats about how long the simulation took, how often the belief was right about the true state,...
+
+                Parameters:
+                        simulator (mdp.Simulation): the simulation that will be used by the agent.
+                        max_steps (int): the max amount of steps the simulation can run for.
+
+                Returns:
+                        history (SimulationHistory): A step by step history of the simulation with additional functionality to plot rewards for example.
+        '''
+        s = simulator.initialize_simulation()
+
+        history = SimulationHistory()
+
+        # Simulation loop
+        for i in range(max_steps):
+            # Play best action
+            a = self.get_best_action(s)
+            r, s_p = simulator.run_action(a)
+
+            # Track progress
+            history.append({
+                'state': s,
+                'action': a,
+                'next_state': s_p,
+                'reward': r
+            })
+
+            # Update current state
+            s = s_p
+
+            # If simulation is considered done, the rewards are simply returned
+            if simulator.is_done:
+                break
+            
+        return history
+
+
+    def run_n_simulations(self, simulator:Simulation, n:int) -> list[SimulationHistory]:
+        '''
+        Function to run a set of simulations in a row.
+        This is useful when the simulation has a 'done' condition.
+        In this case, the rewards of individual simulations are summed together under a single number.
+
+        Not implemented:
+            - Overal simulation stats
+
+                Parameters:
+                        simulator (Simulation): the simulation that will be used by the agent.
+                        n (int): the amount of simulations to run.
+
+                Returns:
+                        all_histories (list[SimulationHistory]): A list of simulation histories.
+        '''
+        all_histories = []
+        for _ in range(n):
+            rewards = self.simulate(simulator)
+            all_histories.append(rewards)
+
+        return all_histories
