@@ -126,10 +126,11 @@ class Model:
         # Rewards are probabilistic
         self.probabilistic_rewards = probabilistic_rewards
 
-
         # Convert to grid if grid_states is provided
         if grid_states is not None:
             self.convert_to_grid(grid_states)
+
+        self.map_states_to_grid_points()
 
         # Start state probabilities
         if start_probabilities is not None:
@@ -197,6 +198,20 @@ class Model:
 
         assert states_covered == self.state_count, "Some states of the state list are missing..."
         self.grid_states = state_grid
+        self.map_states_to_grid_points()
+
+
+    def map_states_to_grid_points(self) -> None:
+        '''
+        Function to map states to grid points.
+        '''
+        self.state_grid_points = []
+
+        for state in self.state_labels:
+            for y, y_state_list in enumerate(self.grid_states):
+                for x, x_state in enumerate(y_state_list):
+                    if x_state == state:
+                        self.state_grid_points.append([x,y])
 
 
     def to_dict(self) -> dict:
@@ -873,7 +888,8 @@ class SimulationHistory(list):
 
     '''
 
-    def __init__(self, items:list=[]):
+    def __init__(self, model:Model, items:list=[]):
+        self.model = model
         self.extend(items)
 
     
@@ -961,6 +977,35 @@ class SimulationHistory(list):
             plt.hist([r['reward'] for r in rh], bin_count, label=name, color=COLOR_LIST[i]['id'])
 
 
+    def plot_simulation_steps(self, size:int=5):
+        '''
+        Plotting the path that was taken during the simulation.
+
+                Parameters:
+                        size (int): The scale of the plot.
+        '''
+        state_list = [self[0]['state']]
+        for step in self:
+            state_list.append(step['next_state'])
+
+        data = np.array([self.model.state_grid_points[state] for state in state_list])
+
+        plt.figure(figsize=(size,size))
+
+        # Ticks
+        dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
+        plt.xticks([i for i in range(dimensions[1])])
+        plt.yticks([i for i in range(dimensions[0])])
+
+        ax = plt.gca()
+        ax.invert_yaxis()
+
+        # Actual plotting
+        plt.plot(data[:, 0], data[:, 1], color='red')
+        plt.scatter(data[:, 0], data[:, 1], color='red')
+        plt.show()
+
+
 class Agent:
     '''
     The class of an Agent running on a MDP model.
@@ -1038,7 +1083,7 @@ class Agent:
         '''
         s = simulator.initialize_simulation()
 
-        history = SimulationHistory()
+        history = SimulationHistory(self.model)
 
         # Simulation loop
         for i in range(max_steps):

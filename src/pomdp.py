@@ -290,7 +290,6 @@ class Belief(np.ndarray):
         '''
         assert self.model.grid_states is not None
         dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
-
         values = np.zeros(dimensions)
 
         for x in range(values.shape[0]):
@@ -301,7 +300,12 @@ class Belief(np.ndarray):
                     s = self.model.state_labels.index(state_label) # type: ignore
                     values[x,y] = self[s]
 
+        # Plot setup
         plt.figure(figsize=(size*1.2,size))
+        plt.xticks([i for i in range(dimensions[1])])
+        plt.yticks([i for i in range(dimensions[0])])
+
+        # Actual plot
         plt.imshow(values,cmap='Blues')
         plt.colorbar()
         plt.show()
@@ -1131,7 +1135,7 @@ class Agent:
         simulator.initialize_simulation()
         belief = Belief(self.model)
 
-        history = SimulationHistory()
+        history = SimulationHistory(self.model)
 
         # Simulation loop
         for i in range(max_steps):
