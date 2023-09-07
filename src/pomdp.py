@@ -1,6 +1,5 @@
 from matplotlib import animation, cm, colors, ticker
 from matplotlib import pyplot as plt
-from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 from tqdm import tqdm, trange
@@ -14,7 +13,7 @@ import random
 
 from src.mdp import AlphaVector, ValueFunction
 from src.mdp import Model as MDP_Model
-from src.mdp import SimulationHistory
+from src.mdp import SimulationHistory as MDP_SimulationHistory
 from src.mdp import SolverHistory as MDP_SolverHistory
 from src.mdp import Solver as MDP_Solver
 from src.mdp import Simulation as MDP_Simulation
@@ -203,6 +202,8 @@ class Belief(np.ndarray):
     eg:
         - In a 2 state POMDP: a belief of (0.5, 0.5) represent the complete ignorance of which state we are in. Where a (1.0, 0.0) belief is the certainty to be in state 0.
 
+    The belief update function has been implemented based on the belief update define in the paper of J. Pineau, G. Gordon, and S. Thrun, 'Point-based approximations for fast POMDP solving'
+
     ...
 
     Attributes
@@ -210,7 +211,7 @@ class Belief(np.ndarray):
     model: Model
         The model on which the belief applies on.
     state_probabilities: np.ndarray|None
-        A vector of the probabilities to be in each state of the model. The sum of the probabilities must sum to 1. If not specifies it will be 1/|S| for each state belief.
+        A vector of the probabilities to be in each state of the model. The sum of the probabilities must sum to 1. If not specifies it will be set as the start probabilities of the model.
 
     Methods
     -------
@@ -235,6 +236,7 @@ class Belief(np.ndarray):
     def __array_finalize__(self, obj):
         if obj is None: return
         self._model = getattr(obj, '_model', None)
+        self._grid_values = None
 
 
     @property
@@ -281,6 +283,24 @@ class Belief(np.ndarray):
         return rand_s
     
 
+    @property
+    def grid_values(self) -> np.ndarray:
+        if self._grid_values is None:
+            dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
+
+            self._grid_values = np.zeros(dimensions)
+
+            for x in range(dimensions[0]):
+                for y in range(dimensions[1]):
+                    state_label = self.model.grid_states[x][y]
+                    
+                    if state_label is not None:
+                        s = self.model.state_labels.index(state_label) # type: ignore
+                        self._grid_values[x,y] = self[s]
+
+        return self._grid_values
+    
+
     def plot(self, size:int=5) -> None:
         '''
         Function to plot a heatmap of the belief distribution if the belief is of a grid model.
@@ -288,25 +308,16 @@ class Belief(np.ndarray):
                 Parameters:
                         size (int): The scale of the plot. (Default: 5)
         '''
-        assert self.model.grid_states is not None
-        dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
-        values = np.zeros(dimensions)
-
-        for x in range(values.shape[0]):
-            for y in range(values.shape[1]):
-                state_label = self.model.grid_states[x][y]
-                
-                if state_label is not None:
-                    s = self.model.state_labels.index(state_label) # type: ignore
-                    values[x,y] = self[s]
-
         # Plot setup
         plt.figure(figsize=(size*1.2,size))
+
+        # Ticks
+        dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
         plt.xticks([i for i in range(dimensions[1])])
         plt.yticks([i for i in range(dimensions[0])])
 
         # Actual plot
-        plt.imshow(values,cmap='Blues')
+        plt.imshow(self.grid_values,cmap='Blues')
         plt.colorbar()
         plt.show()
 
@@ -585,7 +596,7 @@ class SolverHistory(MDP_SolverHistory):
             ax2.axhline(0, color='black')
 
         max_steps = max([len(solver) for solver in solver_list if not isinstance(solver,ValueFunction)])
-        ani = FuncAnimation(fig, animate, frames=max_steps, interval=500, repeat=False)
+        ani = animate.FuncAnimation(fig, animate, frames=max_steps, interval=500, repeat=False)
         
         # File Title
         solved_time = self.run_ts.strftime('%Y%m%d_%H%M%S')
@@ -615,6 +626,8 @@ class PBVI_Solver(Solver):
     '''
     The Point-Based Value Iteration solver for POMDP Models. It works in two steps, first the backup step that updates the alpha vector set that approximates the value function.
     Then, the expand function that expands the belief set.
+
+    The various expand functions and the backup function have been implemented based on the pseudocodes found the paper from J. Pineau, G. Gordon, and S. Thrun, 'Point-based approximations for fast POMDP solving'
 
     ...
     Attributes
@@ -985,6 +998,56 @@ class PBVI_Solver(Solver):
         return value_function, solver_history
 
 
+class SimulationHistory(MDP_SimulationHistory):
+    '''
+    Class to represent a list of rewards received during a Simulation.
+    The main purpose of the class is to provide a set of visualization options of the rewards received.
+
+    Multiple types of plots can be done:
+        - Totals: to plot a graph of the accumulated rewards over time.
+        - Moving average: to plot the moving average of the rewards received over time.
+        - Histogram: to plot a histogram of the various rewards received.
+
+    ...
+
+    Attributes
+    ------------
+    model: mdp.Model
+        The model on which the simulation happened on.
+    items: list (Optional)
+        A set of rewards received.
+
+    Methods
+    -------
+    plot_rewards(type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
+        Function to summarize the rewards with a plot of one of ('Total', 'Moving Average' or 'Histogram')
+    plot_simulation_steps(size:int=5):
+        Function to plot the final state of the simulation will all states the agent passed through.
+    save_simulation_video(custom_name:Union[str,None]=None, fps:int=1):
+        Function to save a video of the simulation history with all the states it passes through and the believes it explores.
+    '''
+    def _plot_to_frame_on_ax(self, frame_i, ax):
+        # Data
+        data = self.state_point_sequence[:(frame_i+1),:]
+        belief = self[0]['belief'] if frame_i == 0 else self[frame_i-1]['next_belief']
+
+        # Ticks
+        dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
+        x_ticks = [i for i in range(dimensions[1])]
+        y_ticks = [i for i in range(dimensions[0])]
+
+        # Plotting
+        ax.clear()
+        ax.set_title(f'Simulation (Frame {frame_i})')
+
+        ax.imshow(belief.grid_values,cmap='Blues')
+        ax.plot(data[:, 0], data[:, 1], color='red')
+        ax.scatter(data[:, 0], data[:, 1], color='red')
+
+        ax.set_xticks(x_ticks)
+        ax.set_yticks(y_ticks)
+
+
 class Simulation(MDP_Simulation):
     '''
     Class to reprensent a simulation process for a POMDP model.
@@ -1072,7 +1135,10 @@ class Agent:
         Runs the solver on the agent's model in order to retrieve a value function.
     get_best_action(belief:Belief):
         Retrieves the best action from the value function given a belief (the belief of the agent being in a certain state).
-
+    simulate(simulator:Simulation, max_steps:int=1000):
+        Simulate the process on the Agent's model with the given simulator for up to max_steps iterations.
+    run_n_simulations(simulator:Simulation, n:int):
+        Runs n times the simulate() function.
     '''
     def __init__(self, model:Model) -> None:
         super().__init__()

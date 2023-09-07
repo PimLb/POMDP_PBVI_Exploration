@@ -1,7 +1,5 @@
-from matplotlib import colors
+from matplotlib import animation, colors, patches
 from matplotlib import pyplot as plt
-from matplotlib import patches
-from matplotlib.patches import Rectangle
 from scipy.optimize import milp, LinearConstraint
 from tqdm import tqdm, trange
 from typing import Self, Union, Tuple
@@ -502,7 +500,7 @@ class ValueFunction(list[AlphaVector]):
         ax1.set_xticks(ticks, x_ticks) # type: ignore
 
         # Action legend
-        proxy = [Rectangle((0,0),1,1,fc = COLOR_LIST[a]['id']) for a in self.model.actions]
+        proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[a]['id']) for a in self.model.actions]
         ax1.legend(proxy, self.model.action_labels) # type: ignore
 
         # Belief plotting
@@ -626,7 +624,7 @@ class ValueFunction(list[AlphaVector]):
         # Action policy ax
         ax4.set_title("Action policy")
         ax4.contourf(x, y, best_a, 1, colors=[c['id'] for c in COLOR_LIST])
-        proxy = [Rectangle((0,0),1,1,fc = COLOR_LIST[a]['id']) for a in self.model.actions]
+        proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[a]['id']) for a in self.model.actions]
         ax4.legend(proxy, self.model.action_labels)
 
         if belief_points is not None:
@@ -788,81 +786,6 @@ class VI_Solver(Solver):
         return V, solve_history
 
 
-class Simulation:
-    '''
-    Class to reprensent a simulation process for a POMDP model.
-    An initial random state is given and action can be applied to the model that impact the actual state of the agent along with returning a reward and an observation.
-
-    ...
-    Attributes
-    ----------
-    model: pomdp.Model
-        The POMDP model the simulation will be applied on.
-    done_on_reward: bool
-        If the simulation is to end whenever a reward other than zero is received.
-
-    Methods
-    -------
-    initialize_simulation():
-        The function to initialize the simulation with a random state for the agent.
-    run_action(a:int):
-        Runs the action a on the current state of the agent.
-    '''
-    def __init__(self, model:Model, done_on_reward:bool=False, done_on_state:Union[int,list[int]]=[],done_on_action:Union[int,list[int]]=[]) -> None:
-        self.model = model
-        self.done_on_reward = done_on_reward
-        self.done_on_state = done_on_state if isinstance(done_on_state, list) else [done_on_state]
-        self.done_on_action = done_on_action if isinstance(done_on_action, list) else [done_on_action]
-
-        self.initialize_simulation()
-
-
-    def initialize_simulation(self) -> int:
-        '''
-        Function to initialize the simulation by setting a random start state (according to the start probabilities) to the agent.
-
-                Returns:
-                        state (int): The state the agent will start in.
-        '''
-        self.agent_state = int(np.argmax(np.random.multinomial(n=1, pvals=self.model.start_probabilities)))
-        self.is_done = False
-        return self.agent_state
-
-    
-    def run_action(self, a:int) -> Tuple[Union[int, float], int]:
-        '''
-        Run one step of simulation with action a.
-
-                Parameters:
-                        a (int): the action to take in the simulation.
-
-                Returns:
-                        r (int, float): the reward given when doing action a in state s and landing in state s_p. (s and s_p are hidden from agent)
-        '''
-        assert not self.is_done, "Action run when simulation is done."
-
-        s = self.agent_state
-        s_p = self.model.transition(s,a)
-        r = self.model.reward(s,a,s_p)
-
-        # Update agent state
-        self.agent_state = s_p
-
-        # Reward Done check
-        if self.done_on_reward and (r != 0):
-            self.is_done = True
-
-        # State Done check
-        if s_p in self.done_on_state:
-            self.is_done = True
-
-        # Action Done check
-        if a in self.done_on_action:
-            self.is_done = True
-
-        return r, s_p
-
-
 class SimulationHistory(list):
     '''
     Class to represent a list of rewards received during a Simulation.
@@ -877,20 +800,25 @@ class SimulationHistory(list):
 
     Attributes
     ------------
-
+    model: mdp.Model
+        The model on which the simulation happened on.
     items: list (Optional)
         A set of rewards received.
 
     Methods
     -------
-
-    plot(type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
-
+    plot_rewards(type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
+        Function to summarize the rewards with a plot of one of ('Total', 'Moving Average' or 'Histogram')
+    plot_simulation_steps(size:int=5):
+        Function to plot the final state of the simulation will all states the agent passed through.
+    save_simulation_video(custom_name:Union[str,None]=None, fps:int=1):
+        Function to save a video of the simulation history with all the states it passes through.
     '''
 
     def __init__(self, model:Model, items:list=[]):
         self.model = model
         self.extend(items)
+        self._state_point_seq = None
 
     
     def plot_rewards(self, type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
@@ -977,6 +905,18 @@ class SimulationHistory(list):
             plt.hist([r['reward'] for r in rh], bin_count, label=name, color=COLOR_LIST[i]['id'])
 
 
+    @property
+    def state_point_sequence(self) -> np.ndarray:
+        if self._state_point_seq is None:
+            state_list = [self[0]['state']]
+            for step in self:
+                state_list.append(step['next_state'])
+
+            self._state_point_seq = np.array([self.model.state_grid_points[state] for state in state_list])
+
+        return self._state_point_seq
+    
+
     def plot_simulation_steps(self, size:int=5):
         '''
         Plotting the path that was taken during the simulation.
@@ -984,12 +924,6 @@ class SimulationHistory(list):
                 Parameters:
                         size (int): The scale of the plot.
         '''
-        state_list = [self[0]['state']]
-        for step in self:
-            state_list.append(step['next_state'])
-
-        data = np.array([self.model.state_grid_points[state] for state in state_list])
-
         plt.figure(figsize=(size,size))
 
         # Ticks
@@ -1001,9 +935,134 @@ class SimulationHistory(list):
         ax.invert_yaxis()
 
         # Actual plotting
+        data = self.state_point_sequence
         plt.plot(data[:, 0], data[:, 1], color='red')
         plt.scatter(data[:, 0], data[:, 1], color='red')
         plt.show()
+
+
+    def _plot_to_frame_on_ax(self, frame_i, ax):
+        # Data
+        data = self.state_point_sequence[:(frame_i+1),:]
+
+        # Ticks
+        dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
+        x_ticks = [i for i in range(dimensions[1])]
+        y_ticks = [i for i in range(dimensions[0])]
+
+        # Plotting
+        ax.clear()
+        ax.set_title(f'Simulation (Frame {frame_i})')
+
+        ax.plot(data[:, 0], data[:, 1], color='red')
+        ax.scatter(data[:, 0], data[:, 1], color='red')
+
+        ax.set_xticks(x_ticks)
+        ax.set_yticks(y_ticks)
+        ax.invert_yaxis()
+
+
+    def save_simulation_video(self, custom_name:Union[str,None]=None, fps:int=1) -> None:
+        '''
+        Function to save a video of the simulation history with all the states it passes through.
+
+                Parameters:
+                        custom_name (str): Optional, the name of the file it will be saved under. By default it is will be a combination of the state count, the action count and the run timestamp.
+                        fps (int): The amount of steps per second appearing in the video.
+        '''
+        fig = plt.figure()
+        ax = plt.gca()
+        steps = len(self) + 1
+
+        ani = animation.FuncAnimation(fig, (lambda frame_i: self._plot_to_frame_on_ax(frame_i, ax)), frames=steps, interval=500, repeat=False)
+        
+        # File Title
+        solved_time = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+
+        video_title = f'{custom_name}-' if custom_name is not None else '' # Base
+        video_title += f's{self.model.state_count}-a{self.model.action_count}-' # Model params
+        video_title += f'{solved_time}.mp4'
+
+        # Video saving
+        writervideo = animation.FFMpegWriter(fps=fps)
+        ani.save('./Sim Videos/' + video_title, writer=writervideo)
+        print(f'Video saved at \'Sim Videos/{video_title}\'...')
+        plt.close()
+
+
+class Simulation:
+    '''
+    Class to reprensent a simulation process for a POMDP model.
+    An initial random state is given and action can be applied to the model that impact the actual state of the agent along with returning a reward and an observation.
+
+    ...
+    Attributes
+    ----------
+    model: pomdp.Model
+        The POMDP model the simulation will be applied on.
+    done_on_reward: bool
+        If the simulation is to end whenever a reward other than zero is received.
+
+    Methods
+    -------
+    initialize_simulation():
+        The function to initialize the simulation with a random state for the agent.
+    run_action(a:int):
+        Runs the action a on the current state of the agent.
+    '''
+    def __init__(self, model:Model, done_on_reward:bool=False, done_on_state:Union[int,list[int]]=[],done_on_action:Union[int,list[int]]=[]) -> None:
+        self.model = model
+        self.done_on_reward = done_on_reward
+        self.done_on_state = done_on_state if isinstance(done_on_state, list) else [done_on_state]
+        self.done_on_action = done_on_action if isinstance(done_on_action, list) else [done_on_action]
+
+        self.initialize_simulation()
+
+
+    def initialize_simulation(self) -> int:
+        '''
+        Function to initialize the simulation by setting a random start state (according to the start probabilities) to the agent.
+
+                Returns:
+                        state (int): The state the agent will start in.
+        '''
+        self.agent_state = int(np.argmax(np.random.multinomial(n=1, pvals=self.model.start_probabilities)))
+        self.is_done = False
+        return self.agent_state
+
+    
+    def run_action(self, a:int) -> Tuple[Union[int, float], int]:
+        '''
+        Run one step of simulation with action a.
+
+                Parameters:
+                        a (int): the action to take in the simulation.
+
+                Returns:
+                        r (int, float): the reward given when doing action a in state s and landing in state s_p. (s and s_p are hidden from agent)
+        '''
+        assert not self.is_done, "Action run when simulation is done."
+
+        s = self.agent_state
+        s_p = self.model.transition(s,a)
+        r = self.model.reward(s,a,s_p)
+
+        # Update agent state
+        self.agent_state = s_p
+
+        # Reward Done check
+        if self.done_on_reward and (r != 0):
+            self.is_done = True
+
+        # State Done check
+        if s_p in self.done_on_state:
+            self.is_done = True
+
+        # Action Done check
+        if a in self.done_on_action:
+            self.is_done = True
+
+        return r, s_p
 
 
 class Agent:
