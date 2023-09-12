@@ -13,24 +13,19 @@ import random
 
 from src.mdp import AlphaVector, ValueFunction
 from src.mdp import Model as MDP_Model
+from src.mdp import RewardSet
 from src.mdp import SimulationHistory as MDP_SimulationHistory
 from src.mdp import SolverHistory as MDP_SolverHistory
 from src.mdp import Solver as MDP_Solver
 from src.mdp import Simulation as MDP_Simulation
 
 
-COLOR_LIST = []
-for item, value in colors.TABLEAU_COLORS.items(): # type: ignore
-    value = value.lstrip('#')
-    lv = len(value)
-    rgb_value = tuple(int(value[i:i + lv // 3], 16) for i in range(0, lv, lv // 3))
-
-    COLOR_LIST.append({
-        'name': item.replace('tab:',''),
-        'id': item,
-        'hex': value,
-        'rgb': rgb_value
-    })
+COLOR_LIST = [{
+    'name': item.replace('tab:',''),
+    'id': item,
+    'hex': value,
+    'rgb': tuple(int(value.lstrip('#')[i:i + (len(value)-1) // 3], 16) for i in range(0, (len(value)-1), (len(value)-1) // 3))
+    } for item, value in colors.TABLEAU_COLORS.items()] # type: ignore
 
 
 class Model(MDP_Model):
@@ -1014,22 +1009,37 @@ class SimulationHistory(MDP_SimulationHistory):
     ------------
     model: mdp.Model
         The model on which the simulation happened on.
-    items: list (Optional)
-        A set of rewards received.
+    start_state: int
+        The initial state in the simulation.
+    start_belief: Belief
+        The initial belief the agent starts with during the simulation.
 
     Methods
     -------
-    plot_rewards(type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
-        Function to summarize the rewards with a plot of one of ('Total', 'Moving Average' or 'Histogram')
     plot_simulation_steps(size:int=5):
         Function to plot the final state of the simulation will all states the agent passed through.
     save_simulation_video(custom_name:Union[str,None]=None, fps:int=1):
         Function to save a video of the simulation history with all the states it passes through and the believes it explores.
+    add(action:int, reward, next_state:int, next_belief:Belief, observation:int):
+        Function to add a step in the simulation history.
     '''
+    def __init__(self, model:Model, start_state:int, start_belief:Belief):
+        super().__init__(model, start_state)
+        self.beliefs = [start_belief]
+        self.observations = []
+
+
+    def add(self, action:int, reward, next_state:int, next_belief:Belief, observation:int) -> None:
+        super().add(action, reward, next_state)
+        self.beliefs.append(next_belief)
+        self.observations.append(observation)
+
+
+    # Overwritten
     def _plot_to_frame_on_ax(self, frame_i, ax):
         # Data
-        data = self.state_point_sequence[:(frame_i+1),:]
-        belief = self[0]['belief'] if frame_i == 0 else self[frame_i-1]['next_belief']
+        data = np.array(self.grid_point_sequence)[:(frame_i+1),:]
+        belief = self.beliefs[frame_i]
 
         # Ticks
         dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
@@ -1184,7 +1194,7 @@ class Agent:
         return best_action
 
 
-    def simulate(self, simulator:Simulation, max_steps:int=1000) -> SimulationHistory:
+    def simulate(self, simulator:Simulation, max_steps:int=1000, print_progress:bool=True) -> SimulationHistory:
         '''
         Function to run a simulation with the current agent for up to 'max_steps' amount of steps using a Simulation simulator.
 
@@ -1194,6 +1204,7 @@ class Agent:
                 Parameters:
                         simulator (pomdp.Simulation): the simulation that will be used by the agent.
                         max_steps (int): the max amount of steps the simulation can run for.
+                        print_progress (bool): Whether or not to print out the progress of the simulation. (Default: True)
 
                 Returns:
                         history (SimulationHistory): A list of rewards with the additional functionality that the can be plot with the plot() function.
@@ -1201,16 +1212,10 @@ class Agent:
         simulator.initialize_simulation()
         belief = Belief(self.model)
 
-        history = SimulationHistory(self.model)
+        history = SimulationHistory(self.model, start_state=simulator.agent_state, start_belief=belief)
 
         # Simulation loop
-        for i in range(max_steps):
-            # Iteration history dict
-            history_dict = {
-                'belief': belief,
-                'state': simulator.agent_state
-            }
-
+        for _ in (trange(max_steps) if print_progress else range(max_steps)):
             # Play best action
             a = self.get_best_action(belief)
             r,o = simulator.run_action(a)
@@ -1219,14 +1224,7 @@ class Agent:
             new_belief = belief.update(a, o)
 
             # Post action history recording
-            history_dict.update({
-                'action': a,
-                'next_state': simulator.agent_state,
-                'next_belief': new_belief,
-                'reward': r,
-                'observation': o
-            })
-            history.append(history_dict)
+            history.add(action=a, next_state=simulator.agent_state, next_belief=new_belief, reward=r, observation=o)
 
             # Replace belief
             belief = new_belief
@@ -1238,7 +1236,7 @@ class Agent:
         return history
 
 
-    def run_n_simulations(self, simulator:Simulation, n:int) -> list[SimulationHistory]:
+    def run_n_simulations(self, simulator:Simulation, n:int, max_steps:int=1000, print_progress:bool=True) -> RewardSet:
         '''
         Function to run a set of simulations in a row.
         This is useful when the simulation has a 'done' condition.
@@ -1252,14 +1250,14 @@ class Agent:
                         n (int): the amount of simulations to run.
 
                 Returns:
-                        all_histories (list[SimulationHistory]): A list of simulation histories.
+                        all_histories (RewardSet): A list of the final rewards after each simulation.
         '''
-        all_histories = []
-        for _ in range(n):
-            history = self.simulate(simulator)
-            all_histories.append(np.sum(history))
+        all_rewards = RewardSet()
+        for _ in (trange(n) if print_progress else range(n)):
+            history = self.simulate(simulator, max_steps, False)
+            all_rewards.append(np.sum(history.rewards))
 
-        return all_histories
+        return all_rewards
     
 
 def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
