@@ -6,9 +6,11 @@ from tqdm import tqdm, trange
 from typing import Self, Tuple, Union
 
 import copy
+import datetime
 import json
 import numpy as np
 import math
+import os
 import random
 
 from src.mdp import AlphaVector, ValueFunction
@@ -611,6 +613,10 @@ class SolverHistory(MDP_SolverHistory):
         video_title += f'{solved_time}.mp4'
 
         # Video saving
+        if not os.path.exists('./Results'):
+            print('Folder does not exist yet, creating it...')
+            os.makedirs('./Results')
+
         writervideo = animation.FFMpegWriter(fps=10)
         ani.save('./Results/' + video_title, writer=writervideo)
         print(f'Video saved at \'Results/{video_title}\'...')
@@ -1190,18 +1196,22 @@ class Agent:
         return best_action
 
 
-    def simulate(self, simulator:Union[Simulation,None]=None, max_steps:int=1000, start_state:int=-1, print_progress:bool=True) -> SimulationHistory:
+    def simulate(self,
+                 simulator:Union[Simulation,None]=None,
+                 max_steps:int=1000,
+                 start_state:int=-1,
+                 print_progress:bool=True,
+                 print_stats:bool=True
+                 ) -> SimulationHistory:
         '''
         Function to run a simulation with the current agent for up to 'max_steps' amount of steps using a Simulation simulator.
-
-        Not yet implemented:
-            - Stats about how long the simulation took, how often the belief was right about the true state,...
 
                 Parameters:
                         simulator (mdp.Simulation): The simulation that will be used by the agent. If not provided, the default MDP simulator will be used. (Optional)
                         max_steps (int): the max amount of steps the simulation can run for.
                         start_state (int): The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
                         print_progress (bool): Whether or not to print out the progress of the simulation. (Default: True)
+                        print_stats (bool): Whether or not to print simulation statistics at the end of the simulation (Default: True)
 
                 Returns:
                         history (SimulationHistory): A list of rewards with the additional functionality that the can be plot with the plot() function.
@@ -1213,6 +1223,8 @@ class Agent:
         belief = Belief(self.model)
 
         history = SimulationHistory(self.model, start_state=s, start_belief=belief)
+
+        sim_start_ts = datetime.datetime.now()
 
         # Simulation loop
         for _ in (trange(max_steps) if print_progress else range(max_steps)):
@@ -1233,10 +1245,25 @@ class Agent:
             if simulator.is_done:
                 break
             
+        if print_stats:
+            sim_end_ts = datetime.datetime.now()
+            print('Simulation done:')
+            print(f'\t- Runtime (s): {(sim_end_ts - sim_start_ts).total_seconds()}')
+            print(f'\t- Steps: {len(history.states)}')
+            print(f'\t- Total rewards: {sum(history.rewards)}')
+            print(f'\t- End state: {self.model.state_labels[history.states[-1]]}')
+
         return history
 
 
-    def run_n_simulations(self, simulator:Union[Simulation,None]=None, n:int=1000, max_steps:int=1000, start_state:int=-1, print_progress:bool=True) -> RewardSet:
+    def run_n_simulations(self,
+                          simulator:Union[Simulation,None]=None,
+                          n:int=1000,
+                          max_steps:int=1000,
+                          start_state:int=-1,
+                          print_progress:bool=True,
+                          print_stats:bool=True
+                          ) -> RewardSet:
         '''
         Function to run a set of simulations in a row.
         This is useful when the simulation has a 'done' condition.
@@ -1251,6 +1278,7 @@ class Agent:
                         max_steps (int): the max_steps to run per simulation. (Default: 1000)
                         start_state (int): The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
                         print_progress (bool): Whether or not to print out the progress of the simulation. (Default: True)
+                        print_stats (bool): Whether or not to print simulation statistics at the end of the simulation (Default: True)
 
                 Returns:
                         all_histories (RewardSet): A list of the final rewards after each simulation.
@@ -1258,12 +1286,23 @@ class Agent:
         if simulator is None:
             simulator = Simulation(self.model)
 
-        all_rewards = RewardSet()
-        for _ in (trange(n) if print_progress else range(n)):
-            history = self.simulate(simulator, max_steps, start_state, False)
-            all_rewards.append(np.sum(history.rewards))
+        sim_start_ts = datetime.datetime.now()
 
-        return all_rewards
+        all_final_rewards = RewardSet()
+        all_sim_length = []
+        for _ in (trange(n) if print_progress else range(n)):
+            history = self.simulate(simulator, max_steps, start_state, False, False)
+            all_final_rewards.append(np.sum(history.rewards))
+            all_sim_length.append(len(history.states))
+
+        if print_stats:
+            sim_end_ts = datetime.datetime.now()
+            print(f'All {n} simulations done:')
+            print(f'\t- Average runtime (s): {((sim_end_ts - sim_start_ts).total_seconds() / n)}')
+            print(f'\t- Average step count: {(sum(all_sim_length) / n)}')
+            print(f'\t- Average total rewards: {(sum(all_final_rewards) / n)}')
+
+        return all_final_rewards
     
 
 def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
