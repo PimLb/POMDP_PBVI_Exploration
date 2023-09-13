@@ -43,6 +43,10 @@ class Model:
         Optional, if provided, the model will be converted to a grid model. Allows for 'None' states if there is a gaps in the grid.
     start_probabilities: list
         Optional, the distribution of chances to start in each state. If not provided, there will be an uniform chance for each state.
+    end_states: list
+        Optional, entering either state in the list during a simulation will end the simulation.
+    end_action: list
+        Optional, playing action of the list during a simulation will end the simulation.
         
     Methods
     -------
@@ -56,7 +60,9 @@ class Model:
                  immediate_reward_table=None,
                  probabilistic_rewards:bool=False,
                  grid_states:Union[None,list[list[Union[str,None]]]]=None,
-                 start_probabilities:Union[list,None]=None
+                 start_probabilities:Union[list,None]=None,
+                 end_states:list[int]=[],
+                 end_actions:list[int]=[]
                  ):
         
         # States
@@ -130,6 +136,10 @@ class Model:
             self.start_probabilities = np.array(start_probabilities,dtype=float)
         else:
             self.start_probabilities = np.ones(self.state_count) / self.state_count
+
+        # End state conditions
+        self.end_states = end_states
+        self.end_actions = end_actions
 
     
     def transition(self, s:int, a:int) -> int:
@@ -819,7 +829,6 @@ class RewardSet(list):
                         graph_name (list[str]): A list of the names of the comparison graphs.
         '''
         plt.figure(figsize=(size*2,size))
-        plt.title('Cummulative reward received of time')
 
         # Histories
         reward_sets = [self]
@@ -842,10 +851,15 @@ class RewardSet(list):
 
         # Actual plot
         if type in ['total', 't']:
+            plt.title('Cummulative reward received of time')
             self._plot_total(reward_sets, names, max_reward)
+
         elif type in ['moving_average', 'ma']:
+            plt.title('Average rewards received of time')
             self._plot_moving_average(reward_sets, names, max_reward)
+
         elif type in ['histogram', 'h']:
+            plt.title('Histogram of rewards received')
             self._plot_histogram(reward_sets, names, max_reward)
 
         # Finalization
@@ -1031,8 +1045,6 @@ class Simulation:
     ----------
     model: pomdp.Model
         The POMDP model the simulation will be applied on.
-    done_on_reward: bool
-        If the simulation is to end whenever a reward other than zero is received.
 
     Methods
     -------
@@ -1041,23 +1053,26 @@ class Simulation:
     run_action(a:int):
         Runs the action a on the current state of the agent.
     '''
-    def __init__(self, model:Model, done_on_reward:bool=False, done_on_state:Union[int,list[int]]=[],done_on_action:Union[int,list[int]]=[]) -> None:
+    def __init__(self, model:Model) -> None:
         self.model = model
-        self.done_on_reward = done_on_reward
-        self.done_on_state = done_on_state if isinstance(done_on_state, list) else [done_on_state]
-        self.done_on_action = done_on_action if isinstance(done_on_action, list) else [done_on_action]
-
         self.initialize_simulation()
 
 
-    def initialize_simulation(self) -> int:
+    def initialize_simulation(self, start_state:int=-1) -> int:
         '''
         Function to initialize the simulation by setting a random start state (according to the start probabilities) to the agent.
+
+                Parameters:
+                        start_state (int): The state the agent should start in. (Default: randomly over model's start probabilities)
 
                 Returns:
                         state (int): The state the agent will start in.
         '''
-        self.agent_state = int(np.argmax(np.random.multinomial(n=1, pvals=self.model.start_probabilities)))
+        if start_state < 0:
+            self.agent_state = int(np.argmax(np.random.multinomial(n=1, pvals=self.model.start_probabilities)))
+        else:
+            self.agent_state = start_state
+        
         self.is_done = False
         return self.agent_state
 
@@ -1081,16 +1096,12 @@ class Simulation:
         # Update agent state
         self.agent_state = s_p
 
-        # Reward Done check
-        if self.done_on_reward and (r != 0):
-            self.is_done = True
-
         # State Done check
-        if s_p in self.done_on_state:
+        if s_p in self.model.end_states:
             self.is_done = True
 
         # Action Done check
-        if a in self.done_on_action:
+        if a in self.model.end_actions:
             self.is_done = True
 
         return r, s_p
@@ -1157,19 +1168,23 @@ class Agent:
         return best_action
 
 
-    def simulate(self, simulator:Simulation, max_steps:int=1000, print_progress:bool=True) -> SimulationHistory:
+    def simulate(self, simulator:Union[Simulation,None]=None, max_steps:int=1000, start_state:int=-1, print_progress:bool=True) -> SimulationHistory:
         '''
         Function to run a simulation with the current agent for up to 'max_steps' amount of steps using a Simulation simulator.
 
                 Parameters:
-                        simulator (mdp.Simulation): the simulation that will be used by the agent.
-                        max_steps (int): the max amount of steps the simulation can run for.
+                        simulator (mdp.Simulation): The simulation that will be used by the agent. If not provided, the default MDP simulator will be used. (Optional)
+                        max_steps (int): The max amount of steps the simulation can run for. (Default: 1000)
+                        start_state (int): The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
                         print_progress (bool): Whether or not to print out the progress of the simulation. (Default: True)
 
                 Returns:
                         history (SimulationHistory): A step by step history of the simulation with additional functionality to plot rewards for example.
         '''
-        s = simulator.initialize_simulation()
+        if simulator is None:
+            simulator = Simulation(self.model)
+
+        s = simulator.initialize_simulation(start_state=start_state)
 
         history = SimulationHistory(self.model, s)
 
@@ -1192,7 +1207,7 @@ class Agent:
         return history
 
 
-    def run_n_simulations(self, simulator:Simulation, n:int, max_steps:int=1000, print_progress:bool=True) -> RewardSet:
+    def run_n_simulations(self, simulator:Union[Simulation,None]=None, n:int=1000, max_steps:int=1000, start_state:int=-1, print_progress:bool=True) -> RewardSet:
         '''
         Function to run a set of simulations in a row.
         This is useful when the simulation has a 'done' condition.
@@ -1202,17 +1217,21 @@ class Agent:
             - Overal simulation stats
 
                 Parameters:
-                        simulator (Simulation): the simulation that will be used by the agent.
-                        n (int): the amount of simulations to run.
+                        simulator (mdp.Simulation): The simulation that will be used by the agent. If not provided, the default MDP simulator will be used. (Optional)
+                        n (int): the amount of simulations to run. (Default: 1000)
                         max_steps (int): the max_steps to run per simulation. (Default: 1000)
+                        start_state (int): The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
                         print_progress (bool): Whether or not to print out the progress of the simulation. (Default: True)
 
                 Returns:
                         all_histories (RewardSet): A list of the final rewards after each simulation.
         '''
+        if simulator is None:
+            simulator = Simulation(self.model)
+
         all_final_rewards = RewardSet()
         for _ in (trange(n) if print_progress else range(n)):
-            sim_history = self.simulate(simulator, max_steps, False)
+            sim_history = self.simulate(simulator, max_steps, start_state, False)
             all_final_rewards.append(sum(sim_history.rewards))
 
         return all_final_rewards

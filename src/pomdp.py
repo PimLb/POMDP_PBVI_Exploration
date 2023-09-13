@@ -54,6 +54,10 @@ class Model(MDP_Model):
         Optional, if provided, the model will be converted to a grid model. Allows for 'None' states if there is a gaps in the grid.
     start_probabilities: list
         Optional, the distribution of chances to start in each state. If not provided, there will be an uniform chance for each state. It is also used to represent a belief of complete uncertainty.
+    end_states: list
+        Optional, entering either state in the list during a simulation will end the simulation.
+    end_action: list
+        Optional, playing action of the list during a simulation will end the simulation.
 
     Methods
     -------
@@ -71,7 +75,9 @@ class Model(MDP_Model):
                  observation_table=None,
                  probabilistic_rewards:bool=False,
                  grid_states:Union[None,list[list[Union[str,None]]]]=None,
-                 start_probabilities:Union[list,None]=None
+                 start_probabilities:Union[list,None]=None,
+                 end_states:list[int]=[],
+                 end_actions:list[int]=[]
                  ):
         
         super().__init__(states=states,
@@ -80,7 +86,9 @@ class Model(MDP_Model):
                          immediate_reward_table=None, # Defined here lower since immediate reward table has different shape for MDP is different than for POMDP
                          probabilistic_rewards=probabilistic_rewards,
                          grid_states=grid_states,
-                         start_probabilities=start_probabilities)
+                         start_probabilities=start_probabilities,
+                         end_states=end_states,
+                         end_actions=end_actions)
 
         if isinstance(observations, int):
             self.observation_labels = [f'o_{i}' for i in range(observations)]
@@ -1068,8 +1076,6 @@ class Simulation(MDP_Simulation):
     ----------
     model: pomdp.Model
         The POMDP model the simulation will be applied on.
-    done_on_reward: bool
-        If the simulation is to end whenever a reward other than zero is received.
 
     Methods
     -------
@@ -1078,14 +1084,8 @@ class Simulation(MDP_Simulation):
     run_action(a:int):
         Runs the action a on the current state of the agent.
     '''
-    def __init__(self,
-                 model:Model,
-                 done_on_reward:bool=False,
-                 done_on_state: Union[int,list[int]]=[],
-                 done_on_action:Union[int,list[int]]=[]
-                 ) -> None:
-        
-        super().__init__(model, done_on_reward, done_on_state, done_on_action)
+    def __init__(self, model:Model) -> None:
+        super().__init__(model)
         self.model = model
 
 
@@ -1110,16 +1110,12 @@ class Simulation(MDP_Simulation):
         # Update agent state
         self.agent_state = s_p
 
-        # Reward Done check
-        if self.done_on_reward and (r != 0):
-            self.is_done = True
-
         # State Done check
-        if s_p in self.done_on_state:
+        if s_p in self.model.end_states:
             self.is_done = True
 
         # Action Done check
-        if a in self.done_on_action:
+        if a in self.model.end_actions:
             self.is_done = True
 
         return (r, o)
@@ -1194,7 +1190,7 @@ class Agent:
         return best_action
 
 
-    def simulate(self, simulator:Simulation, max_steps:int=1000, print_progress:bool=True) -> SimulationHistory:
+    def simulate(self, simulator:Union[Simulation,None]=None, max_steps:int=1000, start_state:int=-1, print_progress:bool=True) -> SimulationHistory:
         '''
         Function to run a simulation with the current agent for up to 'max_steps' amount of steps using a Simulation simulator.
 
@@ -1202,17 +1198,21 @@ class Agent:
             - Stats about how long the simulation took, how often the belief was right about the true state,...
 
                 Parameters:
-                        simulator (pomdp.Simulation): the simulation that will be used by the agent.
+                        simulator (mdp.Simulation): The simulation that will be used by the agent. If not provided, the default MDP simulator will be used. (Optional)
                         max_steps (int): the max amount of steps the simulation can run for.
+                        start_state (int): The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
                         print_progress (bool): Whether or not to print out the progress of the simulation. (Default: True)
 
                 Returns:
                         history (SimulationHistory): A list of rewards with the additional functionality that the can be plot with the plot() function.
         '''
-        simulator.initialize_simulation()
+        if simulator is None:
+            simulator = Simulation(self.model)
+
+        s = simulator.initialize_simulation(start_state=start_state) # s is only used for the simulation history
         belief = Belief(self.model)
 
-        history = SimulationHistory(self.model, start_state=simulator.agent_state, start_belief=belief)
+        history = SimulationHistory(self.model, start_state=s, start_belief=belief)
 
         # Simulation loop
         for _ in (trange(max_steps) if print_progress else range(max_steps)):
@@ -1236,7 +1236,7 @@ class Agent:
         return history
 
 
-    def run_n_simulations(self, simulator:Simulation, n:int, max_steps:int=1000, print_progress:bool=True) -> RewardSet:
+    def run_n_simulations(self, simulator:Union[Simulation,None]=None, n:int=1000, max_steps:int=1000, start_state:int=-1, print_progress:bool=True) -> RewardSet:
         '''
         Function to run a set of simulations in a row.
         This is useful when the simulation has a 'done' condition.
@@ -1246,15 +1246,21 @@ class Agent:
             - Overal simulation stats
 
                 Parameters:
-                        simulator (Simulation): the simulation that will be used by the agent.
-                        n (int): the amount of simulations to run.
+                        simulator (mdp.Simulation): The simulation that will be used by the agent. If not provided, the default MDP simulator will be used. (Optional)
+                        n (int): the amount of simulations to run. (Default: 1000)
+                        max_steps (int): the max_steps to run per simulation. (Default: 1000)
+                        start_state (int): The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
+                        print_progress (bool): Whether or not to print out the progress of the simulation. (Default: True)
 
                 Returns:
                         all_histories (RewardSet): A list of the final rewards after each simulation.
         '''
+        if simulator is None:
+            simulator = Simulation(self.model)
+
         all_rewards = RewardSet()
         for _ in (trange(n) if print_progress else range(n)):
-            history = self.simulate(simulator, max_steps, False)
+            history = self.simulate(simulator, max_steps, start_state, False)
             all_rewards.append(np.sum(history.rewards))
 
         return all_rewards
