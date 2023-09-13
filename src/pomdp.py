@@ -567,7 +567,7 @@ class SolverHistory(MDP_SolverHistory):
             for i, alpha in enumerate(value_function):
                 ax.plot(x[i,:], y[i,:], line_type, color=COLOR_LIST[alpha.action]['id'])
 
-        def animate(frame_i):
+        def plt_frame(frame_i):
             ax1.clear()
             ax2.clear()
 
@@ -601,7 +601,7 @@ class SolverHistory(MDP_SolverHistory):
             ax2.axhline(0, color='black')
 
         max_steps = max([len(solver) for solver in solver_list if not isinstance(solver,ValueFunction)])
-        ani = animate.FuncAnimation(fig, animate, frames=max_steps, interval=500, repeat=False)
+        ani = animation.FuncAnimation(fig, plt_frame, frames=max_steps, interval=500, repeat=False)
         
         # File Title
         solved_time = self.run_ts.strftime('%Y%m%d_%H%M%S')
