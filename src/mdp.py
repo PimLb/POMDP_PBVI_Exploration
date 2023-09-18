@@ -700,7 +700,7 @@ class ValueFunction(list[AlphaVector]):
         plt.show()
 
 
-class SolverHistory(list[dict]):
+class SolverHistory:
     '''
     Class to represent the solving history of a solver.
     The purpose of this class is to allow plotting of the solution and plotting the evolution of the value function over the training process.
@@ -712,18 +712,43 @@ class SolverHistory(list[dict]):
     ----------
     model: mdp.Model
         The model that has been solved by the Solver
+    initial_value_function: ValueFunction
+        The initial value function the solver will use to start the solving process.
     params: dict
         Additional Solver parameters used to make better visualizations
     '''
-    def __init__(self, model, **params):
+    def __init__(self,
+                 model:Model,
+                 initial_value_function:ValueFunction,
+                 gamma:float,
+                 eps:float):
         self.model = model
-        self.params = params
+        self.value_functions = [initial_value_function]
+        self.gamma = gamma
+        self.eps = eps
         self.run_ts = datetime.datetime.now()
 
 
     @property
     def solution(self) -> ValueFunction:
-        return self[-1]['value_function']
+        '''
+        The last Value function of the solving process
+        '''
+        return self.value_functions[-1]
+    
+
+    def add(self, value_function:ValueFunction) -> None:
+        '''
+        Function to add a step in the simulation history.
+
+                Parameters:
+                        value_function (ValueFunction): The value function resulting after a step of the solving process.
+        '''
+        self.value_functions.append(value_function)
+
+
+    def __len__(self):
+        return len(self.value_functions)
 
 
 class Solver:
@@ -788,31 +813,21 @@ class VI_Solver(Solver):
             V = copy.deepcopy(initial_value_function)
         V_opt = V[0]
 
-        solve_history = SolverHistory(model)
-        solve_history.append({'value_function': V})
+        solve_history = SolverHistory(model, V)
 
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
 
         for _ in trange(self.horizon) if print_progress else range(self.horizon):
             old_V_opt = V_opt
-            # old_V_opt = copy.deepcopy(V_opt)
-
-            # V = ValueFunction(model)
-            # for a in model.actions:
-            #     alpha_vect = []
-            #     for s in model.states:
-            #         summer = sum(model.transition_table[s, a, s_p] * old_V_opt[s_p] for s_p in model.states)
-            #         alpha_vect.append(model.expected_rewards_table[s,a] + (self.gamma * summer))
-
-            #     V.append(AlphaVector(alpha_vect, a))
-
-            # alpha_vectors = model.expected_rewards_table + (self.gamma * np.einsum('san,n->sa', model.transition_table, old_V_opt))
+            
+            # Computing the new alpha vectors
             alpha_vectors = model.expected_rewards_table + (self.gamma * np.dot(model.transition_table, old_V_opt))
             V = ValueFunction(model, alpha_vectors, model.actions)
 
             V_opt = np.max(np.array(V), axis=0)
 
-            solve_history.append({'value_function': V})
+            # Tracking the history
+            solve_history.add(V)
                 
             max_change = np.max(np.abs(V_opt - old_V_opt))
             if max_change < max_allowed_change:

@@ -339,6 +339,10 @@ class SolverHistory(MDP_SolverHistory):
     ----------
     model: pomdp.Model
         The model the solver has solved
+    initial_value_function: ValueFunction
+        The initial value function the solver will use to start the solving process.
+    initial_belief: Belief
+        The initial belief  the solver will use to start the solving process.
     params:
         The solver parameters that have been used, to show better information on the visualizations.
 
@@ -351,13 +355,40 @@ class SolverHistory(MDP_SolverHistory):
     save_history_video(custom_name:Union[str,None]=None, compare_with:Union[list, ValueFunction, Self]=[]):
         Once the solve has been run, we can save a video of the history of the solving process.
     '''
-    def __init__(self, model, **params):
-        super().__init__(model, **params)
+    def __init__(self,
+                 model:Model,
+                 initial_value_function:ValueFunction,
+                 initial_belief_set:list[Belief],
+                 gamma:float,
+                 eps:float,
+                 expand_function:str
+                 ):
+        super().__init__(model,
+                         initial_value_function,
+                         gamma,
+                         eps)
+        self.belief_sets = [initial_belief_set]
+        self.expand_function = expand_function
 
 
     @property
     def explored_beliefs(self) -> list[Belief]:
-        return self[-1]['beliefs']
+        '''
+        The final set of beliefs exploredduring the solving
+        '''
+        return self.belief_sets[-1]
+    
+
+    def add(self, value_function:ValueFunction, belief_set:list[Belief]) -> None:
+        '''
+        Function to add a step in the simulation history by recording the value function and the explored belief set.
+
+                Parameters:
+                        value_function (ValueFunction): The value function resulting after a step of the solving process.
+                        belief_set (list[Belief]): The belief set used for the Update step of the solving process.
+        '''
+        self.value_functions.append(value_function)
+        self.belief_sets.append(belief_set)
     
 
     def plot_belief_set(self, size:int=15):
@@ -479,7 +510,8 @@ class SolverHistory(MDP_SolverHistory):
         Note: only works for 2 and 3 states models
 
                 Parameters:
-                        size (int): The figure size and general scaling factor
+                        size (int): The figure size and general scaling factor.
+                        plot_belief (bool): Whether to plot the belief set along with the value function.
         '''
         self.solution.plot(size=size, belief_set=(self.explored_beliefs if plot_belief else None))
 
@@ -516,7 +548,7 @@ class SolverHistory(MDP_SolverHistory):
 
         # Figure title
         fig.suptitle(f"{self.model.state_count}-s {self.model.action_count}-a {self.model.observation_count}-o POMDP model solve history", fontsize=16)
-        title = f'{self.params["expand_function"]} expand strat, {self.params["gamma"]}-gamma, {self.params["eps"]}-eps '
+        title = f'{self.expand_function} expand strat, {self.gamma}-gamma, {self.eps}-eps '
 
         # X-axis setting
         ticks = [0,0.25,0.5,0.75,1]
@@ -534,24 +566,23 @@ class SolverHistory(MDP_SolverHistory):
             compare_with_list = [compare_with] # Single item
         else:
             compare_with_list = compare_with # Already group of items
-        solver_list = [self] + compare_with_list
+        solver_histories = [self] + compare_with_list
         
-        assert len(solver_list) <= len(line_types), f"Plotting can only happen for up to {len(line_types)} solvers..."
-        line_types = line_types[:len(solver_list)]
+        assert len(solver_histories) <= len(line_types), f"Plotting can only happen for up to {len(line_types)} solvers..."
+        line_types = line_types[:len(solver_histories)]
 
-        assert len(graph_names) in [0, len(solver_list)], "Not enough graph names provided"
+        assert len(graph_names) in [0, len(solver_histories)], "Not enough graph names provided"
         if len(graph_names) == 0:
             graph_names.append('Main graph')
-            for i in range(1,len(solver_list)):
+            for i in range(1,len(solver_histories)):
                 graph_names.append(f'Comparison {i}')
 
-        def plot_on_ax(solver, frame_i:int, ax, line_type:str):
-            if isinstance(solver, ValueFunction):
-                value_function = solver
+        def plot_on_ax(history:Union[ValueFunction,Self], frame_i:int, ax, line_type:str):
+            if isinstance(history, ValueFunction):
+                value_function = history
             else:
-                frame_i = frame_i if frame_i < len(solver) else (len(solver) - 1)
-                history_i = solver[frame_i]
-                value_function = history_i['value_function']
+                frame_i = frame_i if frame_i < len(history) else (len(history) - 1)
+                value_function = history.value_functions[frame_i]
 
             alpha_vects = np.array(value_function)
             m = np.subtract(alpha_vects[:,1], alpha_vects[:,0])
@@ -580,24 +611,22 @@ class SolverHistory(MDP_SolverHistory):
 
             # Line legend
             lines = []
-            point = self[self_frame_i]['value_function'][0][0]
+            point = self.value_functions[self_frame_i][0][0]
             for l in line_types:
                 lines.append(Line2D([0,point],[0,point],linestyle=l))
             ax1.legend(lines, graph_names, loc='lower center')
 
             # Alpha vector plotting
-            for solver, line_type in zip(solver_list, line_types):
-                plot_on_ax(solver, frame_i, ax1, line_type)
+            for history, line_type in zip(solver_histories, line_types):
+                plot_on_ax(history, frame_i, ax1, line_type)
 
             # Belief plotting
-            history_i = self[self_frame_i]
-
-            beliefs_x = np.array(history_i['beliefs'])[:,1]
+            beliefs_x = np.array(self.belief_sets[frame_i])[:,1]
             ax2.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
             ax2.get_yaxis().set_visible(False)
             ax2.axhline(0, color='black')
 
-        max_steps = max([len(solver) for solver in solver_list if not isinstance(solver,ValueFunction)])
+        max_steps = max([len(history) for history in solver_histories if not isinstance(history,ValueFunction)])
         ani = animation.FuncAnimation(fig, plt_frame, frames=max_steps, interval=500, repeat=False)
         
         # File Title
@@ -605,8 +634,8 @@ class SolverHistory(MDP_SolverHistory):
 
         video_title = f'{custom_name}-' if custom_name is not None else '' # Base
         video_title += f's{self.model.state_count}-a{self.model.action_count}-' # Model params
-        video_title += f'{self.params["expand_function"]}-' # Expand function used
-        video_title += f'g{self.params["gamma"]}-e{self.params["eps"]}-' # Solving params
+        video_title += f'{self.expand_function}-' # Expand function used
+        video_title += f'g{self.gamma}-e{self.eps}-' # Solving params
         video_title += f'{solved_time}.mp4'
 
         # Video saving
@@ -696,7 +725,7 @@ class PBVI_Solver(Solver):
         '''
         
         # Step 1
-        gamma_a_o_t = 0.99 * np.dot(model.transitional_observation_table, np.array(value_function).T).transpose((1,2,3,0))
+        gamma_a_o_t = self.gamma * np.dot(model.transitional_observation_table, np.array(value_function).T).transpose((1,2,3,0))
 
         # gamma_a_o_t = []
         # for a in model.actions:
@@ -954,13 +983,11 @@ class PBVI_Solver(Solver):
 
         # History tracking
         solver_history = SolverHistory(model=model,
+                                       initial_value_function=value_function,
+                                       initial_belief_set=belief_set,
                                        expand_function=self.expand_function,
                                        gamma=self.gamma,
                                        eps=self.eps)
-        solver_history.append({
-            'value_function': value_function,
-            'beliefs': belief_set
-        })
 
         # Loop
         for expansion_i in range(expansions) if not print_progress else trange(expansions, desc='Expansions'):
@@ -976,10 +1003,8 @@ class PBVI_Solver(Solver):
             for _ in range(horizon) if not print_progress else trange(horizon, desc=f'Backups {expansion_i}'):
                 value_function = self.backup(model, belief_set, value_function)
 
-                solver_history.append({
-                    'value_function': value_function,
-                    'beliefs': belief_set
-                })
+                # History tracking
+                solver_history.add(value_function, belief_set)
 
                 # convergence check
                 max_val_per_belief = np.max(np.matmul(np.array(belief_set), np.array(value_function).T), axis=1)
