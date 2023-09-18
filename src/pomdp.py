@@ -2,7 +2,7 @@ from matplotlib import animation, cm, colors, ticker
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
-from tqdm import tqdm, trange
+from tqdm.auto import trange
 from typing import Self, Tuple, Union
 
 import copy
@@ -117,16 +117,11 @@ class Model(MDP_Model):
             assert self.immediate_reward_table.shape == (self.state_count, self.action_count, self.state_count, self.observation_count), "rewards table doesnt have the right shape, it should be SxAxSxO"
 
         # Expected rewards
-        self.expected_rewards_table = np.zeros((self.state_count, self.action_count))
-        for s in self.states:
-            for a in self.actions:
-                sum = 0
-                for s_p in self.states:
-                    inner_sum = 0
-                    for o in self.observations:
-                        inner_sum += (self.observation_table[s_p,a,o] * self.immediate_reward_table[s,a,s_p,o])
-                    sum += (self.transition_table[s,a,s_p] * inner_sum)
-                self.expected_rewards_table[s,a] = sum
+        temp = np.einsum('sano,nao->san', self.immediate_reward_table, self.observation_table)
+        self.expected_rewards_table = np.einsum('san,san->sa', temp, self.transition_table)
+
+        # Transitional Observation probabilities
+        self.transitional_observation_table = np.einsum('san,nao->saon', self.transition_table, self.observation_table)        
 
 
     def reward(self, s:int, a:int, s_p:int, o:int) -> Union[int,float]:
@@ -262,16 +257,18 @@ class Belief(np.ndarray):
                         new_belief (Belief): An updated belief
 
         '''
-        new_state_probabilities = np.zeros((self.model.state_count))
+        new_state_probabilities = np.einsum('n,sn,s->n', self.model.observation_table[:,a,o], self.model.transition_table[:,a,:], self)
+        # new_state_probabilities = np.zeros((self.model.state_count))
         
-        for s_p in self.model.states:
-            new_state_probabilities[s_p] = sum([(self.model.observation_table[s_p, a, o] * self.model.transition_table[s, a, s_p] * self[s]) 
-                              for s in self.model.states])
+        # for s_p in self.model.states:
+        #     new_state_probabilities[s_p] = sum([(self.model.observation_table[s_p, a, o] * self.model.transition_table[s, a, s_p] * self[s]) 
+        #                       for s in self.model.states])
 
         # Formal definition of the normalizer as in paper
         # normalizer = 0
         # for s in STATES:
         #     normalizer += b_prev[s] * sum([(transition_function(s, a, o) * observation_function(a, s_p, o)) for s_p in STATES])
+        
         new_state_probabilities /= np.sum(new_state_probabilities)
         new_belief = Belief(self.model, new_state_probabilities)
         return new_belief
@@ -678,7 +675,6 @@ class PBVI_Solver(Solver):
         self.expand_function_params = expand_function_params
 
 
-
     def backup(self, model:Model, belief_set:list[Belief], value_function:ValueFunction) -> ValueFunction:
         '''
         This function has purpose to update the set of alpha vectors. It does so in 3 steps:
@@ -700,25 +696,16 @@ class PBVI_Solver(Solver):
         '''
         
         # Step 1
-        gamma_a_o_t = {}
-        for a in model.actions:
-            for o in model.observations:
-                alpa_a_o_set = []
-                
-                for alpha_i in value_function:
-                    alpa_a_o_vect = []
-                    
-                    for s in model.states:
-                        products = [(model.transition_table[s,a,s_p] * model.observation_table[s_p,a,o] * alpha_i[s_p])
-                                    for s_p in model.states]
-                        alpa_a_o_vect.append(self.gamma * sum(products))
-                        
-                    alpa_a_o_set.append(alpa_a_o_vect)
-                    
-                if a not in gamma_a_o_t:
-                    gamma_a_o_t[a] = {o: alpa_a_o_set}
-                else:
-                    gamma_a_o_t[a][o] = alpa_a_o_set
+        gamma_a_o_t = 0.99 * np.dot(model.transitional_observation_table, np.array(value_function).T).transpose((1,2,3,0))
+
+        # gamma_a_o_t = []
+        # for a in model.actions:
+        #     gamma_a = []
+        #     for o in model.observations:
+        #         alpha_a_o_set = self.gamma * np.einsum('sn,n,vn->vs', model.transition_table[:,a,:], model.observation_table[:,a,o], np.array(value_function))
+
+        #         gamma_a.append(alpha_a_o_set)
+        #     gamma_a_o_t.append(gamma_a)
 
         # Step 2
         new_value_function = ValueFunction(model)
@@ -987,8 +974,7 @@ class PBVI_Solver(Solver):
 
             # 2: Backup, update value function (alpha vector set)
             for _ in range(horizon) if not print_progress else trange(horizon, desc=f'Backups {expansion_i}'):
-                old_value_function = copy.deepcopy(value_function)
-                value_function = self.backup(model, belief_set, old_value_function)
+                value_function = self.backup(model, belief_set, value_function)
 
                 solver_history.append({
                     'value_function': value_function,

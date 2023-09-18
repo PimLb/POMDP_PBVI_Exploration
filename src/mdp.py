@@ -1,7 +1,7 @@
 from matplotlib import animation, colors, patches
 from matplotlib import pyplot as plt
 from scipy.optimize import milp, LinearConstraint
-from tqdm import trange
+from tqdm.auto import trange
 from typing import Self, Union, Tuple
 
 import copy
@@ -107,6 +107,14 @@ class Model:
             self.transition_table = np.array(transition_table)
             assert self.transition_table.shape == (self.state_count, self.action_count, self.state_count), "transitions table doesnt have the right shape, it should be SxAxS"
 
+        # Reachable states based on transitions
+        self.reachable_states = []
+        for s in self.states:
+            reachable_states_for_action = []
+            for a in self.actions:
+                reachable_states_for_action.append(np.argwhere(self.transition_table[s,a,:] > 0))
+            self.reachable_states.append(reachable_states_for_action)
+
         # Rewards
         if immediate_reward_table is None:
             # If no reward matrix given, generate random one
@@ -116,10 +124,7 @@ class Model:
             assert self.immediate_reward_table.shape == (self.state_count, self.action_count, self.state_count), "rewards table doesnt have the right shape, it should be SxAxS"
 
         # Expected rewards
-        self.expected_rewards_table = np.zeros((self.state_count, self.action_count))
-        for s in self.states:
-            for a in self.actions:
-                self.expected_rewards_table[s,a] = np.dot(self.transition_table[s,a,:], self.immediate_reward_table[s,a,:])
+        self.expected_rewards_table = np.einsum('san,san->sa', self.transition_table, self.immediate_reward_table)
 
         # Rewards are probabilistic
         self.probabilistic_rewards = probabilistic_rewards
@@ -312,6 +317,15 @@ class ValueFunction(list[AlphaVector]):
 
     ...
 
+    Attributes
+    ----------
+    model: (mdp.Model)
+        The model the value function is associated with.
+    alpha_vectors: (list[AlphaVector] | np.ndarray) (Optional)
+        The alpha vectors composing the value function, if none are provided, it will be empty to start with and AlphaVectors can be appended.
+    action_list: (list[int])
+        The actions associated with alpha vectors in the case the alpha vectors are provided as an numpy array.
+
     Methods
     -------
     prune(level:int=1):
@@ -319,10 +333,22 @@ class ValueFunction(list[AlphaVector]):
     plot(size:int=5, state_list:list[str], action_list:list[str], belief_set):
         Function to plot the value function for 2- or 3-state models.
     '''
-    def __init__(self, model:Model, alpha_vectors:list[AlphaVector]=[]):
+    def __init__(self, model:Model, alpha_vectors:Union[list[AlphaVector], np.ndarray]=[], action_list:list[int]=[]):
         self.model = model
-        for vector in alpha_vectors:
-            self.append(vector)
+
+        # As numpy array
+        if isinstance(alpha_vectors, np.ndarray):
+            av_shape = alpha_vectors.shape
+            exp_shape = (model.state_count, len(action_list))
+            assert av_shape == exp_shape, f"Alpha vector set does not have the right shape (received: {av_shape}; expected: {exp_shape})"
+
+            for i, a in enumerate(action_list):
+                self.append(AlphaVector(alpha_vectors[:,i], a))
+
+        # List of alpha vectors
+        else:
+            for vector in alpha_vectors:
+                self.append(vector)
 
 
     def prune(self, level:int=1) -> Self:
@@ -768,18 +794,23 @@ class VI_Solver(Solver):
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
 
         for _ in trange(self.horizon) if print_progress else range(self.horizon):
-            old_V_opt = copy.deepcopy(V_opt)
+            old_V_opt = V_opt
+            # old_V_opt = copy.deepcopy(V_opt)
 
-            V = ValueFunction(model)
-            for a in model.actions:
-                alpha_vect = []
-                for s in model.states:
-                    summer = sum(model.transition_table[s, a, s_p] * old_V_opt[s_p] for s_p in model.states)
-                    alpha_vect.append(model.expected_rewards_table[s,a] + (self.gamma * summer))
+            # V = ValueFunction(model)
+            # for a in model.actions:
+            #     alpha_vect = []
+            #     for s in model.states:
+            #         summer = sum(model.transition_table[s, a, s_p] * old_V_opt[s_p] for s_p in model.states)
+            #         alpha_vect.append(model.expected_rewards_table[s,a] + (self.gamma * summer))
 
-                V.append(AlphaVector(alpha_vect, a))
+            #     V.append(AlphaVector(alpha_vect, a))
 
-            V_opt = np.max(np.array(V), axis=1)
+            # alpha_vectors = model.expected_rewards_table + (self.gamma * np.einsum('san,n->sa', model.transition_table, old_V_opt))
+            alpha_vectors = model.expected_rewards_table + (self.gamma * np.dot(model.transition_table, old_V_opt))
+            V = ValueFunction(model, alpha_vectors, model.actions)
+
+            V_opt = np.max(np.array(V), axis=0)
 
             solve_history.append({'value_function': V})
                 
