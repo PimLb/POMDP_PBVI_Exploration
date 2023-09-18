@@ -121,7 +121,7 @@ class Model(MDP_Model):
         self.expected_rewards_table = np.einsum('san,san->sa', temp, self.transition_table)
 
         # Transitional Observation probabilities
-        self.transitional_observation_table = np.einsum('san,nao->saon', self.transition_table, self.observation_table)        
+        self.transitional_observation_table = np.einsum('san,nao->saon', self.transition_table, self.observation_table)
 
 
     def reward(self, s:int, a:int, s_p:int, o:int) -> Union[int,float]:
@@ -519,7 +519,8 @@ class SolverHistory(MDP_SolverHistory):
     def save_history_video(self,
                            custom_name:Union[str,None]=None,
                            compare_with:Union[list, ValueFunction, MDP_SolverHistory]=[],
-                           graph_names:list[str]=[]
+                           graph_names:list[str]=[],
+                           fps:int=10
                            ) -> None:
         '''
         Function to generate a video of the training history. Another solved solver or list of solvers can be put in the 'compare_with' parameter.
@@ -533,15 +534,16 @@ class SolverHistory(MDP_SolverHistory):
                         custom_name (str): Optional, the name the video will be saved with.
                         compare_with (PBVI, ValueFunction, list): Optional, value functions or other solvers to plot against the current solver's history
                         graph_names (list[str]): Optional, names of the graphs for the legend of which graph is being plot.
+                        fps (int): How many frames per second should the saved video have. (Default: 10)
         '''
         assert self.model.state_count in [2,3], "Can't plot for models with state count other than 2 or 3"
         if self.model.state_count == 2:
-            self._save_history_video_2D(custom_name, compare_with, copy.copy(graph_names))
+            self._save_history_video_2D(custom_name, compare_with, copy.copy(graph_names), fps)
         elif self.model.state_count == 3:
             print('Not implemented...')
 
 
-    def _save_history_video_2D(self, custom_name=None, compare_with=[], graph_names=[]):
+    def _save_history_video_2D(self, custom_name=None, compare_with=[], graph_names=[], fps=10):
         # Figure definition
         grid_spec = {'height_ratios': [19,1]}
         fig, (ax1,ax2) = plt.subplots(2, 1, sharex=True, gridspec_kw=grid_spec)
@@ -627,7 +629,7 @@ class SolverHistory(MDP_SolverHistory):
             ax2.axhline(0, color='black')
 
         max_steps = max([len(history) for history in solver_histories if not isinstance(history,ValueFunction)])
-        ani = animation.FuncAnimation(fig, plt_frame, frames=max_steps, interval=500, repeat=False)
+        ani = animation.FuncAnimation(fig, plt_frame, frames=max_steps, repeat=False)
         
         # File Title
         solved_time = self.run_ts.strftime('%Y%m%d_%H%M%S')
@@ -643,7 +645,7 @@ class SolverHistory(MDP_SolverHistory):
             print('Folder does not exist yet, creating it...')
             os.makedirs('./Results')
 
-        writervideo = animation.FFMpegWriter(fps=10)
+        writervideo = animation.FFMpegWriter(fps=fps)
         ani.save('./Results/' + video_title, writer=writervideo)
         print(f'Video saved at \'Results/{video_title}\'...')
         plt.close()
@@ -979,6 +981,7 @@ class PBVI_Solver(Solver):
         else:
             value_function = initial_value_function
 
+        # Convergence check boundary
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
 
         # History tracking

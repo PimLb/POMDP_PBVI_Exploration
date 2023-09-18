@@ -813,7 +813,7 @@ class VI_Solver(Solver):
             V = copy.deepcopy(initial_value_function)
         V_opt = V[0]
 
-        solve_history = SolverHistory(model, V)
+        solve_history = SolverHistory(model, V, self.gamma, self.eps)
 
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
 
