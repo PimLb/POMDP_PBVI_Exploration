@@ -123,6 +123,14 @@ class Model(MDP_Model):
         # Transitional Observation probabilities
         self.transitional_observation_table = np.einsum('san,nao->saon', self.transition_table, self.observation_table)
 
+        # Reachable transitional observation probabilities
+        self.reachable_transitional_observation_table = np.zeros((self.state_count, self.action_count, self.observation_count, self.max_reachable_states))
+        for s in self.states:
+            for a in self.actions:
+                for o in self.observations:
+                    for ri, r in enumerate(self.reachable_states[s,a]):
+                        self.reachable_transitional_observation_table[s,a,o,ri] = self.transitional_observation_table[s,a,o,r]
+
 
     def reward(self, s:int, a:int, s_p:int, o:int) -> Union[int,float]:
         '''
@@ -727,6 +735,7 @@ class PBVI_Solver(Solver):
         '''
         
         # Step 1
+        # gamma_a_o_t = self.gamma * np.einsum('saor,vsar->aovs', model.reachable_transitional_observation_table, np.array(value_function).take(model.reachable_states, axis=1))
         gamma_a_o_t = self.gamma * np.dot(model.transitional_observation_table, np.array(value_function).T).transpose((1,2,3,0))
 
         # gamma_a_o_t = []

@@ -107,14 +107,6 @@ class Model:
             self.transition_table = np.array(transition_table)
             assert self.transition_table.shape == (self.state_count, self.action_count, self.state_count), "transitions table doesnt have the right shape, it should be SxAxS"
 
-        # Reachable states based on transitions
-        self.reachable_states = []
-        for s in self.states:
-            reachable_states_for_action = []
-            for a in self.actions:
-                reachable_states_for_action.append(np.argwhere(self.transition_table[s,a,:] > 0))
-            self.reachable_states.append(reachable_states_for_action)
-
         # Rewards
         if immediate_reward_table is None:
             # If no reward matrix given, generate random one
@@ -145,6 +137,33 @@ class Model:
         # End state conditions
         self.end_states = end_states
         self.end_actions = end_actions
+
+        
+        # Compute Reachable states based on transitions
+        self.reachable_states = []
+        self.max_reachable_states = 0
+        for s in self.states:
+            reachable_states_for_action = []
+            for a in self.actions:
+                reachable_list = np.argwhere(self.transition_table[s,a,:] > 0)[:,0].tolist()
+                reachable_states_for_action.append(reachable_list)
+                
+                if len(reachable_list) > self.max_reachable_states:
+                    self.max_reachable_states = len(reachable_list)
+
+            self.reachable_states.append(reachable_states_for_action)
+
+        # In case some state-action pairs lead to more states than other, we fill with the 1st non states not used
+        for s in self.states:
+            for a in self.actions:
+                to_add = 0
+                while len(self.reachable_states[s][a]) < self.max_reachable_states:
+                    if to_add not in self.reachable_states[s][a]:
+                        self.reachable_states[s][a].append(to_add)
+                    to_add += 1
+
+        # Converting to ndarray
+        self.reachable_states = np.array(self.reachable_states)
 
     
     def transition(self, s:int, a:int) -> int:
