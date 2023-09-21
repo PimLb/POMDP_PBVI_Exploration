@@ -1,3 +1,4 @@
+from datetime import datetime
 from matplotlib import animation, cm, colors, ticker
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
@@ -6,13 +7,13 @@ from tqdm.auto import trange
 from typing import Self, Tuple, Union
 
 import copy
-import datetime
 import json
 import numpy as np
 import math
 import os
 import random
 
+from src.mdp import log
 from src.mdp import AlphaVector, ValueFunction
 from src.mdp import Model as MDP_Model
 from src.mdp import RewardSet
@@ -44,13 +45,16 @@ class Model(MDP_Model):
         A list of action labels or an amount of actions to be used.
     observations:
         A list of observation labels or an amount of observations to be used
-    transition_table:
-        The transition matrix, has to be |S| x |A| x |S|. If none is provided, it will be randomly generated.
+    transitions:
+        The transitions between states, an array can be provided and has to be |S| x |A| x |S| or a function can be provided. If none is provided, it will be randomly generated.
+    reachable_states:
+        A list of states that can be reached from each state and actions. It must be a matrix of size |S| x |A| x |R| where |R| is the max amount of states reachable from any given state and action pair.
+        It is optional but useful for speedup purposes.
     immediate_rewards:
         The reward matrix, has to be |S| x |A| x |S| x |O|. If none is provided, it will be randomly generated.
     observation_table:
         The observation matrix, has to be |S| x |A| x |O|. If none is provided, it will be randomly generated.
-    probabilistic_rewards: bool
+    rewards_are_probabilistic: bool
         Whether the rewards provided are probabilistic or pure rewards. If probabilist 0 or 1 will be the reward with a certain probability.
     grid_states: list[list[Union[str,None]]]
         Optional, if provided, the model will be converted to a grid model. Allows for 'None' states if there is a gaps in the grid.
@@ -72,10 +76,11 @@ class Model(MDP_Model):
                  states:Union[int, list[str], list[list[str]]],
                  actions:Union[int, list],
                  observations:Union[int, list],
-                 transition_table=None,
+                 transitions=None,
+                 reachable_states=None,
                  immediate_reward_table=None,
                  observation_table=None,
-                 probabilistic_rewards:bool=False,
+                 rewards_are_probabilistic:bool=False,
                  grid_states:Union[None,list[list[Union[str,None]]]]=None,
                  start_probabilities:Union[list,None]=None,
                  end_states:list[int]=[],
@@ -84,14 +89,18 @@ class Model(MDP_Model):
         
         super().__init__(states=states,
                          actions=actions,
-                         transition_table=transition_table,
-                         immediate_reward_table=None, # Defined here lower since immediate reward table has different shape for MDP is different than for POMDP
-                         probabilistic_rewards=probabilistic_rewards,
+                         transitions=transitions,
+                         reachable_states=reachable_states,
+                         immediate_reward_table=-1, # Defined here lower since immediate reward table has different shape for MDP is different than for POMDP
+                         rewards_are_probabilistic=rewards_are_probabilistic,
                          grid_states=grid_states,
                          start_probabilities=start_probabilities,
                          end_states=end_states,
                          end_actions=end_actions)
 
+        log('- POMDP particular parameters:')
+
+        # ------------------------- Observations -------------------------
         if isinstance(observations, int):
             self.observation_labels = [f'o_{i}' for i in range(observations)]
         else:
@@ -106,9 +115,16 @@ class Model(MDP_Model):
             self.observation_table = random_probs / np.sum(random_probs, axis=2, keepdims=True)
         else:
             self.observation_table = np.array(observation_table)
-            assert self.observation_table.shape == (self.state_count, self.action_count, self.observation_count), "observations table doesnt have the right shape, it should be SxAxO"
+            o_shape = self.observation_table.shape
+            exp_shape = (self.state_count, self.action_count, self.observation_count)
+            assert o_shape == exp_shape, f"Observations table doesnt have the right shape, it should be SxAxO (expected: {exp_shape}, received: {o_shape})."
 
-        # Rewards
+        log(f'- {self.observation_count} observations')
+
+        # ------------------------- Rewards -------------------------
+        log('- Starting generation of expected rewards table')
+        start_ts = datetime.now()
+
         if immediate_reward_table is None:
             # If no reward matrix given, generate random one
             self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count, self.observation_count)
@@ -117,19 +133,28 @@ class Model(MDP_Model):
             assert self.immediate_reward_table.shape == (self.state_count, self.action_count, self.state_count, self.observation_count), "rewards table doesnt have the right shape, it should be SxAxSxO"
 
         # Expected rewards
-        temp = np.einsum('sano,nao->san', self.immediate_reward_table, self.observation_table)
-        self.expected_rewards_table = np.einsum('san,san->sa', temp, self.transition_table)
+        temp = np.zeros((self.state_count, self.action_count, self.max_reachable_states))
+        it = np.nditer(self.reachable_states, flags=['multi_index'], op_flags=['readonly'])
+        for r in it:
+            (s,a,ri) = it.multi_index
+            temp[s,a,ri] = np.dot(self.immediate_reward_table[s,a,r,:], self.observation_table[r,a,:]) * self.reachable_probabilities[s,a,ri]
+        self.expected_rewards_table = np.sum(temp, axis=2)
 
-        # Transitional Observation probabilities
-        self.transitional_observation_table = np.einsum('san,nao->saon', self.transition_table, self.observation_table)
+        duration = (datetime.now() - start_ts).total_seconds()
+        log(f'    > Done in {duration:.3f}s')
 
-        # Reachable transitional observation probabilities
+        # ------------------------- Reachable transitional observation probabilities -------------------------
+        log('- Starting of transitional observations for reachable states table')
+        start_ts = datetime.now()
+
         self.reachable_transitional_observation_table = np.zeros((self.state_count, self.action_count, self.observation_count, self.max_reachable_states))
-        for s in self.states:
-            for a in self.actions:
-                for o in self.observations:
-                    for ri, r in enumerate(self.reachable_states[s,a]):
-                        self.reachable_transitional_observation_table[s,a,o,ri] = self.transitional_observation_table[s,a,o,r]
+        it = np.nditer(self.reachable_transitional_observation_table, flags=['multi_index'], op_flags=['writeonly'])
+        for x in it:
+            (s,a,o,ri) = it.multi_index
+            x[...] = self.reachable_probabilities[s,a,ri] * self.observation_table[self.reachable_states[s,a,ri],a,o]
+        
+        duration = (datetime.now() - start_ts).total_seconds()
+        log(f'    > Done in {duration:.3f}s')
 
 
     def reward(self, s:int, a:int, s_p:int, o:int) -> Union[int,float]:
@@ -265,12 +290,7 @@ class Belief(np.ndarray):
                         new_belief (Belief): An updated belief
 
         '''
-        new_state_probabilities = np.einsum('n,sn,s->n', self.model.observation_table[:,a,o], self.model.transition_table[:,a,:], self)
-        # new_state_probabilities = np.zeros((self.model.state_count))
-        
-        # for s_p in self.model.states:
-        #     new_state_probabilities[s_p] = sum([(self.model.observation_table[s_p, a, o] * self.model.transition_table[s, a, s_p] * self[s]) 
-        #                       for s in self.model.states])
+        new_state_probabilities = self.model.reachable_transitional_observation_table[:,a,o,:] * self.take(self.model.reachable_states[:,a,:])
 
         # Formal definition of the normalizer as in paper
         # normalizer = 0
@@ -735,17 +755,7 @@ class PBVI_Solver(Solver):
         '''
         
         # Step 1
-        # gamma_a_o_t = self.gamma * np.einsum('saor,vsar->aovs', model.reachable_transitional_observation_table, np.array(value_function).take(model.reachable_states, axis=1))
-        gamma_a_o_t = self.gamma * np.dot(model.transitional_observation_table, np.array(value_function).T).transpose((1,2,3,0))
-
-        # gamma_a_o_t = []
-        # for a in model.actions:
-        #     gamma_a = []
-        #     for o in model.observations:
-        #         alpha_a_o_set = self.gamma * np.einsum('sn,n,vn->vs', model.transition_table[:,a,:], model.observation_table[:,a,o], np.array(value_function))
-
-        #         gamma_a.append(alpha_a_o_set)
-        #     gamma_a_o_t.append(gamma_a)
+        gamma_a_o_t = self.gamma * np.einsum('saor,vsar->aovs', model.reachable_transitional_observation_table, np.array(value_function).take(model.reachable_states, axis=1))
 
         # Step 2
         new_value_function = ValueFunction(model)
@@ -1247,7 +1257,7 @@ class Agent:
 
         history = SimulationHistory(self.model, start_state=s, start_belief=belief)
 
-        sim_start_ts = datetime.datetime.now()
+        sim_start_ts = datetime.now()
 
         # Simulation loop
         for _ in (trange(max_steps) if print_progress else range(max_steps)):
@@ -1269,7 +1279,7 @@ class Agent:
                 break
             
         if print_stats:
-            sim_end_ts = datetime.datetime.now()
+            sim_end_ts = datetime.now()
             print('Simulation done:')
             print(f'\t- Runtime (s): {(sim_end_ts - sim_start_ts).total_seconds()}')
             print(f'\t- Steps: {len(history.states)}')
@@ -1309,7 +1319,7 @@ class Agent:
         if simulator is None:
             simulator = Simulation(self.model)
 
-        sim_start_ts = datetime.datetime.now()
+        sim_start_ts = datetime.now()
 
         all_final_rewards = RewardSet()
         all_sim_length = []
@@ -1319,7 +1329,7 @@ class Agent:
             all_sim_length.append(len(history.states))
 
         if print_stats:
-            sim_end_ts = datetime.datetime.now()
+            sim_end_ts = datetime.now()
             print(f'All {n} simulations done:')
             print(f'\t- Average runtime (s): {((sim_end_ts - sim_start_ts).total_seconds() / n)}')
             print(f'\t- Average step count: {(sum(all_sim_length) / n)}')

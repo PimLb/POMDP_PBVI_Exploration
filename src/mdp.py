@@ -1,3 +1,4 @@
+from datetime import datetime
 from matplotlib import animation, colors, patches
 from matplotlib import pyplot as plt
 from scipy.optimize import milp, LinearConstraint
@@ -5,7 +6,6 @@ from tqdm.auto import trange
 from typing import Self, Union, Tuple
 
 import copy
-import datetime
 import json
 import numpy as np
 import os
@@ -21,6 +21,13 @@ COLOR_LIST = [{
     } for item, value in colors.TABLEAU_COLORS.items()] # type: ignore
 
 
+def log(content:str) -> None:
+    '''
+    Function to print a log line with a timestamp 
+    '''
+    print(f'[{datetime.now().strftime("%m/%d/%Y, %H:%M:%S")}] ' + content)
+
+
 class Model:
     '''
     MDP Model class.
@@ -33,11 +40,14 @@ class Model:
         A list of state labels or an amount of states to be used. Also allows to provide a matrix of states to define a grid model.
     actions: int|list
         A list of action labels or an amount of actions to be used.
-    transitions_table:
-        The transition matrix, has to be |S| x |A| x |S|. If none is provided, it will be randomly generated.
+    transitions:
+        The transitions between states, an array can be provided and has to be |S| x |A| x |S| or a function can be provided. If none is provided, it will be randomly generated.
+    reachable_states:
+        A list of states that can be reached from each state and actions. It must be a matrix of size |S| x |A| x |R| where |R| is the max amount of states reachable from any given state and action pair.
+        It is optional but useful for speedup purposes.
     immediate_reward_table:
         The reward matrix, has to be |S| x |A| x |S|. If provided, it will be use in combination with the transition matrix to fill to expected rewards.
-    probabilistic_rewards: bool
+    rewards_are_probabilistic: bool
         Whether the rewards provided are probabilistic or pure rewards. If probabilist 0 or 1 will be the reward with a certain probability.
     grid_states: list[list]]
         Optional, if provided, the model will be converted to a grid model. Allows for 'None' states if there is a gaps in the grid.
@@ -56,16 +66,19 @@ class Model:
     def __init__(self,
                  states:Union[int, list[str], list[list[str]]],
                  actions:Union[int, list],
-                 transition_table=None,
+                 transitions=None,
+                 reachable_states=None,
                  immediate_reward_table=None,
-                 probabilistic_rewards:bool=False,
+                 rewards_are_probabilistic:bool=False,
                  grid_states:Union[None,list[list[Union[str,None]]]]=None,
                  start_probabilities:Union[list,None]=None,
                  end_states:list[int]=[],
                  end_actions:list[int]=[]
                  ):
         
-        # States
+        log('Instantiation of MDP Model:')
+        
+        # ------------------------- States -------------------------
         if isinstance(states, int): # State count
             self.state_labels = [f's_{i}' for i in range(states)]
             self.grid_states = [self.state_labels]
@@ -89,7 +102,9 @@ class Model:
         self.state_count = len(self.state_labels)
         self.states = [state for state in range(self.state_count)]
 
-        # Actions
+        log(f'- {self.state_count} states')
+
+        # ------------------------- Actions -------------------------
         if isinstance(actions, int):
             self.action_labels = [f'a_{i}' for i in range(actions)]
         else:
@@ -97,29 +112,67 @@ class Model:
         self.action_count = len(self.action_labels)
         self.actions = [action for action in range(self.action_count)]
 
-        # Transitions
-        if transition_table is None:
-            # If no transitiong matrix given, generate random one
-            random_probs = np.random.rand(self.state_count, self.action_count, self.state_count)
-            # Normalization to have s_p probabilies summing to 1
-            self.transition_table = random_probs / np.sum(random_probs, axis=2, keepdims=True)
-        else:
-            self.transition_table = np.array(transition_table)
-            assert self.transition_table.shape == (self.state_count, self.action_count, self.state_count), "transitions table doesnt have the right shape, it should be SxAxS"
+        log(f'- {self.action_count} actions')
 
-        # Rewards
-        if immediate_reward_table is None:
-            # If no reward matrix given, generate random one
-            self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count)
-        else:
-            self.immediate_reward_table = np.array(immediate_reward_table)
-            assert self.immediate_reward_table.shape == (self.state_count, self.action_count, self.state_count), "rewards table doesnt have the right shape, it should be SxAxS"
+        # ------------------------- Reachable states provided -------------------------
+        self.reachable_states = None
+        if reachable_states is not None:
+            self.reachable_states = np.array(reachable_states)
+            assert self.reachable_states.shape[:2] == (self.state_count, self.action_count), f"Reachable states provided is not of the expected shape (received {self.reachable_states.shape}, expected ({self.state_count}, {self.action_count}, :))"
+            self.max_reachable_states = self.reachable_states.shape[2]
 
-        # Expected rewards
-        self.expected_rewards_table = np.einsum('san,san->sa', self.transition_table, self.immediate_reward_table)
+            log(f'- At most {self.max_reachable_states} reachable states per state-action pair')
 
-        # Rewards are probabilistic
-        self.probabilistic_rewards = probabilistic_rewards
+        # ------------------------- Transitions -------------------------
+        log('- Starting generation of transitions table')
+        start_ts = datetime.now()
+
+        self.transition_table = None
+        self.transition_function = None
+        if transitions is None:
+            if reachable_states is None:
+                # If no transitiong matrix and no reachable states given, generate random one
+                print('[Warning] No transition matrix and no reachable states have provided so a random transition matrix is generated...')
+                random_probs = np.random.rand(self.state_count, self.action_count, self.state_count)
+
+                # Normalization to have s_p probabilies summing to 1
+                self.transition_table = random_probs / np.sum(random_probs, axis=2, keepdims=True)
+            else:
+                # Make uniform transition probabilities over reachable states
+                print(f'[Warning] No transition matrix or function provided but reachable states are, so probability to reach any reachable states will "1 / reachable state count" so here: {1/self.max_reachable_states:.3f}.')
+
+        elif callable(transitions): # Transition function
+            self.transition_function = transitions
+            # Attempt to create transition table in memory
+            t_arr = None
+            try:
+                t_arr = np.zeros((self.state_count, self.action_count, self.state_count))
+            except MemoryError:
+                print('[Warning] Not enough memory to store transition table, using transition function provided...')
+            else:
+                if reachable_states is None:
+                    it = np.nditer(t_arr, flags=['multi_index'], op_flags=['writeonly'])
+                    for x in it:
+                        x[...] = transitions(*it.multi_index)
+                else:
+                    it = np.nditer(reachable_states, flags=['multi_index'], op_flags=['readonly'])
+                    for r in it:
+                        t_arr[it.multi_index[0], it.multi_index[1], r] = transitions(it.multi_index[0], it.multi_index[1], r)
+                self.transition_table = t_arr
+
+        else: # Array like
+            self.transition_table = np.array(transitions)
+            t_shape = self.transition_table.shape
+            exp_shape = (self.state_count, self.action_count, self.state_count)
+            assert t_shape == exp_shape, f"Transitions table provided doesnt have the right shape, it should be SxAxS (expected {exp_shape}, received {t_shape})"
+
+        duration = (datetime.now() - start_ts).total_seconds()
+        log(f'    > Done in {duration:.3f}s')
+        if duration > 1:
+            log(f'    > /!\\ Transition table generation took long, if not done already, try to use the reachable_states parameter to speedup the process.')
+
+        # ------------------------- Rewards are probabilistic -------------------------
+        self.probabilistic_rewards = rewards_are_probabilistic
 
         # Convert to grid if grid_states is provided
         if grid_states is not None:
@@ -127,43 +180,99 @@ class Model:
 
         self.map_states_to_grid_points()
 
-        # Start state probabilities
+        # ------------------------- Start state probabilities -------------------------
+        log('- Generating start probabilities table')
         if start_probabilities is not None:
             assert len(start_probabilities) == self.state_count
             self.start_probabilities = np.array(start_probabilities,dtype=float)
         else:
             self.start_probabilities = np.ones(self.state_count) / self.state_count
 
-        # End state conditions
+        # ------------------------- End state conditions -------------------------
         self.end_states = end_states
         self.end_actions = end_actions
-
         
-        # Compute Reachable states based on transitions
-        self.reachable_states = []
-        self.max_reachable_states = 0
-        for s in self.states:
-            reachable_states_for_action = []
-            for a in self.actions:
-                reachable_list = np.argwhere(self.transition_table[s,a,:] > 0)[:,0].tolist()
-                reachable_states_for_action.append(reachable_list)
-                
-                if len(reachable_list) > self.max_reachable_states:
-                    self.max_reachable_states = len(reachable_list)
+        # ------------------------- Reachable states -------------------------
+        # If not set yet
+        if self.reachable_states is None:
+            log('- Starting computation of reachable states from transition data')
+            start_ts = datetime.now()
 
-            self.reachable_states.append(reachable_states_for_action)
+            self.reachable_states = []
+            self.max_reachable_states = 0
+            for s in self.states:
+                reachable_states_for_action = []
+                for a in self.actions:
+                    reachable_list = []
+                    if self.transition_table is not None:
+                        reachable_list = np.argwhere(self.transition_table[s,a,:] > 0)[:,0].tolist()
+                    else:
+                        for sn in self.states:
+                            if self.transition_function(s,a,sn) > 0:
+                                reachable_list.append(sn)
+                    reachable_states_for_action.append(reachable_list)
+                    
+                    if len(reachable_list) > self.max_reachable_states:
+                        self.max_reachable_states = len(reachable_list)
 
-        # In case some state-action pairs lead to more states than other, we fill with the 1st non states not used
-        for s in self.states:
-            for a in self.actions:
-                to_add = 0
-                while len(self.reachable_states[s][a]) < self.max_reachable_states:
-                    if to_add not in self.reachable_states[s][a]:
-                        self.reachable_states[s][a].append(to_add)
-                    to_add += 1
+                self.reachable_states.append(reachable_states_for_action)
 
-        # Converting to ndarray
-        self.reachable_states = np.array(self.reachable_states)
+            # In case some state-action pairs lead to more states than other, we fill with the 1st non states not used
+            for s in self.states:
+                for a in self.actions:
+                    to_add = 0
+                    while len(self.reachable_states[s][a]) < self.max_reachable_states:
+                        if to_add not in self.reachable_states[s][a]:
+                            self.reachable_states[s][a].append(to_add)
+                        to_add += 1
+
+            # Converting to ndarray
+            self.reachable_states = np.array(self.reachable_states, dtype=int)
+
+            duration = (datetime.now() - start_ts).total_seconds()
+            log(f'    > Done in {duration:.3f}s')
+            log(f'- At most {self.max_reachable_states} reachable states per state-action pair')
+
+
+        # ------------------------- Reachable state probabilities -------------------------
+        log('- Starting computation of reachable state probabilities from transition data')
+        start_ts = datetime.now()
+
+        if self.transition_function is None and self.transition_table is None:
+            self.reachable_probabilities = np.ones(self.reachable_states.shape) / self.max_reachable_states
+        else:
+            self.reachable_probabilities = np.zeros(self.reachable_states.shape)
+            it = np.nditer(self.reachable_probabilities, flags=['multi_index'], op_flags=['writeonly'])
+            for x in it:
+                r = self.reachable_states[*it.multi_index]
+                if self.transition_function is not None:
+                    x[...] = self.transition_table[*it.multi_index[:2],r]
+                else:
+                    x[...] = self.transition_function(*it.multi_index[:2],r)
+        
+        duration = (datetime.now() - start_ts).total_seconds()
+        log(f'    > Done in {duration:.3f}s')
+
+        # ------------------------- Rewards -------------------------
+        if immediate_reward_table != -1: # If -1 is set, it means the rewards are defined in the superclass POMDP
+            log('- Starting generation of expected rewards table')
+            start_ts = datetime.now()
+
+            if immediate_reward_table is None:
+                # If no reward matrix given, generate random one
+                self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count)
+            else:
+                self.immediate_reward_table = np.array(immediate_reward_table)
+                r_shape = self.immediate_reward_table.shape
+                exp_shape = (self.state_count, self.action_count, self.state_count)
+                assert r_shape == exp_shape, f"Rewards table doesnt have the right shape, it should be SxAxS (expected: {exp_shape}, received {r_shape})"
+
+            # Expected rewards
+            self.expected_rewards_table = np.einsum('sar,sar->sa', self.reachable_probabilities, self.immediate_reward_table.take(self.reachable_states))
+            # self.expected_rewards_table = np.einsum('san,san->sa', self.transition_table, self.immediate_reward_table)
+
+            duration = (datetime.now() - start_ts).total_seconds()
+            log(f'    > Done in {duration:.3f}s')
 
     
     def transition(self, s:int, a:int) -> int:
@@ -177,7 +286,8 @@ class Model:
                 Returns:
                         s_p (int): The posterior state
         '''
-        s_p = int(np.argmax(np.random.multinomial(n=1, pvals=self.transition_table[s, a, :])))
+        ri = int(np.argmax(np.random.multinomial(n=1, pvals=self.reachable_probabilities[s, a, :])))
+        s_p = int(self.reachable_states[s,a,ri])
         return s_p
     
 
@@ -240,45 +350,46 @@ class Model:
                         self.state_grid_points.append([x,y])
 
 
-    def to_dict(self) -> dict:
-        '''
-        Function to return a python dictionary with all the information of the model.
+    # TODO: Fix this
+    # def to_dict(self) -> dict:
+    #     '''
+    #     Function to return a python dictionary with all the information of the model.
 
-                Returns:
-                        model_dict (dict): The representation of the model in a dictionary format.
-        '''
-        model_dict = {
-            'states': self.state_labels,
-            'actions': self.action_labels,
-            'transition_table': self.transition_table.tolist(),
-            'immediate_reward_table': self.immediate_reward_table.tolist(),
-            'probabilistic_rewards': self.probabilistic_rewards,
-            'grid_states': self.grid_states
-        }
+    #             Returns:
+    #                     model_dict (dict): The representation of the model in a dictionary format.
+    #     '''
+    #     model_dict = {
+    #         'states': self.state_labels,
+    #         'actions': self.action_labels,
+    #         'transition_table': self.transition_table.tolist(),
+    #         'immediate_reward_table': self.immediate_reward_table.tolist(),
+    #         'probabilistic_rewards': self.probabilistic_rewards,
+    #         'grid_states': self.grid_states
+    #     }
 
-        return model_dict
+    #     return model_dict
     
 
-    def save(self, file_name:str, path:str='./Models') -> None:
-        '''
-        Function to save the current model in a json file.
-        By default, the model will be saved in 'Models' directory in the current working directory but this can be changed using the 'path' parameter.
+    # def save(self, file_name:str, path:str='./Models') -> None:
+    #     '''
+    #     Function to save the current model in a json file.
+    #     By default, the model will be saved in 'Models' directory in the current working directory but this can be changed using the 'path' parameter.
 
-                Parameters:
-                        file_name (str): The name of the json file the model will be saved in.
-                        path (str): The path at which the model will be saved. (Default: './Models')
-        '''
-        if not os.path.exists(path):
-            print('Folder does not exist yet, creating it...')
-            os.makedirs(path)
+    #             Parameters:
+    #                     file_name (str): The name of the json file the model will be saved in.
+    #                     path (str): The path at which the model will be saved. (Default: './Models')
+    #     '''
+    #     if not os.path.exists(path):
+    #         print('Folder does not exist yet, creating it...')
+    #         os.makedirs(path)
 
-        if not file_name.endswith('.json'):
-            file_name += '.json'
+    #     if not file_name.endswith('.json'):
+    #         file_name += '.json'
 
-        model_dict = self.to_dict()
-        json_object = json.dumps(model_dict, indent=4)
-        with open(path + '/' + file_name, 'w') as outfile:
-            outfile.write(json_object)
+    #     model_dict = self.to_dict()
+    #     json_object = json.dumps(model_dict, indent=4)
+    #     with open(path + '/' + file_name, 'w') as outfile:
+    #         outfile.write(json_object)
 
 
     @classmethod
@@ -458,7 +569,7 @@ class ValueFunction(list[AlphaVector]):
             os.makedirs(path)
             
         if file_name is None:
-            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             file_name = timestamp + '_value_function.csv'
 
         data = np.array([[alpha.action, *alpha] for alpha in self])
@@ -745,7 +856,7 @@ class SolverHistory:
         self.value_functions = [initial_value_function]
         self.gamma = gamma
         self.eps = eps
-        self.run_ts = datetime.datetime.now()
+        self.run_ts = datetime.now()
 
 
     @property
@@ -840,7 +951,7 @@ class VI_Solver(Solver):
             old_V_opt = V_opt
             
             # Computing the new alpha vectors
-            alpha_vectors = model.expected_rewards_table + (self.gamma * np.dot(model.transition_table, old_V_opt))
+            alpha_vectors = model.expected_rewards_table + (self.gamma * np.einsum('sar,sar->sa', model.reachable_probabilities, V_opt.take(model.reachable_states)))
             V = ValueFunction(model, alpha_vectors, model.actions)
 
             V_opt = np.max(np.array(V), axis=0)
@@ -1085,7 +1196,7 @@ class SimulationHistory:
         ani = animation.FuncAnimation(fig, (lambda frame_i: self._plot_to_frame_on_ax(frame_i, ax)), frames=steps, interval=500, repeat=False)
         
         # File Title
-        solved_time = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        solved_time = datetime.now().strftime('%Y%m%d_%H%M%S')
 
         video_title = f'{custom_name}-' if custom_name is not None else '' # Base
         video_title += f's{self.model.state_count}-a{self.model.action_count}-' # Model params
@@ -1264,7 +1375,7 @@ class Agent:
 
         history = SimulationHistory(self.model, s)
 
-        sim_start_ts = datetime.datetime.now()
+        sim_start_ts = datetime.now()
 
         # Simulation loop
         for _ in (trange(max_steps) if print_progress else range(max_steps)):
@@ -1283,7 +1394,7 @@ class Agent:
                 break
 
         if print_stats:
-            sim_end_ts = datetime.datetime.now()
+            sim_end_ts = datetime.now()
             print('Simulation done:')
             print(f'\t- Runtime (s): {(sim_end_ts - sim_start_ts).total_seconds()}')
             print(f'\t- Steps: {len(history.states)}')
@@ -1323,7 +1434,7 @@ class Agent:
         if simulator is None:
             simulator = Simulation(self.model)
 
-        sim_start_ts = datetime.datetime.now()
+        sim_start_ts = datetime.now()
 
         all_final_rewards = RewardSet()
         all_sim_length = []
@@ -1333,7 +1444,7 @@ class Agent:
             all_sim_length.append(len(sim_history.states))
 
         if print_stats:
-            sim_end_ts = datetime.datetime.now()
+            sim_end_ts = datetime.now()
             print(f'All {n} simulations done:')
             print(f'\t- Average runtime (s): {((sim_end_ts - sim_start_ts).total_seconds() / n)}')
             print(f'\t- Average step count: {(sum(all_sim_length) / n)}')
