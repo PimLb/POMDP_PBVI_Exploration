@@ -459,7 +459,7 @@ class AlphaVector(np.ndarray):
         return self._action
 
 
-class ValueFunction(list[AlphaVector]):
+class ValueFunction:
     '''
     Class representing a set of AlphaVectors. One such set approximates the value function of the MDP model.
 
@@ -484,19 +484,63 @@ class ValueFunction(list[AlphaVector]):
     def __init__(self, model:Model, alpha_vectors:Union[list[AlphaVector], np.ndarray]=[], action_list:list[int]=[]):
         self.model = model
 
+        self._vector_list = None
+        self._vector_array = None
+        self._actions = None
+
         # As numpy array
         if isinstance(alpha_vectors, np.ndarray):
             av_shape = alpha_vectors.shape
-            exp_shape = (model.state_count, len(action_list))
-            assert av_shape == exp_shape, f"Alpha vector set does not have the right shape (received: {av_shape}; expected: {exp_shape})"
+            exp_shape = (len(action_list), model.state_count)
+            assert av_shape == exp_shape, f"Alpha vector array does not have the right shape (received: {av_shape}; expected: {exp_shape})"
 
-            for i, a in enumerate(action_list):
-                self.append(AlphaVector(alpha_vectors[:,i], a))
+            self._vector_array = alpha_vectors
+            self._actions = action_list
 
         # List of alpha vectors
         else:
-            for vector in alpha_vectors:
-                self.append(vector)
+            self._vector_list = alpha_vectors
+
+
+    @property
+    def alpha_vector_list(self) -> AlphaVector:
+        if self._vector_list is None:
+            self._vector_list = []
+            for alpha_vect, action in zip(self._vector_array, self._actions):
+                self._vector_list.append(AlphaVector(alpha_vect, action))
+        return self._vector_list
+    
+
+    @property
+    def alpha_vector_array(self) -> np.ndarray:
+        if self._vector_array is None:
+            self._vector_array = np.array(self._vector_list)
+            self._actions = [v.action for v in self._vector_list]
+        return self._vector_array
+    
+
+    @property
+    def actions(self) -> int:
+        if self._actions is None:
+            self._vector_array = np.array(self._vector_list)
+            self._actions = [v.action for v in self._vector_list]
+        return self._actions
+    
+
+    def __sizeof__(self) -> int:
+        return len(self._vector_list) if self._vector_list is not None else self._vector_array.shape[0]
+    
+
+    def append(self, alpha_vector:AlphaVector):
+        '''
+        Function to add an alpha vector to the value function.
+        '''
+        if self._vector_array is not None:
+            self._vector_array = np.append(self._vector_array, alpha_vector[None,:], axis=0)
+            self._actions.append(alpha_vector.action)
+        
+        if self._vector_list is not None:
+            self._vector_list.append(alpha_vector)
 
 
     def prune(self, level:int=1) -> Self:
@@ -519,13 +563,10 @@ class ValueFunction(list[AlphaVector]):
         if level < 1:
             return copy.deepcopy(self)
         
-        pruned_alpha_set = ValueFunction(self.model)
-
         # Level 1 pruning: Check for duplicates
-        if level >= 1:
-            L = {array.tobytes(): array for array in self}
-            pruned_alpha_set.extend(list(L.values()))
-        
+        L = {array.tobytes(): array for array in self.alpha_vector_list}
+        pruned_alpha_set = ValueFunction(self.model, list(L.values()))
+
         # Level 2 pruning: Check for absolute domination
         if level >= 2:
             alpha_set = pruned_alpha_set
@@ -590,8 +631,8 @@ class ValueFunction(list[AlphaVector]):
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             file_name = timestamp + '_value_function.csv'
 
-        data = np.array([[alpha.action, *alpha] for alpha in self])
-        columns = ['action', *[f'state_{i}' for i in range(len(self[0]))]]
+        data = np.array([[alpha.action, *alpha] for alpha in self.alpha_vector_list])
+        columns = ['action', *self.model.state_labels]
 
         df = pd.DataFrame(data)
         df.to_csv(path + '/' + file_name, index=False, header=columns)
@@ -657,7 +698,7 @@ class ValueFunction(list[AlphaVector]):
         _, ax = plt.subplots((2 if belief_set is not None else 1),1,sharex=True,gridspec_kw=grid_spec)
 
         # Vector plotting
-        alpha_vects = np.array(self)
+        alpha_vects = self.alpha_vector_array
 
         m = alpha_vects[:,1] - alpha_vects[:,0] # type: ignore
         m = m.reshape(m.shape[0],1)
@@ -666,7 +707,7 @@ class ValueFunction(list[AlphaVector]):
         y = (m*x) + alpha_vects[:,0].reshape(m.shape[0],1)
 
         ax1 = ax[0] if belief_set is not None else ax
-        for i, alpha in enumerate(self):
+        for i, alpha in enumerate(self.alpha_vector_list):
             ax1.plot(x[i,:], y[i,:], color=COLOR_LIST[alpha.action]['id']) # type: ignore
 
         # X-axis setting
@@ -741,7 +782,7 @@ class ValueFunction(list[AlphaVector]):
         plane = (np.zeros((xx.shape[0], yy.shape[0])))
         gradients = (np.zeros((xx.shape[0], yy.shape[0])))
 
-        for alpha in self:
+        for alpha in self.alpha_vector_list:
 
             z = get_alpha_vect_z(xx, yy, alpha)
 
@@ -826,9 +867,9 @@ class ValueFunction(list[AlphaVector]):
                 if state_label in self.model.state_labels:
                     state_id = self.model.state_labels.index(state_label)
 
-                    best_vector = np.argmax(np.array(self)[:,state_id])
-                    value_table[x,y] = self[best_vector][state_id]
-                    best_action_table[x,y,:] = COLOR_LIST[self[best_vector].action]['rgb']
+                    best_vector = np.argmax(self.alpha_vector_array[:,state_id])
+                    value_table[x,y] = self.alpha_vector_array[best_vector, state_id]
+                    best_action_table[x,y,:] = COLOR_LIST[self.actions[best_vector]]['rgb']
 
         fig, (ax1,ax2) = plt.subplots(1,2, figsize=(size*2, size), width_ratios=(0.55,0.45))
 
@@ -959,7 +1000,7 @@ class VI_Solver(Solver):
             V = ValueFunction(model, [AlphaVector(model.expected_rewards_table[:,a], a) for a in model.actions])
         else:
             V = copy.deepcopy(initial_value_function)
-        V_opt = V[0]
+        V_opt = V.alpha_vector_list[0]
 
         solve_history = SolverHistory(model, V, self.gamma, self.eps)
 
@@ -972,7 +1013,7 @@ class VI_Solver(Solver):
             alpha_vectors = model.expected_rewards_table + (self.gamma * np.einsum('sar,sar->sa', model.reachable_probabilities, V_opt.take(model.reachable_states)))
             V = ValueFunction(model, alpha_vectors, model.actions)
 
-            V_opt = np.max(np.array(V), axis=0)
+            V_opt = np.max(V.alpha_vector_array, axis=0)
 
             # Tracking the history
             solve_history.add(V)
@@ -1360,8 +1401,8 @@ class Agent:
         '''
         assert self.value_function is not None, "No value function, training probably has to be run..."
 
-        best_vector = np.argmax(np.array(self.value_function)[:,state])
-        best_action = self.value_function[best_vector].action
+        best_vector = np.argmax(self.value_function.alpha_vector_array[:,state])
+        best_action = self.value_function.actions[best_vector]
 
         return best_action
 

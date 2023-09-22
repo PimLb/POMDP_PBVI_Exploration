@@ -307,11 +307,7 @@ class Belief(np.ndarray):
         '''
         new_state_probabilities = (self.model.reachable_transitional_observation_table[:,a,o,:] * self.take(self.model.reachable_states[:,a,:]))[:,0]
 
-        # Formal definition of the normalizer as in paper
-        # normalizer = 0
-        # for s in STATES:
-        #     normalizer += b_prev[s] * sum([(transition_function(s, a, o) * observation_function(a, s_p, o)) for s_p in STATES])
-        
+        # Normalization
         new_state_probabilities /= np.sum(new_state_probabilities)
         new_belief = Belief(self.model, new_state_probabilities)
         return new_belief
@@ -629,7 +625,7 @@ class SolverHistory(MDP_SolverHistory):
                 frame_i = frame_i if frame_i < len(history) else (len(history) - 1)
                 value_function = history.value_functions[frame_i]
 
-            alpha_vects = np.array(value_function)
+            alpha_vects = value_function.alpha_vector_array
             m = np.subtract(alpha_vects[:,1], alpha_vects[:,0])
             m = m.reshape(m.shape[0],1)
 
@@ -637,7 +633,7 @@ class SolverHistory(MDP_SolverHistory):
             x = x.reshape((1,x.shape[0])).repeat(m.shape[0],axis=0)
             y = np.add((m*x), alpha_vects[:,0].reshape(m.shape[0],1))
 
-            for i, alpha in enumerate(value_function):
+            for i, alpha in enumerate(value_function.alpha_vector_list):
                 ax.plot(x[i,:], y[i,:], line_type, color=COLOR_LIST[alpha.action]['id'])
 
         def plt_frame(frame_i):
@@ -656,7 +652,7 @@ class SolverHistory(MDP_SolverHistory):
 
             # Line legend
             lines = []
-            point = self.value_functions[self_frame_i][0][0]
+            point = self.value_functions[self_frame_i].alpha_vector_list[0][0]
             for l in line_types:
                 lines.append(Line2D([0,point],[0,point],linestyle=l))
             ax1.legend(lines, graph_names, loc='lower center')
@@ -770,8 +766,8 @@ class PBVI_Solver(Solver):
         '''
         
         # Step 1
-        value_function = np.array(value_function)
-        gamma_a_o_t = self.gamma * np.einsum('saor,vsar->aovs', model.reachable_transitional_observation_table, value_function.take(model.reachable_states, axis=1))
+        vector_array = value_function.alpha_vector_array
+        gamma_a_o_t = self.gamma * np.einsum('saor,vsar->aovs', model.reachable_transitional_observation_table, vector_array.take(model.reachable_states, axis=1))
 
         # Step 2
         belief_set = np.array(belief_set)
@@ -794,7 +790,7 @@ class PBVI_Solver(Solver):
             alpha_vectors[i,:] = alpha_a[i, best_ind,:]
             best_actions.append(best_ind)
 
-        new_value_function = ValueFunction(model, alpha_vectors.T, best_actions)
+        new_value_function = ValueFunction(model, alpha_vectors, best_actions)
 
         # Pruning
         new_value_function = new_value_function.prune(level=1) # Just check for duplicates
@@ -856,8 +852,8 @@ class PBVI_Solver(Solver):
             if random.random() < eps:
                 a = random.choice(model.actions)
             else:
-                best_alpha_index = np.argmax([np.dot(alpha, b) for alpha in value_function])
-                a = value_function[best_alpha_index].action
+                best_alpha_index = np.argmax(np.dot(value_function.alpha_vector_array, b))
+                a = value_function.actions[best_alpha_index]
             
             s_p = model.transition(s, a)
             o = model.observe(s_p, a)
@@ -1030,7 +1026,7 @@ class PBVI_Solver(Solver):
                 solver_history.add(value_function, belief_set)
 
                 # convergence check
-                max_val_per_belief = np.max(np.matmul(np.array(belief_set), np.array(value_function).T), axis=1)
+                max_val_per_belief = np.max(np.matmul(np.array(belief_set), value_function.alpha_vector_array.T), axis=1)
                 if old_max_val_per_belief is not None:
                     max_change = np.max(np.abs(max_val_per_belief - old_max_val_per_belief))
                     if max_change < max_allowed_change:
@@ -1218,14 +1214,8 @@ class Agent:
         '''
         assert self.value_function is not None, "No value function, training probably has to be run..."
 
-        best_value = -np.inf
-        best_action = -1
-
-        for alpha in self.value_function:
-            value = np.dot(alpha, belief)
-            if best_value < value:
-                best_value = value
-                best_action = alpha.action
+        best_vector = np.argmax(np.dot(self.value_function.alpha_vector_array, belief))
+        best_action = self.value_function.actions[best_vector]
 
         return best_action
 
