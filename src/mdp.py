@@ -1,4 +1,5 @@
 from datetime import datetime
+from inspect import signature
 from matplotlib import animation, colors, patches
 from matplotlib import pyplot as plt
 from scipy.optimize import milp, LinearConstraint
@@ -45,7 +46,7 @@ class Model:
     reachable_states:
         A list of states that can be reached from each state and actions. It must be a matrix of size |S| x |A| x |R| where |R| is the max amount of states reachable from any given state and action pair.
         It is optional but useful for speedup purposes.
-    immediate_reward_table:
+    rewards: #TODO: Redo definition
         The reward matrix, has to be |S| x |A| x |S|. If provided, it will be use in combination with the transition matrix to fill to expected rewards.
     rewards_are_probabilistic: bool
         Whether the rewards provided are probabilistic or pure rewards. If probabilist 0 or 1 will be the reward with a certain probability.
@@ -68,7 +69,7 @@ class Model:
                  actions:Union[int, list],
                  transitions=None,
                  reachable_states=None,
-                 immediate_reward_table=None,
+                 rewards=None,
                  rewards_are_probabilistic:bool=False,
                  grid_states:Union[None,list[list[Union[str,None]]]]=None,
                  start_probabilities:Union[list,None]=None,
@@ -178,7 +179,8 @@ class Model:
         if grid_states is not None:
             self.convert_to_grid(grid_states)
 
-        self.map_states_to_grid_points()
+        # TODO: Rework this
+        # self.map_states_to_grid_points()
 
         # ------------------------- Start state probabilities -------------------------
         log('- Generating start probabilities table')
@@ -254,22 +256,38 @@ class Model:
         log(f'    > Done in {duration:.3f}s')
 
         # ------------------------- Rewards -------------------------
-        if immediate_reward_table != -1: # If -1 is set, it means the rewards are defined in the superclass POMDP
+        self.immediate_reward_table = None
+        self.immediate_reward_function = None
+        if rewards == -1: # If -1 is set, it means the rewards are defined in the superclass POMDP
+            pass
+        elif rewards is None:
+            # If no reward matrix given, generate random one
+            self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count)
+        elif callable(rewards):
+            # Rewards is a function
+            self.immediate_reward_function = rewards
+            assert len(signature(rewards).parameters) == 3, "Reward function should accept 3 parameters: s, a, sn..."
+        else:
+            # Array like
+            self.immediate_reward_table = np.array(rewards)
+            r_shape = self.immediate_reward_table.shape
+            exp_shape = (self.state_count, self.action_count, self.state_count)
+            assert r_shape == exp_shape, f"Rewards table doesnt have the right shape, it should be SxAxS (expected: {exp_shape}, received {r_shape})"
+
+        # ------------------------- Expected rewards -------------------------
+        self.expected_rewards_table = None
+        if rewards != -1:
             log('- Starting generation of expected rewards table')
             start_ts = datetime.now()
 
-            if immediate_reward_table is None:
-                # If no reward matrix given, generate random one
-                self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count)
+            if self.immediate_reward_table is not None:
+                self.expected_rewards_table = np.einsum('sar,sar->sa', self.reachable_probabilities, self.immediate_reward_table.take(self.reachable_states))
             else:
-                self.immediate_reward_table = np.array(immediate_reward_table)
-                r_shape = self.immediate_reward_table.shape
-                exp_shape = (self.state_count, self.action_count, self.state_count)
-                assert r_shape == exp_shape, f"Rewards table doesnt have the right shape, it should be SxAxS (expected: {exp_shape}, received {r_shape})"
-
-            # Expected rewards
-            self.expected_rewards_table = np.einsum('sar,sar->sa', self.reachable_probabilities, self.immediate_reward_table.take(self.reachable_states))
-            # self.expected_rewards_table = np.einsum('san,san->sa', self.transition_table, self.immediate_reward_table)
+                self.expected_rewards_table = np.zeros((self.state_count, self.action_count))
+                it = np.nditer(self.reachable_states, flags=['multi_index'], op_flags=['writeonly'])
+                for r in it:
+                    (s,a,ri) = it.multi_index
+                    self.expected_rewards_table[s,a] += self.reachable_probabilities[s,a,ri] * self.immediate_reward_function(s,a,r)
 
             duration = (datetime.now() - start_ts).total_seconds()
             log(f'    > Done in {duration:.3f}s')
@@ -304,7 +322,7 @@ class Model:
                 Returns:
                         reward (int, float): The reward received.
         '''
-        reward = self.immediate_reward_table[s,a,s_p]
+        reward = self.immediate_reward_table[s,a,s_p] if self.immediate_reward_table is not None else self.immediate_reward_function(s,a,s_p)
         if self.probabilistic_rewards:
             rnd = random.random()
             return 1 if rnd < reward else 0

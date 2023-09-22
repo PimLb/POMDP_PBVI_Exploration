@@ -1,4 +1,5 @@
 from datetime import datetime
+from inspect import signature
 from matplotlib import animation, cm, colors, ticker
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
@@ -50,7 +51,7 @@ class Model(MDP_Model):
     reachable_states:
         A list of states that can be reached from each state and actions. It must be a matrix of size |S| x |A| x |R| where |R| is the max amount of states reachable from any given state and action pair.
         It is optional but useful for speedup purposes.
-    immediate_rewards:
+    rewards: #TODO: rework definition
         The reward matrix, has to be |S| x |A| x |S| x |O|. If none is provided, it will be randomly generated.
     observation_table:
         The observation matrix, has to be |S| x |A| x |O|. If none is provided, it will be randomly generated.
@@ -78,7 +79,7 @@ class Model(MDP_Model):
                  observations:Union[int, list],
                  transitions=None,
                  reachable_states=None,
-                 immediate_reward_table=None,
+                 rewards=None,
                  observation_table=None,
                  rewards_are_probabilistic:bool=False,
                  grid_states:Union[None,list[list[Union[str,None]]]]=None,
@@ -91,7 +92,7 @@ class Model(MDP_Model):
                          actions=actions,
                          transitions=transitions,
                          reachable_states=reachable_states,
-                         immediate_reward_table=-1, # Defined here lower since immediate reward table has different shape for MDP is different than for POMDP
+                         rewards=-1, # Defined here lower since immediate reward table has different shape for MDP is different than for POMDP
                          rewards_are_probabilistic=rewards_are_probabilistic,
                          grid_states=grid_states,
                          start_probabilities=start_probabilities,
@@ -121,28 +122,6 @@ class Model(MDP_Model):
 
         log(f'- {self.observation_count} observations')
 
-        # ------------------------- Rewards -------------------------
-        log('- Starting generation of expected rewards table')
-        start_ts = datetime.now()
-
-        if immediate_reward_table is None:
-            # If no reward matrix given, generate random one
-            self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count, self.observation_count)
-        else:
-            self.immediate_reward_table = np.array(immediate_reward_table)
-            assert self.immediate_reward_table.shape == (self.state_count, self.action_count, self.state_count, self.observation_count), "rewards table doesnt have the right shape, it should be SxAxSxO"
-
-        # Expected rewards
-        temp = np.zeros((self.state_count, self.action_count, self.max_reachable_states))
-        it = np.nditer(self.reachable_states, flags=['multi_index'], op_flags=['readonly'])
-        for r in it:
-            (s,a,ri) = it.multi_index
-            temp[s,a,ri] = np.dot(self.immediate_reward_table[s,a,r,:], self.observation_table[r,a,:]) * self.reachable_probabilities[s,a,ri]
-        self.expected_rewards_table = np.sum(temp, axis=2)
-
-        duration = (datetime.now() - start_ts).total_seconds()
-        log(f'    > Done in {duration:.3f}s')
-
         # ------------------------- Reachable transitional observation probabilities -------------------------
         log('- Starting of transitional observations for reachable states table')
         start_ts = datetime.now()
@@ -153,6 +132,41 @@ class Model(MDP_Model):
             (s,a,o,ri) = it.multi_index
             x[...] = self.reachable_probabilities[s,a,ri] * self.observation_table[self.reachable_states[s,a,ri],a,o]
         
+        duration = (datetime.now() - start_ts).total_seconds()
+        log(f'    > Done in {duration:.3f}s')
+
+        # ------------------------- Rewards -------------------------
+        self.immediate_reward_table = None
+        self.immediate_reward_function = None
+        
+        if rewards is None:
+            # If no reward matrix given, generate random one
+            self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count, self.observation_count)
+        elif callable(rewards):
+            # Rewards is a function
+            self.immediate_reward_function = rewards
+            assert len(signature(rewards).parameters) == 4, "Reward function should accept 4 parameters: s, a, sn, o..."
+        else:
+            # Array like
+            self.immediate_reward_table = np.array(rewards)
+            r_shape = self.immediate_reward_table.shape
+            exp_shape = (self.state_count, self.action_count, self.state_count, self.observation_count)
+            assert r_shape == exp_shape, f"Rewards table doesnt have the right shape, it should be SxAxSxO (expected: {exp_shape}, received {r_shape})"
+        
+        # ------------------------- Expected rewards -------------------------
+        log('- Starting generation of expected rewards table')
+        start_ts = datetime.now()
+
+        self.expected_rewards_table = np.zeros((self.state_count, self.action_count))
+        it = np.nditer(self.reachable_transitional_observation_table, flags=['multi_index'], op_flags=['readonly'])
+        for x in it:
+            (s,a,o,ri) = it.multi_index
+            r = self.reachable_states[s,a,ri]
+            if self.immediate_reward_table is not None:
+                self.expected_rewards_table[s,a] += self.immediate_reward_table[s,a,r,o] * x
+            else:
+                self.expected_rewards_table[s,a] += self.immediate_reward_function(s,a,r,o) * x
+
         duration = (datetime.now() - start_ts).total_seconds()
         log(f'    > Done in {duration:.3f}s')
 
@@ -171,8 +185,8 @@ class Model(MDP_Model):
                 Returns:
                         reward (int, float): The reward received.
         '''
-        reward = self.immediate_reward_table[s,a,s_p,o]
-        if self.probabilistic_rewards:
+        reward = self.immediate_reward_table[s,a,s_p,o] if self.immediate_reward_table is not None else self.immediate_reward_function(s,a,s_p,o)
+        if self.rewards_are_probabilistic:
             rnd = random.random()
             return 1 if rnd < reward else 0
         else:
@@ -194,39 +208,40 @@ class Model(MDP_Model):
         return o
     
 
-    def to_dict(self) -> dict:
-        '''
-        Function to return a python dictionary with all the information of the model.
+# TODO: Update this
+    # def to_dict(self) -> dict:
+    #     '''
+    #     Function to return a python dictionary with all the information of the model.
 
-                Returns:
-                        model_dict (dict): The representation of the model in a dictionary format.
-        '''
-        model_dict = super().to_dict()
-        model_dict['observations'] = self.observation_labels
-        model_dict['observation_table'] = self.observation_table.tolist()
+    #             Returns:
+    #                     model_dict (dict): The representation of the model in a dictionary format.
+    #     '''
+    #     model_dict = super().to_dict()
+    #     model_dict['observations'] = self.observation_labels
+    #     model_dict['observation_table'] = self.observation_table.tolist()
 
-        return model_dict
+    #     return model_dict
     
     
-    @classmethod
-    def load_from_json(cls, file:str) -> Self:
-        '''
-        Function to load a POMDP model from a json file. The json structure must contain the same items as in the constructor of this class.
+    # @classmethod
+    # def load_from_json(cls, file:str) -> Self:
+    #     '''
+    #     Function to load a POMDP model from a json file. The json structure must contain the same items as in the constructor of this class.
 
-                Parameters:
-                        file (str): The file and path of the model to be loaded.
-                Returns:
-                        loaded_model (pomdp.Model): An instance of the loaded model.
-        '''
-        with open(file, 'r') as openfile:
-            json_model = json.load(openfile)
+    #             Parameters:
+    #                     file (str): The file and path of the model to be loaded.
+    #             Returns:
+    #                     loaded_model (pomdp.Model): An instance of the loaded model.
+    #     '''
+    #     with open(file, 'r') as openfile:
+    #         json_model = json.load(openfile)
 
-        loaded_model = Model(**json_model)
+    #     loaded_model = Model(**json_model)
 
-        if 'grid_states' in json_model:
-            loaded_model.convert_to_grid(json_model['grid_states'])
+    #     if 'grid_states' in json_model:
+    #         loaded_model.convert_to_grid(json_model['grid_states'])
 
-        return loaded_model
+    #     return loaded_model
 
 
 class Belief(np.ndarray):
@@ -290,7 +305,7 @@ class Belief(np.ndarray):
                         new_belief (Belief): An updated belief
 
         '''
-        new_state_probabilities = self.model.reachable_transitional_observation_table[:,a,o,:] * self.take(self.model.reachable_states[:,a,:])
+        new_state_probabilities = (self.model.reachable_transitional_observation_table[:,a,o,:] * self.take(self.model.reachable_states[:,a,:]))[:,0]
 
         # Formal definition of the normalizer as in paper
         # normalizer = 0
@@ -755,45 +770,31 @@ class PBVI_Solver(Solver):
         '''
         
         # Step 1
-        gamma_a_o_t = self.gamma * np.einsum('saor,vsar->aovs', model.reachable_transitional_observation_table, np.array(value_function).take(model.reachable_states, axis=1))
+        value_function = np.array(value_function)
+        gamma_a_o_t = self.gamma * np.einsum('saor,vsar->aovs', model.reachable_transitional_observation_table, value_function.take(model.reachable_states, axis=1))
 
         # Step 2
-        new_value_function = ValueFunction(model)
-        
-        for b in belief_set:
-            
-            best_alpha = None
-            best_alpha_val = -np.inf
-            
-            for a in model.actions:
-                
-                obs_alpha_sum = np.zeros(model.state_count)
-                
-                for o in model.observations:
-                    
-                    # Argmax of alphas
-                    best_alpha_o = np.zeros(model.state_count)
-                    best_alpha_o_val = -np.inf
-                    
-                    for alpha_o in gamma_a_o_t[a][o]:
-                        val = np.dot(alpha_o, b)
-                        if val > best_alpha_o_val:
-                            best_alpha_o_val = val
-                            best_alpha_o = alpha_o
-                            
-                    # Sum of the alpha_obs vectors
-                    obs_alpha_sum += best_alpha_o
-                        
-                alpha_a_vect = model.expected_rewards_table[:,a] + obs_alpha_sum
+        belief_set = np.array(belief_set)
+        best_alpha_ind = np.argmax(np.tensordot(belief_set, gamma_a_o_t, (1,3)), axis=3)
 
-                # Step 3
-                val = np.dot(alpha_a_vect, b)
-                if val > best_alpha_val:
-                    best_alpha_val = val
-                    best_alpha = AlphaVector(alpha_a_vect, a)
+        best_alphas_per_o = np.zeros((*best_alpha_ind.shape, model.state_count))
+        it = np.nditer(best_alpha_ind, flags=['multi_index'], op_flags=['readonly'])
+        for x in it:
+            (b,a,o) = it.multi_index
+            best_alphas_per_o[b,a,o,:] = gamma_a_o_t[a,o,x,:]
 
-            assert best_alpha is not None
-            new_value_function.append(best_alpha)
+        alpha_a = np.sum(best_alphas_per_o, axis=2)
+        alpha_a += model.expected_rewards_table.T
+
+        # Step 3
+        alpha_vectors = np.zeros(belief_set.shape)
+        best_actions = []
+        for i, b in enumerate(belief_set):
+            best_ind = np.argmax(np.dot(alpha_a[i,:,:], b))
+            alpha_vectors[i,:] = alpha_a[i, best_ind,:]
+            best_actions.append(best_ind)
+
+        new_value_function = ValueFunction(model, alpha_vectors.T, best_actions)
 
         # Pruning
         new_value_function = new_value_function.prune(level=1) # Just check for duplicates
