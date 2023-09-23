@@ -47,12 +47,16 @@ class Model(MDP_Model):
     observations:
         A list of observation labels or an amount of observations to be used
     transitions:
-        The transitions between states, an array can be provided and has to be |S| x |A| x |S| or a function can be provided. If none is provided, it will be randomly generated.
+        The transitions between states, an array can be provided and has to be |S| x |A| x |S| or a function can be provided. 
+        If a function is provided, it has be able to deal with np.array arguments.
+        If none is provided, it will be randomly generated.
     reachable_states:
         A list of states that can be reached from each state and actions. It must be a matrix of size |S| x |A| x |R| where |R| is the max amount of states reachable from any given state and action pair.
         It is optional but useful for speedup purposes.
-    rewards: #TODO: rework definition
-        The reward matrix, has to be |S| x |A| x |S| x |O|. If none is provided, it will be randomly generated.
+    rewards:
+        The reward matrix, has to be |S| x |A| x |S|.
+        A function can also be provided here but it has to be able to deal with np.array arguments.
+        If provided, it will be use in combination with the transition matrix to fill to expected rewards.
     observation_table:
         The observation matrix, has to be |S| x |A| x |O|. If none is provided, it will be randomly generated.
     rewards_are_probabilistic: bool
@@ -99,7 +103,7 @@ class Model(MDP_Model):
                          end_states=end_states,
                          end_actions=end_actions)
 
-        log('- POMDP particular parameters:')
+        log('POMDP particular parameters:')
 
         # ------------------------- Observations -------------------------
         if isinstance(observations, int):
@@ -107,7 +111,7 @@ class Model(MDP_Model):
         else:
             self.observation_labels = observations
         self.observation_count = len(self.observation_labels)
-        self.observations = [obs for obs in range(self.observation_count)]
+        self.observations = np.arange(self.observation_count)
 
         if observation_table is None:
             # If no observation matrix given, generate random one
@@ -126,11 +130,8 @@ class Model(MDP_Model):
         log('- Starting of transitional observations for reachable states table')
         start_ts = datetime.now()
 
-        self.reachable_transitional_observation_table = np.zeros((self.state_count, self.action_count, self.observation_count, self.max_reachable_states))
-        it = np.nditer(self.reachable_transitional_observation_table, flags=['multi_index'], op_flags=['writeonly'])
-        for x in it:
-            (s,a,o,ri) = it.multi_index
-            x[...] = self.reachable_probabilities[s,a,ri] * self.observation_table[self.reachable_states[s,a,ri],a,o]
+        reachable_observations = self.observation_table[self.reachable_states[:,:,None,:], self.actions[None,:,None,None], self.observations[None,None,:,None]] # SAOR
+        self.reachable_transitional_observation_table = np.einsum('sar,saor->saor', self.reachable_probabilities, reachable_observations)
         
         duration = (datetime.now() - start_ts).total_seconds()
         log(f'    > Done in {duration:.3f}s')
@@ -157,15 +158,20 @@ class Model(MDP_Model):
         log('- Starting generation of expected rewards table')
         start_ts = datetime.now()
 
-        self.expected_rewards_table = np.zeros((self.state_count, self.action_count))
-        it = np.nditer(self.reachable_transitional_observation_table, flags=['multi_index'], op_flags=['readonly'])
-        for x in it:
-            (s,a,o,ri) = it.multi_index
-            r = self.reachable_states[s,a,ri]
-            if self.immediate_reward_table is not None:
-                self.expected_rewards_table[s,a] += self.immediate_reward_table[s,a,r,o] * x
-            else:
-                self.expected_rewards_table[s,a] += self.immediate_reward_function(s,a,r,o) * x
+        reachable_rewards = None
+        if self.immediate_reward_table is not None:
+            reachable_rewards = rewards[self.states[:,None,None,None], self.actions[None,:,None,None], self.reachable_states[:,:,:,None], self.observations[None,None,None,:]]
+        else:
+            def reach_reward_func(s,a,ri,o):
+                s = s.astype(int)
+                a = a.astype(int)
+                ri = ri.astype(int)
+                o = o.astype(int)
+                return self.immediate_reward_function(s,a,self.reachable_states[s,a,ri],o)
+            
+            reachable_rewards = np.fromfunction(reach_reward_func, (*self.reachable_states.shape, self.observation_count))
+
+        self.expected_rewards_table = np.einsum('saor,saro->sa', self.reachable_transitional_observation_table, reachable_rewards)
 
         duration = (datetime.now() - start_ts).total_seconds()
         log(f'    > Done in {duration:.3f}s')
@@ -769,17 +775,20 @@ class PBVI_Solver(Solver):
         
         # Step 1
         vector_array = value_function.alpha_vector_array
-        gamma_a_o_t = self.gamma * np.einsum('saor,vsar->aovs', model.reachable_transitional_observation_table, vector_array.take(model.reachable_states, axis=1))
+        vectors_array_reachable_states = vector_array[np.arange(vector_array.shape[0])[:,None,None,None], model.reachable_states[None,:,:,:]]
+        # vectors_array_reachable_states = vector_array.take(model.reachable_states, axis=1)
+        gamma_a_o_t = self.gamma * np.einsum('saor,vsar->aovs', model.reachable_transitional_observation_table, vectors_array_reachable_states)
 
         # Step 2
         belief_set = np.array(belief_set)
         best_alpha_ind = np.argmax(np.tensordot(belief_set, gamma_a_o_t, (1,3)), axis=3)
 
-        best_alphas_per_o = np.zeros((*best_alpha_ind.shape, model.state_count))
-        it = np.nditer(best_alpha_ind, flags=['multi_index'], op_flags=['readonly'])
-        for x in it:
-            (b,a,o) = it.multi_index
-            best_alphas_per_o[b,a,o,:] = gamma_a_o_t[a,o,x,:]
+        best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]]
+        # best_alphas_per_o = np.zeros((*best_alpha_ind.shape, model.state_count))
+        # it = np.nditer(best_alpha_ind, flags=['multi_index'], op_flags=['readonly'])
+        # for x in it:
+        #     (b,a,o) = it.multi_index
+        #     best_alphas_per_o[b,a,o,:] = gamma_a_o_t[a,o,x,:]
 
         alpha_a = np.sum(best_alphas_per_o, axis=2)
         alpha_a += model.expected_rewards_table.T

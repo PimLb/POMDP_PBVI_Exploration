@@ -42,12 +42,16 @@ class Model:
     actions: int|list
         A list of action labels or an amount of actions to be used.
     transitions:
-        The transitions between states, an array can be provided and has to be |S| x |A| x |S| or a function can be provided. If none is provided, it will be randomly generated.
+        The transitions between states, an array can be provided and has to be |S| x |A| x |S| or a function can be provided. 
+        If a function is provided, it has be able to deal with np.array arguments.
+        If none is provided, it will be randomly generated.
     reachable_states:
         A list of states that can be reached from each state and actions. It must be a matrix of size |S| x |A| x |R| where |R| is the max amount of states reachable from any given state and action pair.
         It is optional but useful for speedup purposes.
-    rewards: #TODO: Redo definition
-        The reward matrix, has to be |S| x |A| x |S|. If provided, it will be use in combination with the transition matrix to fill to expected rewards.
+    rewards:
+        The reward matrix, has to be |S| x |A| x |S|.
+        A function can also be provided here but it has to be able to deal with np.array arguments.
+        If provided, it will be use in combination with the transition matrix to fill to expected rewards.
     rewards_are_probabilistic: bool
         Whether the rewards provided are probabilistic or pure rewards. If probabilist 0 or 1 will be the reward with a certain probability.
     grid_states: list[list]]
@@ -101,7 +105,7 @@ class Model:
             self.grid_states = [self.state_labels]
 
         self.state_count = len(self.state_labels)
-        self.states = [state for state in range(self.state_count)]
+        self.states = np.arange(self.state_count)
 
         log(f'- {self.state_count} states')
 
@@ -111,7 +115,7 @@ class Model:
         else:
             self.action_labels = actions
         self.action_count = len(self.action_labels)
-        self.actions = [action for action in range(self.action_count)]
+        self.actions = np.arange(self.action_count)
 
         log(f'- {self.action_count} actions')
 
@@ -147,18 +151,10 @@ class Model:
             # Attempt to create transition table in memory
             t_arr = None
             try:
-                t_arr = np.zeros((self.state_count, self.action_count, self.state_count))
+                t_arr = np.fromfunction(self.transition_function, (self.state_count, self.action_count, self.state_count))
             except MemoryError:
                 print('[Warning] Not enough memory to store transition table, using transition function provided...')
             else:
-                if reachable_states is None:
-                    it = np.nditer(t_arr, flags=['multi_index'], op_flags=['writeonly'])
-                    for x in it:
-                        x[...] = transitions(*it.multi_index)
-                else:
-                    it = np.nditer(reachable_states, flags=['multi_index'], op_flags=['readonly'])
-                    for r in it:
-                        t_arr[it.multi_index[0], it.multi_index[1], r] = transitions(it.multi_index[0], it.multi_index[1], r)
                 self.transition_table = t_arr
 
         else: # Array like
@@ -197,6 +193,7 @@ class Model:
         # ------------------------- Reachable states -------------------------
         # If not set yet
         if self.reachable_states is None:
+            # TODO Optimize reachable state computation
             log('- Starting computation of reachable states from transition data')
             start_ts = datetime.now()
 
@@ -235,24 +232,17 @@ class Model:
             log(f'    > Done in {duration:.3f}s')
             log(f'- At most {self.max_reachable_states} reachable states per state-action pair')
 
-
         # ------------------------- Reachable state probabilities -------------------------
         log('- Starting computation of reachable state probabilities from transition data')
         start_ts = datetime.now()
 
         if self.transition_function is None and self.transition_table is None:
-            self.reachable_probabilities = np.ones(self.reachable_states.shape) / self.max_reachable_states
+            self.reachable_probabilities = np.full(self.reachable_states.shape, 1/self.max_reachable_states)
+        elif self.transition_table is not None:
+            self.reachable_probabilities = self.transition_table[self.states[:,None,None], self.actions[None,:,None], self.reachable_states]
         else:
-            self.reachable_probabilities = np.zeros(self.reachable_states.shape)
-            it = np.nditer(self.reachable_probabilities, flags=['multi_index'], op_flags=['writeonly'])
-            for x in it:
-                (s,a,ri) = it.multi_index
-                r = self.reachable_states[s,a,ri]
-                if self.transition_table is not None:
-                    x[...] = self.transition_table[s,a,r]
-                else:
-                    x[...] = self.transition_function(s,a,r)
-        
+            self.reachable_probabilities = np.fromfunction((lambda s,a,ri: self.transition_function(s.astype(int), a.astype(int), self.reachable_states[s.astype(int), a.astype(int), ri.astype(int)])), self.reachable_states.shape)
+            
         duration = (datetime.now() - start_ts).total_seconds()
         log(f'    > Done in {duration:.3f}s')
 
@@ -281,14 +271,19 @@ class Model:
             log('- Starting generation of expected rewards table')
             start_ts = datetime.now()
 
+            reachable_rewards = None
             if self.immediate_reward_table is not None:
-                self.expected_rewards_table = np.einsum('sar,sar->sa', self.reachable_probabilities, self.immediate_reward_table.take(self.reachable_states))
+                reachable_rewards = self.immediate_reward_table[self.states[:,None,None], self.actions[None,:,None], self.reachable_states]
             else:
-                self.expected_rewards_table = np.zeros((self.state_count, self.action_count))
-                it = np.nditer(self.reachable_states, flags=['multi_index'], op_flags=['writeonly'])
-                for r in it:
-                    (s,a,ri) = it.multi_index
-                    self.expected_rewards_table[s,a] += self.reachable_probabilities[s,a,ri] * self.immediate_reward_function(s,a,r)
+                def reach_reward_func(s,a,ri):
+                    s = s.astype(int)
+                    a = a.astype(int)
+                    ri = ri.astype(int)
+                    return self.immediate_reward_function(s,a,self.reachable_states[s,a,ri])
+                
+                reachable_rewards = np.fromfunction(reach_reward_func, self.reachable_states.shape)
+                
+            self.expected_rewards_table = np.einsum('sar,sar->sa', self.reachable_probabilities, reachable_rewards)
 
             duration = (datetime.now() - start_ts).total_seconds()
             log(f'    > Done in {duration:.3f}s')
@@ -305,7 +300,7 @@ class Model:
                 Returns:
                         s_p (int): The posterior state
         '''
-        ri = int(np.argmax(np.random.multinomial(n=1, pvals=self.reachable_probabilities[s, a, :])))
+        ri = int(np.argmax(np.random.multinomial(n=1, pvals=self.reachable_probabilities[s,a,:])))
         s_p = int(self.reachable_states[s,a,ri])
         return s_p
     
