@@ -246,11 +246,12 @@ class Model:
             self.reachable_probabilities = np.zeros(self.reachable_states.shape)
             it = np.nditer(self.reachable_probabilities, flags=['multi_index'], op_flags=['writeonly'])
             for x in it:
-                r = self.reachable_states[*it.multi_index]
-                if self.transition_function is not None:
-                    x[...] = self.transition_table[*it.multi_index[:2],r]
+                (s,a,ri) = it.multi_index
+                r = self.reachable_states[s,a,ri]
+                if self.transition_table is not None:
+                    x[...] = self.transition_table[s,a,r]
                 else:
-                    x[...] = self.transition_function(*it.multi_index[:2],r)
+                    x[...] = self.transition_function(s,a,r)
         
         duration = (datetime.now() - start_ts).total_seconds()
         log(f'    > Done in {duration:.3f}s')
@@ -527,7 +528,7 @@ class ValueFunction:
         return self._actions
     
 
-    def __sizeof__(self) -> int:
+    def __len__(self) -> int:
         return len(self._vector_list) if self._vector_list is not None else self._vector_array.shape[0]
     
 

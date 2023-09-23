@@ -305,10 +305,12 @@ class Belief(np.ndarray):
                         new_belief (Belief): An updated belief
 
         '''
-        new_state_probabilities = (self.model.reachable_transitional_observation_table[:,a,o,:] * self.take(self.model.reachable_states[:,a,:]))[:,0]
-
+        new_state_probabilities = np.einsum('sr,sr->s', self.model.reachable_transitional_observation_table[:,a,o,:], self.take(self.model.reachable_states[:,a,:]))
+        
         # Normalization
-        new_state_probabilities /= np.sum(new_state_probabilities)
+        prob_sum = np.sum(new_state_probabilities)
+        if prob_sum != 1.0:
+            new_state_probabilities /= prob_sum
         new_belief = Belief(self.model, new_state_probabilities)
         return new_belief
     
@@ -919,7 +921,7 @@ class PBVI_Solver(Solver):
         return []
 
 
-    def expand(self) -> list[Belief]:
+    def expand(self, model:Model, belief_set:list[Belief], **function_specific_parameters) -> list[Belief]:
         '''
         Central method to call one of the functions for a particular expansion strategy:
             - Stochastic Simulation with Random Action (ssra)
@@ -927,26 +929,27 @@ class PBVI_Solver(Solver):
             - Stochastic Simulation with Exploratory Action (ssea)
             - Greedy Error Reduction (ger) - not implemented
                 
+                Parameters:
+                        model (pomdp.Model): The model on which to run the belief expansion on.
+                        belief_set (list[Belief]): The set of beliefs to expand.
+                        function_specific_parameters: Potential additional parameters necessary for the specific expand function.
+
                 Returns:
                         belief_set_new (list[Belief]): The belief set the expansion function returns. 
         '''
-        kwargs = self.expand_function_params
-
         if self.expand_function in 'expand_ssra':
-            args = {arg: kwargs[arg] for arg in ['model', 'belief_set'] if arg in kwargs}
-            return self.expand_ssra(**args)
+            return self.expand_ssra(model=model, belief_set=belief_set)
         
         elif self.expand_function in 'expand_ssga':
-            args = {arg: kwargs[arg] for arg in ['model', 'belief_set', 'value_function', 'eps'] if arg in kwargs}
-            return self.expand_ssga(**args)
+            args = {arg: function_specific_parameters[arg] for arg in ['value_function', 'eps'] if arg in function_specific_parameters}
+            return self.expand_ssga(model=model, belief_set=belief_set, **args)
         
         elif self.expand_function in 'expand_ssea':
-            args = {arg: kwargs[arg] for arg in ['model', 'belief_set'] if arg in kwargs}
-            return self.expand_ssea(**args)
+            return self.expand_ssea(model=model, belief_set=belief_set)
         
         elif self.expand_function in 'expand_ger':
-            args = {arg: kwargs[arg] for arg in ['model', 'belief_set', 'value_function'] if arg in kwargs}
-            return self.expand_ger(**args)
+            args = {arg: function_specific_parameters[arg] for arg in ['value_function'] if arg in function_specific_parameters}
+            return self.expand_ger(model=model, belief_set=belief_set, **args)
         
         return []
 
@@ -957,6 +960,7 @@ class PBVI_Solver(Solver):
               horizon:int,
               initial_belief:Union[list[Belief], Belief, None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
+              expand_prune_level:Union[int,None]=None,
               print_progress:bool=True
               ) -> tuple[ValueFunction, SolverHistory]:
         '''
@@ -977,6 +981,7 @@ class PBVI_Solver(Solver):
                         horizon (int) - How many times the alpha vector set must be updated every time the belief set is expanded.
                         initial_belief (list[Belief], Belief) - Optional: An initial list of beliefs to start with.
                         initial_value_function (ValueFunction) - Optional: An initial value function to start the solving process with.
+                        expand_prune_level (int) - Optional: Parameter to prune the value function further before the expand function.
                         print_progress (bool): Whether or not to print out the progress of the value iteration process. (Default: True)
 
                 Returns:
@@ -1010,11 +1015,13 @@ class PBVI_Solver(Solver):
 
         # Loop
         for expansion_i in range(expansions) if not print_progress else trange(expansions, desc='Expansions'):
+
+            # 0: Prune value function at a higher level betwween expansions
+            if expand_prune_level is not None:
+                value_function = value_function.prune(expand_prune_level)
+
             # 1: Expand belief set
-            self.expand_function_params['model'] = model
-            self.expand_function_params['belief_set'] = belief_set
-            self.expand_function_params['value_function'] = value_function
-            belief_set = self.expand()
+            belief_set = self.expand(model=model, belief_set=belief_set, value_function=value_function, **self.expand_function_params)
 
             old_max_val_per_belief = None
 
