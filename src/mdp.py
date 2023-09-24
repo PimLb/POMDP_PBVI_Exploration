@@ -8,7 +8,8 @@ from typing import Self, Union, Tuple
 
 import copy
 import json
-import numpy as np
+# import numpy as np
+import cupy as np
 import os
 import pandas as pd
 import random
@@ -184,7 +185,7 @@ class Model:
             assert len(start_probabilities) == self.state_count
             self.start_probabilities = np.array(start_probabilities,dtype=float)
         else:
-            self.start_probabilities = np.ones(self.state_count) / self.state_count
+            self.start_probabilities = np.full((self.state_count), 1/self.state_count)
 
         # ------------------------- End state conditions -------------------------
         self.end_states = end_states
@@ -720,7 +721,7 @@ class ValueFunction:
 
         # Belief plotting
         if belief_set is not None:
-            beliefs_x = np.array(belief_set)[:,1]
+            beliefs_x = belief_set.belief_array[:,1]
             ax[1].scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
             ax[1].get_yaxis().set_visible(False)
             ax[1].axhline(0, color='black')
@@ -993,7 +994,7 @@ class VI_Solver(Solver):
                         history (SolverHistory): The tracking of the solution over time.
         '''
         if not initial_value_function:
-            V = ValueFunction(model, [AlphaVector(model.expected_rewards_table[:,a], a) for a in model.actions])
+            V = ValueFunction(model, model.expected_rewards_table.T, model.actions)
         else:
             V = copy.deepcopy(initial_value_function)
         V_opt = V.alpha_vector_list[0]

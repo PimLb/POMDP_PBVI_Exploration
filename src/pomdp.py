@@ -9,7 +9,8 @@ from typing import Self, Tuple, Union
 
 import copy
 import json
-import numpy as np
+# import numpy as np
+import cupy as np
 import math
 import os
 import random
@@ -250,7 +251,7 @@ class Model(MDP_Model):
     #     return loaded_model
 
 
-class Belief(np.ndarray):
+class Belief:
     '''
     A class representing a belief in the space of a given model. It is the belief to be in any combination of states:
     eg:
@@ -276,28 +277,25 @@ class Belief(np.ndarray):
     plot(size:int=5):
         Function to plot a value function as a grid heatmap.
     '''
-    def __new__(cls, model:Model, state_probabilities:Union[np.ndarray,None]=None):
-        if state_probabilities is not None:
-            assert state_probabilities.shape[0] == model.state_count, "Belief must contain be of dimension |S|"
-            prob_sum = np.round(sum(state_probabilities), decimals=3)
-            assert prob_sum == 1, f"States probabilities in belief must sum to 1 (found: {prob_sum})"
-            obj = np.asarray(state_probabilities).view(cls)
-        else:
-            obj = model.start_probabilities.view(cls)
-        obj._model = model # type: ignore
-        return obj
+    def __init__(self, model:Model, values:Union[np.ndarray,None]=None):
+        assert model is not None
+        self.model = model
 
-    def __array_finalize__(self, obj):
-        if obj is None: return
-        self._model = getattr(obj, '_model', None)
+        if values is not None:
+            assert values.shape[0] == model.state_count, "Belief must contain be of dimension |S|"
+            prob_sum = np.round(np.sum(values), decimals=3)
+            assert prob_sum == 1, f"States probabilities in belief must sum to 1 (found: {prob_sum})"
+            self._values = values
+        else:
+            self._values = model.start_probabilities
+
         self._grid_values = None
 
-
+    
     @property
-    def model(self) -> Model:
-        assert self._model is not None
-        return self._model
-
+    def values(self) -> np.ndarray:
+        return self._values
+    
 
     def update(self, a:int, o:int) -> Self:
         '''
@@ -311,7 +309,7 @@ class Belief(np.ndarray):
                         new_belief (Belief): An updated belief
 
         '''
-        new_state_probabilities = np.einsum('sr,sr->s', self.model.reachable_transitional_observation_table[:,a,o,:], self.take(self.model.reachable_states[:,a,:]))
+        new_state_probabilities = np.einsum('sr,sr->s', self.model.reachable_transitional_observation_table[:,a,o,:], self.values.take(self.model.reachable_states[:,a,:]))
         
         # Normalization
         prob_sum = np.sum(new_state_probabilities)
@@ -328,7 +326,7 @@ class Belief(np.ndarray):
                 Returns:
                         rand_s (int): A random state
         '''
-        rand_s = int(np.argmax(np.random.multinomial(n=1, pvals=self)))
+        rand_s = int(np.argmax(np.random.multinomial(n=1, pvals=self.values)))
         return rand_s
     
 
@@ -345,7 +343,7 @@ class Belief(np.ndarray):
                     
                     if state_label is not None:
                         s = self.model.state_labels.index(state_label) # type: ignore
-                        self._grid_values[x,y] = self[s]
+                        self._grid_values[x,y] = self._values[s]
 
         return self._grid_values
     
@@ -371,76 +369,57 @@ class Belief(np.ndarray):
         plt.show()
 
 
-class SolverHistory(MDP_SolverHistory):
+class BeliefSet:
     '''
-    Class to represent the history of a solver for a POMDP solver.
-    It has mainly the purpose to have visualizations for the solution, belief set and the whole solving history.
-    The visualizations available are:
-        - Belief set plot
-        - Solution plot
-        - Video of value function and belief set evolution over training.
-
+    Class to represent a set of beliefs with regard to a POMDP model.
+    It has the purpose to store the beliefs in numpy array format and be able to conver it to a list of Belief class objects.
+    This class also provides the option to display the beliefs when operating on a 2 or 3d space with the plot() function.
+    
     ...
 
     Attributes
     ----------
     model: pomdp.Model
-        The model the solver has solved
-    initial_value_function: ValueFunction
-        The initial value function the solver will use to start the solving process.
-    initial_belief: Belief
-        The initial belief  the solver will use to start the solving process.
-    params:
-        The solver parameters that have been used, to show better information on the visualizations.
+        The model on which the beliefs apply.
+    beliefs: list[Belief] | np.ndarray
+        The actual set of beliefs.
 
     Methods
     -------
-    plot_belief_set(size:int=15):
-        Once solve() has been run, the explored beliefs can be plot for 2- and 3- state models.
-    plot_solution(size:int=5, plot_belief:bool=True):
-        Once solve() has been run, the value function solution can be plot for 2- and 3- state models.
-    save_history_video(custom_name:Union[str,None]=None, compare_with:Union[list, ValueFunction, Self]=[]):
-        Once the solve has been run, we can save a video of the history of the solving process.
+    plot(size=15):
+        A function to plot the beliefs in belief space when in 2- or 3-states models.
     '''
-    def __init__(self,
-                 model:Model,
-                 initial_value_function:ValueFunction,
-                 initial_belief_set:list[Belief],
-                 gamma:float,
-                 eps:float,
-                 expand_function:str
-                 ):
-        super().__init__(model,
-                         initial_value_function,
-                         gamma,
-                         eps)
-        self.belief_sets = [initial_belief_set]
-        self.expand_function = expand_function
+    def __init__(self, model:Model, beliefs:Union[list[Belief],np.ndarray]) -> None:
+        self.model = model
+
+        self._belief_list = None
+        self._belief_array = None
+
+        if isinstance(beliefs, np.ndarray):
+            assert beliefs.shape[1] == model.state_count, f"Belief array provided doesnt have the right shape (expected (-,{model.state_count}), received {beliefs.shape})"
+            self._belief_array = beliefs
+        else:
+            assert all(len(b.values) == model.state_count for b in beliefs), f"Beliefs in belief list provided dont all have shape ({model.state_count},)"
+            self._belief_list = beliefs
 
 
     @property
-    def explored_beliefs(self) -> list[Belief]:
-        '''
-        The final set of beliefs exploredduring the solving
-        '''
-        return self.belief_sets[-1]
+    def belief_array(self) -> np.ndarray:
+        if self._belief_array is None:
+            self._belief_array = np.array([b.values for b in self._belief_list])
+        return self._belief_array
     
 
-    def add(self, value_function:ValueFunction, belief_set:list[Belief]) -> None:
-        '''
-        Function to add a step in the simulation history by recording the value function and the explored belief set.
-
-                Parameters:
-                        value_function (ValueFunction): The value function resulting after a step of the solving process.
-                        belief_set (list[Belief]): The belief set used for the Update step of the solving process.
-        '''
-        self.value_functions.append(value_function)
-        self.belief_sets.append(belief_set)
+    @property
+    def belief_list(self) -> list[Belief]:
+        if self._belief_list is None:
+            self._belief_list = [Belief(self.model, belief_vector) for belief_vector in self._belief_array]
+        return self._belief_list
     
-
-    def plot_belief_set(self, size:int=15):
+    
+    def plot(self, size:int=15):
         '''
-        Function to plot the last belief set that was generated by the solve function.
+        Function to plot the beliefs in the belief set.
         Note: Only works for 2-state and 3-state believes.
 
                 Parameters:
@@ -449,13 +428,13 @@ class SolverHistory(MDP_SolverHistory):
         assert self.model.state_count in [2,3], "Can't plot for models with state count other than 2 or 3"
         
         if self.model.state_count == 2:
-            self._plot_belief_set_2D(size)
+            self._plot_2D(size)
         elif self.model.state_count == 3:
-            self._plot_belief_set_3D(size)
+            self._plot_3D(size)
 
 
-    def _plot_belief_set_2D(self, size=15):
-        beliefs_x = np.array(self.explored_beliefs)[:,1]
+    def _plot_2D(self, size=15):
+        beliefs_x = self.belief_array[:,1]
 
         plt.figure(figsize=(size, max([int(size/7),1])))
         plt.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c=list(range(beliefs_x.shape[0])), cmap='Blues')
@@ -472,7 +451,7 @@ class SolverHistory(MDP_SolverHistory):
         plt.show()
 
 
-    def _plot_belief_set_3D(self, size=15):
+    def _plot_3D(self, size=15):
         # Function to project points to a simplex triangle
         def projectSimplex(points):
             """ 
@@ -537,18 +516,96 @@ class SolverHistory(MDP_SolverHistory):
             return fig
 
         # Actual plot
-        belief_set = self.explored_beliefs
-
         fig = plt.figure(figsize=(size,size))
 
         cmap = cm.get_cmap('Blues')
-        norm = colors.Normalize(vmin=0, vmax=len(belief_set))
-        c = range(len(belief_set))
+        norm = colors.Normalize(vmin=0, vmax=self.belief_array.shape[0])
+        c = range(self.belief_array.shape[0])
         # Do scatter plot
-        fig = plotSimplex(np.array(belief_set), fig=fig, vertexlabels=self.model.state_labels, s=size, c=c,                      
-                        cmap=cmap, norm=norm)
+        fig = plotSimplex(self.belief_array, fig=fig, vertexlabels=self.model.state_labels, s=size, c=c, cmap=cmap, norm=norm)
 
         plt.show()
+
+
+class SolverHistory(MDP_SolverHistory):
+    '''
+    Class to represent the history of a solver for a POMDP solver.
+    It has mainly the purpose to have visualizations for the solution, belief set and the whole solving history.
+    The visualizations available are:
+        - Belief set plot
+        - Solution plot
+        - Video of value function and belief set evolution over training.
+
+    ...
+
+    Attributes
+    ----------
+    model: pomdp.Model
+        The model the solver has solved
+    initial_value_function: ValueFunction
+        The initial value function the solver will use to start the solving process.
+    initial_belief_set: BeliefSet
+        The initial belief set the solver will use to start the solving process.
+    gamma: float
+        The gamma parameter used by the solver (learning rate).
+    eps: float
+        The epsilon parameter used by the solver (covergence bound).
+    expand_function: str
+        The expand (exploration) function used by the solver.
+
+    Methods
+    -------
+    plot_belief_set(size:int=15):
+        Once solve() has been run, the explored beliefs can be plot for 2- and 3- state models.
+    plot_solution(size:int=5, plot_belief:bool=True):
+        Once solve() has been run, the value function solution can be plot for 2- and 3- state models.
+    save_history_video(custom_name:Union[str,None]=None, compare_with:Union[list, ValueFunction, Self]=[]):
+        Once the solve has been run, we can save a video of the history of the solving process.
+    '''
+    def __init__(self,
+                 model:Model,
+                 initial_value_function:ValueFunction,
+                 initial_belief_set:BeliefSet,
+                 gamma:float,
+                 eps:float,
+                 expand_function:str
+                 ):
+        super().__init__(model,
+                         initial_value_function,
+                         gamma,
+                         eps)
+        self.belief_sets = [initial_belief_set]
+        self.expand_function = expand_function
+
+
+    @property
+    def explored_beliefs(self) -> BeliefSet:
+        '''
+        The final set of beliefs explored during the solving.
+        '''
+        return self.belief_sets[-1]
+    
+
+    def add(self, value_function:ValueFunction, belief_set:list[Belief]) -> None:
+        '''
+        Function to add a step in the simulation history by recording the value function and the explored belief set.
+
+                Parameters:
+                        value_function (ValueFunction): The value function resulting after a step of the solving process.
+                        belief_set (list[Belief]): The belief set used for the Update step of the solving process.
+        '''
+        self.value_functions.append(value_function)
+        self.belief_sets.append(belief_set)
+
+
+    def plot_belief_set(self, size:int=15):
+        '''
+        Function to plot the last belief set explored during the solving process.
+
+                Parameters:
+                        size (int): The scale of the plot
+        '''
+        self.explored_beliefs.plot(size=size)
 
 
     def plot_solution(self, size:int=5, plot_belief:bool=True):
@@ -608,7 +665,7 @@ class SolverHistory(MDP_SolverHistory):
         # Colors and lines
         line_types = ['-', '--', '-.', ':']
 
-        proxy = [Rectangle((0,0),1,1,fc = COLOR_LIST[a]['id']) for a in range(self.model.action_count)]
+        proxy = [Rectangle((0,0),1,1,fc = COLOR_LIST[a]['id']) for a in self.model.actions]
 
         # Solver list
         if isinstance(compare_with, ValueFunction) or isinstance(compare_with, MDP_SolverHistory):
@@ -670,7 +727,7 @@ class SolverHistory(MDP_SolverHistory):
                 plot_on_ax(history, frame_i, ax1, line_type)
 
             # Belief plotting
-            beliefs_x = np.array(self.belief_sets[frame_i])[:,1]
+            beliefs_x = self.belief_sets[frame_i].belief_array[:,1]
             ax2.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
             ax2.get_yaxis().set_visible(False)
             ax2.axhline(0, color='black')
@@ -753,7 +810,7 @@ class PBVI_Solver(Solver):
         self.expand_function_params = expand_function_params
 
 
-    def backup(self, model:Model, belief_set:list[Belief], value_function:ValueFunction) -> ValueFunction:
+    def backup(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction) -> ValueFunction:
         '''
         This function has purpose to update the set of alpha vectors. It does so in 3 steps:
         1. It creates projections from each alpha vector for each possible action and each possible observation
@@ -765,7 +822,7 @@ class PBVI_Solver(Solver):
 
                 Parameters:
                         model (POMDP): The model on which to run the backup method on.
-                        belief_set (list[Belief]): The belief set to use to generate the new alpha vectors with.
+                        belief_set (BeliefSet): The belief set to use to generate the new alpha vectors with.
                         alpha_set (ValueFunction): The alpha vectors to generate the new set from.
                         gamma (float): The discount factor used for training, default: 0.9.
 
@@ -776,27 +833,22 @@ class PBVI_Solver(Solver):
         # Step 1
         vector_array = value_function.alpha_vector_array
         vectors_array_reachable_states = vector_array[np.arange(vector_array.shape[0])[:,None,None,None], model.reachable_states[None,:,:,:]]
-        # vectors_array_reachable_states = vector_array.take(model.reachable_states, axis=1)
+        
         gamma_a_o_t = self.gamma * np.einsum('saor,vsar->aovs', model.reachable_transitional_observation_table, vectors_array_reachable_states)
 
         # Step 2
-        belief_set = np.array(belief_set)
-        best_alpha_ind = np.argmax(np.tensordot(belief_set, gamma_a_o_t, (1,3)), axis=3)
+        belief_array = belief_set.belief_array
+        best_alpha_ind = np.argmax(np.tensordot(belief_array, gamma_a_o_t, (1,3)), axis=3)
 
         best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]]
-        # best_alphas_per_o = np.zeros((*best_alpha_ind.shape, model.state_count))
-        # it = np.nditer(best_alpha_ind, flags=['multi_index'], op_flags=['readonly'])
-        # for x in it:
-        #     (b,a,o) = it.multi_index
-        #     best_alphas_per_o[b,a,o,:] = gamma_a_o_t[a,o,x,:]
 
         alpha_a = np.sum(best_alphas_per_o, axis=2)
         alpha_a += model.expected_rewards_table.T
 
         # Step 3
-        alpha_vectors = np.zeros(belief_set.shape)
+        alpha_vectors = np.zeros(belief_array.shape)
         best_actions = []
-        for i, b in enumerate(belief_set):
+        for i, b in enumerate(belief_array):
             best_ind = np.argmax(np.dot(alpha_a[i,:,:], b))
             alpha_vectors[i,:] = alpha_a[i, best_ind,:]
             best_actions.append(best_ind)
@@ -809,7 +861,7 @@ class PBVI_Solver(Solver):
         return new_value_function
     
     
-    def expand_ssra(self, model:Model, belief_set:list[Belief]) -> list[Belief]:
+    def expand_ssra(self, model:Model, belief_set:BeliefSet) -> BeliefSet:
         '''
         Stochastic Simulation with Random Action.
         Simulates running a single-step forward from the beliefs in the "belief_set".
@@ -818,26 +870,30 @@ class PBVI_Solver(Solver):
 
                 Parameters:
                         model (POMDP): the POMDP model on which to expand the belief set on.
-                        belief_set (list[Belief]): list of beliefs to expand on.
+                        belief_set (BeliefSet): list of beliefs to expand on.
 
                 Returns:
-                        belief_set_new (list[Belief]): union of the belief_set and the expansions of the beliefs in the belief_set
+                        belief_set_new (BeliefSet): union of the belief_set and the expansions of the beliefs in the belief_set
         '''
-        belief_set_new = copy.deepcopy(belief_set)
-        
-        for b in belief_set:
+        old_shape = belief_set.belief_array.shape
+
+        new_belief_array = np.empty((old_shape[0] * 2, old_shape[1]))
+        new_belief_array[:old_shape[0]] = belief_set.belief_array
+
+        for i, belief_vector in enumerate(belief_set.belief_array):
+            b = Belief(model, belief_vector)
             s = b.random_state()
             a = random.choice(model.actions)
             s_p = model.transition(s, a)
             o = model.observe(s_p, a)
             b_new = b.update(a, o)
             
-            belief_set_new.append(b_new)
+            new_belief_array[i+old_shape[0]] = b_new.values
             
-        return belief_set_new
+        return BeliefSet(model, new_belief_array)
     
 
-    def expand_ssga(self, model:Model, belief_set:list[Belief], value_function:ValueFunction, eps:float=0.1) -> list[Belief]:
+    def expand_ssga(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, eps:float=0.1) -> BeliefSet:
         '''
         Stochastic Simulation with Greedy Action.
         Simulates running a single-step forward from the beliefs in the "belief_set".
@@ -848,34 +904,38 @@ class PBVI_Solver(Solver):
 
                 Parameters:
                         model (POMDP): the POMDP model on which to expand the belief set on.
-                        belief_set (list[Belief]): list of beliefs to expand on.
+                        belief_set (BeliefSet): list of beliefs to expand on.
                         value_function (ValueFunction): Used to find the best action knowing the belief.
                         eps (float): Parameter tuning how often we take a greedy approach and how often we move randomly.
 
                 Returns:
-                        belief_set_new (list[Belief]): union of the belief_set and the expansions of the beliefs in the belief_set
+                        belief_set_new (BeliefSet): union of the belief_set and the expansions of the beliefs in the belief_set
         '''
-        belief_set_new = copy.deepcopy(belief_set)
-        
-        for b in belief_set:
+        old_shape = belief_set.belief_array.shape
+
+        new_belief_array = np.empty((old_shape[0] * 2, old_shape[1]))
+        new_belief_array[:old_shape[0]] = belief_set.belief_array
+                
+        for i, belief_vector in enumerate(belief_set.belief_array):
+            b = Belief(model, belief_vector)
             s = b.random_state()
             
             if random.random() < eps:
                 a = random.choice(model.actions)
             else:
-                best_alpha_index = np.argmax(np.dot(value_function.alpha_vector_array, b))
+                best_alpha_index = np.argmax(np.dot(value_function.alpha_vector_array, b.values))
                 a = value_function.actions[best_alpha_index]
             
             s_p = model.transition(s, a)
             o = model.observe(s_p, a)
             b_new = b.update(a, o)
             
-            belief_set_new.append(b_new)
+            new_belief_array[i+old_shape[0]] = b_new.values
             
-        return belief_set_new
+        return BeliefSet(model, new_belief_array)
     
 
-    def expand_ssea(self, model:Model, belief_set:list[Belief]) -> list[Belief]:
+    def expand_ssea(self, model:Model, belief_set:BeliefSet) -> BeliefSet:
         '''
         Stochastic Simulation with Exploratory Action.
         Simulates running steps forward for each possible action knowing we are a state s, chosen randomly with according to the belief probability.
@@ -885,14 +945,18 @@ class PBVI_Solver(Solver):
 
                 Parameters:
                         model (POMDP): the POMDP model on which to expand the belief set on.
-                        belief_set (list[Belief]): list of beliefs to expand on.
+                        belief_set (BeliefSet): list of beliefs to expand on.
 
                 Returns:
-                        belief_set_new (list[Belief]): union of the belief_set and the expansions of the beliefs in the belief_set
+                        belief_set_new (BeliefSet): union of the belief_set and the expansions of the beliefs in the belief_set
         '''
-        belief_set_new = copy.deepcopy(belief_set)
+        old_shape = belief_set.belief_array.shape
+
+        new_belief_array = np.empty((old_shape[0] * 2, old_shape[1]))
+        new_belief_array[:old_shape[0]] = belief_set.belief_array
         
-        for b in belief_set:
+        for i, belief_vector in enumerate(belief_set.belief_array):
+            b = Belief(model, belief_vector)
             best_b = None
             max_dist = -math.inf
             
@@ -903,34 +967,34 @@ class PBVI_Solver(Solver):
                 b_a = b.update(a, o)
                 
                 # Check distance with other beliefs
-                min_dist = min(float(np.linalg.norm(b_p - b_a)) for b_p in belief_set_new)
+                min_dist = min(float(np.linalg.norm(b_p - b_a.values)) for b_p in new_belief_array)
                 if min_dist > max_dist:
                     max_dist = min_dist
                     best_b = b_a
             
             assert best_b is not None
-            belief_set_new.append(best_b)
+            new_belief_array[i+old_shape[0]] = best_b.values
         
-        return belief_set_new
+        return BeliefSet(model, new_belief_array)
     
 
-    def expand_ger(self, model:Model, belief_set:list[Belief], value_function:ValueFunction) -> list[Belief]:
+    def expand_ger(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction) -> BeliefSet:
         '''
         Greedy Error Reduction
 
                 Parameters:
                         model (POMDP): the POMDP model on which to expand the belief set on.
-                        belief_set (list[Belief]): list of beliefs to expand on.
+                        belief_set (BeliefSet): list of beliefs to expand on.
                         value_function (ValueFunction): Used to find the best action knowing the belief.
 
                 Returns:
-                        belief_set_new (list[Belief]): union of the belief_set and the expansions of the beliefs in the belief_set
+                        belief_set_new (BeliefSet): union of the belief_set and the expansions of the beliefs in the belief_set
         '''
         print('Not implemented')
         return []
 
 
-    def expand(self, model:Model, belief_set:list[Belief], **function_specific_parameters) -> list[Belief]:
+    def expand(self, model:Model, belief_set:BeliefSet, **function_specific_parameters) -> BeliefSet:
         '''
         Central method to call one of the functions for a particular expansion strategy:
             - Stochastic Simulation with Random Action (ssra)
@@ -940,11 +1004,11 @@ class PBVI_Solver(Solver):
                 
                 Parameters:
                         model (pomdp.Model): The model on which to run the belief expansion on.
-                        belief_set (list[Belief]): The set of beliefs to expand.
+                        belief_set (BeliefSet): The set of beliefs to expand.
                         function_specific_parameters: Potential additional parameters necessary for the specific expand function.
 
                 Returns:
-                        belief_set_new (list[Belief]): The belief set the expansion function returns. 
+                        belief_set_new (BeliefSet): The belief set the expansion function returns. 
         '''
         if self.expand_function in 'expand_ssra':
             return self.expand_ssra(model=model, belief_set=belief_set)
@@ -967,7 +1031,7 @@ class PBVI_Solver(Solver):
               model:Model,
               expansions:int,
               horizon:int,
-              initial_belief:Union[list[Belief], Belief, None]=None,
+              initial_belief:Union[BeliefSet, Belief, None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
               expand_prune_level:Union[int,None]=None,
               print_progress:bool=True
@@ -988,7 +1052,7 @@ class PBVI_Solver(Solver):
                         model (pomdp.Model) - The model to solve.
                         expansions (int) - How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
                         horizon (int) - How many times the alpha vector set must be updated every time the belief set is expanded.
-                        initial_belief (list[Belief], Belief) - Optional: An initial list of beliefs to start with.
+                        initial_belief (BeliefSet, Belief) - Optional: An initial list of beliefs to start with.
                         initial_value_function (ValueFunction) - Optional: An initial value function to start the solving process with.
                         expand_prune_level (int) - Optional: Parameter to prune the value function further before the expand function.
                         print_progress (bool): Whether or not to print out the progress of the value iteration process. (Default: True)
@@ -997,17 +1061,17 @@ class PBVI_Solver(Solver):
                         value_function (ValueFunction): The alpha vectors approximating the value function.
         '''
 
-        # Initial belief
-        if initial_belief is None:
-            belief_set = [Belief(model)]
-        elif isinstance(initial_belief, list):
+        # Initial belief #TODO Modify this
+        if isinstance(initial_belief, BeliefSet):
             belief_set = initial_belief
+        elif isinstance(initial_belief, Belief):
+            belief_set = BeliefSet(model, [initial_belief])
         else:
-            belief_set = [Belief(model, np.array(initial_belief))]
+            belief_set = BeliefSet(model, [Belief(model)])
         
         # Initial value function
         if initial_value_function is None:
-            value_function = ValueFunction(model, [AlphaVector(model.expected_rewards_table[:,a], a) for a in model.actions])
+            value_function = ValueFunction(model, model.expected_rewards_table.T, model.actions)
         else:
             value_function = initial_value_function
 
@@ -1025,7 +1089,7 @@ class PBVI_Solver(Solver):
         # Loop
         for expansion_i in range(expansions) if not print_progress else trange(expansions, desc='Expansions'):
 
-            # 0: Prune value function at a higher level betwween expansions
+            # 0: Prune value function at a higher level between expansions
             if expand_prune_level is not None:
                 value_function = value_function.prune(expand_prune_level)
 
@@ -1042,7 +1106,7 @@ class PBVI_Solver(Solver):
                 solver_history.add(value_function, belief_set)
 
                 # convergence check
-                max_val_per_belief = np.max(np.matmul(np.array(belief_set), value_function.alpha_vector_array.T), axis=1)
+                max_val_per_belief = np.max(np.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
                 if old_max_val_per_belief is not None:
                     max_change = np.max(np.abs(max_val_per_belief - old_max_val_per_belief))
                     if max_change < max_allowed_change:
@@ -1230,7 +1294,7 @@ class Agent:
         '''
         assert self.value_function is not None, "No value function, training probably has to be run..."
 
-        best_vector = np.argmax(np.dot(self.value_function.alpha_vector_array, belief))
+        best_vector = np.argmax(np.dot(self.value_function.alpha_vector_array, belief.values))
         best_action = self.value_function.actions[best_vector]
 
         return best_action
