@@ -428,7 +428,7 @@ class Model:
         return loaded_model
 
 
-class AlphaVector(np.ndarray):
+class AlphaVector:
     '''
     A class to represent an Alpha Vector, a vector representing a plane in |S| dimension for POMDP models.
 
@@ -436,19 +436,20 @@ class AlphaVector(np.ndarray):
 
     Attributes
     ----------
-    input_array: 
+    values: np.ndarray
         The actual vector with the value for each state.
     action: int
         The action associated with the vector.
     '''
-    def __new__(cls, input_array, action:int):
-        obj = np.asarray(input_array).view(cls)
-        obj._action = action
-        return obj
+    def __init__(self, values:np.ndarray, action:int) -> None:
+        self._values = values
+        self._action = action
 
-    def __array_finalize__(self, obj):
-        if obj is None: return
-        self._action = getattr(obj, '_action', None)
+
+    @property
+    def values(self) -> np.ndarray:
+        return self._values
+
 
     @property
     def action(self) -> int:
@@ -511,7 +512,7 @@ class ValueFunction:
     @property
     def alpha_vector_array(self) -> np.ndarray:
         if self._vector_array is None:
-            self._vector_array = np.array(self._vector_list)
+            self._vector_array = np.array([v.values for v in self._vector_list])
             self._actions = [v.action for v in self._vector_list]
         return self._vector_array
     
@@ -561,10 +562,10 @@ class ValueFunction:
             return copy.deepcopy(self)
         
         # Level 1 pruning: Check for duplicates
-        L = {array.tobytes(): array for array in self.alpha_vector_list}
+        L = {alpha_vector.values.tobytes(): alpha_vector for alpha_vector in self.alpha_vector_list}
         pruned_alpha_set = ValueFunction(self.model, list(L.values()))
 
-        # Level 2 pruning: Check for absolute domination
+        # Level 2 pruning: Check for absolute domination # TODO check this
         if level >= 2:
             alpha_set = pruned_alpha_set
             pruned_alpha_set = ValueFunction(self.model)
@@ -576,7 +577,7 @@ class ValueFunction:
                 if not dominated:
                     pruned_alpha_set.append(alpha_vector)
 
-        # Level 3 pruning: LP to check for more complex domination
+        # Level 3 pruning: LP to check for more complex domination #TODO check this
         if level >= 3:
             alpha_set = pruned_alpha_set
             pruned_alpha_set = ValueFunction(self.model)
