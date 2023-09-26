@@ -9,11 +9,16 @@ from typing import Self, Tuple, Union
 
 import copy
 import json
-# import numpy as np
-import cupy as np
 import math
 import os
 import random
+
+# import numpy as np
+try:
+    import cupy as np
+except:
+    print('[Warning] Cupy could not be loaded: using numpy by default.')
+    import numpy as np
 
 from src.mdp import log
 from src.mdp import AlphaVector, ValueFunction
@@ -29,7 +34,7 @@ COLOR_LIST = [{
     'name': item.replace('tab:',''),
     'id': item,
     'hex': value,
-    'rgb': tuple(int(value.lstrip('#')[i:i + (len(value)-1) // 3], 16) for i in range(0, (len(value)-1), (len(value)-1) // 3))
+    'rgb': [int(value.lstrip('#')[i:i + (len(value)-1) // 3], 16) for i in range(0, (len(value)-1), (len(value)-1) // 3)]
     } for item, value in colors.TABLEAU_COLORS.items()] # type: ignore
 
 
@@ -211,7 +216,7 @@ class Model(MDP_Model):
                 Returns:
                         o (int): An observation
         '''
-        o = int(np.argmax(np.random.multinomial(n=1, pvals=self.observation_table[s_p, a, :])))
+        o = int(np.random.choice(a=self.observations, size=1, p=self.observation_table[s_p,a])[0])
         return o
     
 
@@ -326,7 +331,7 @@ class Belief:
                 Returns:
                         rand_s (int): A random state
         '''
-        rand_s = int(np.argmax(np.random.multinomial(n=1, pvals=self.values)))
+        rand_s = int(np.random.choice(a=self.model.states, size=1, p=self.values)[0])
         return rand_s
     
 
@@ -842,18 +847,19 @@ class PBVI_Solver(Solver):
 
         best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]]
 
-        alpha_a = np.sum(best_alphas_per_o, axis=2)
-        alpha_a += model.expected_rewards_table.T
+        alpha_a = model.expected_rewards_table.T + np.sum(best_alphas_per_o, axis=2)
 
-        # Step 3
+        # Step 3 # TODO potential improvement could be done here?
         alpha_vectors = np.zeros(belief_array.shape)
         best_actions = []
         for i, b in enumerate(belief_array):
-            best_ind = np.argmax(np.dot(alpha_a[i,:,:], b))
+            best_ind = int(np.argmax(np.dot(alpha_a[i,:,:], b)))
             alpha_vectors[i,:] = alpha_a[i, best_ind,:]
             best_actions.append(best_ind)
 
-        new_value_function = ValueFunction(model, alpha_vectors, best_actions)
+        all_vectors = np.concatenate((value_function.alpha_vector_array, alpha_vectors))
+        all_actions = value_function.actions + best_actions
+        new_value_function = ValueFunction(model, all_vectors, all_actions)
 
         # Pruning
         new_value_function = new_value_function.prune(level=1) # Just check for duplicates
@@ -1061,7 +1067,7 @@ class PBVI_Solver(Solver):
                         value_function (ValueFunction): The alpha vectors approximating the value function.
         '''
 
-        # Initial belief #TODO Modify this
+        # Initial belief
         if isinstance(initial_belief, BeliefSet):
             belief_set = initial_belief
         elif isinstance(initial_belief, Belief):
@@ -1117,6 +1123,104 @@ class PBVI_Solver(Solver):
         return value_function, solver_history
 
 
+class FSVI_Solver(PBVI_Solver):
+    def __init__(self, gamma:float=0.9, eps:float=0.001):
+        self.gamma = gamma
+        self.eps = eps
+
+
+    # TODO: Check if better to only collect beliefs and compute value function at once later
+    def MDPExplore(self, model:Model, b:Belief, s:int, mdp_policy:ValueFunction, depth:int, horizon:int) -> BeliefSet:
+        '''
+        TODO: Write description
+        '''
+        belief_list = []
+        if depth >= horizon:
+            log('Horizon reached before goal...')
+        elif s not in model.end_states:
+            # Choose action based on mdp value function
+            a_star = np.argmax(mdp_policy.alpha_vector_array[:,s])
+
+            # Pick a random next state (weighted by transition probabilities)
+            s_p = model.transition(s, a_star)
+
+            # Pick a random observation weighted by observation probabilities in state s_p and after having done action a_star
+            o = model.observe(s_p, a_star)
+
+            # Generate a new belief based on a_star and o
+            b_p = b.update(a_star, o)
+
+            # Recursive call to go closer to goal
+            b_set = self.MDPExplore(model, b_p, s_p, mdp_policy, depth+1, horizon)
+            belief_list.extend(b_set.belief_list)
+        
+        belief_list.append(b)
+        return BeliefSet(model, belief_list)
+
+
+    def solve(self,
+              model:Model,
+              expansions:int,
+              horizon:int,
+              mdp_policy:ValueFunction,
+              initial_belief:Belief|None=None,
+              initial_value_function:ValueFunction | None = None,
+              expand_prune_level: int | None = None, # TODO: Implement prune level config
+              print_progress: bool = True
+              ) -> tuple[ValueFunction, SolverHistory]:
+        '''
+        TODO: Write description
+        '''
+        # Initial belief
+        if isinstance(initial_belief, Belief):
+            b = initial_belief
+        else:
+            b = Belief(model)
+        
+        # Initial value function
+        if initial_value_function is None:
+            value_function = ValueFunction(model, model.expected_rewards_table.T, model.actions.tolist())
+        else:
+            value_function = initial_value_function
+
+        # Convergence check boundary
+        max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
+        old_max_val_per_belief = None
+
+        # History tracking
+        solver_history = SolverHistory(model=model,
+                                       initial_value_function=value_function,
+                                       initial_belief_set=BeliefSet(model, [b]),
+                                       expand_function='MDP',
+                                       gamma=self.gamma,
+                                       eps=self.eps)
+
+        for expansion_i in range(expansions) if not print_progress else trange(expansions, desc='Expansions'):
+
+            # Exploration
+            s0 = b.random_state()
+            belief_set = self.MDPExplore(model, b, s0, mdp_policy, 0, horizon)
+
+            # Backup (update of value function)
+            value_function = self.backup(model, belief_set, value_function)
+
+            # History tracking
+            solver_history.add(value_function, belief_set)
+
+            # convergence check
+            max_val_per_belief = np.max(np.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
+            if old_max_val_per_belief is not None:
+                max_change = np.max(np.abs(max_val_per_belief - old_max_val_per_belief))
+                if max_change < max_allowed_change:
+                    print('Converged early...')
+                    return value_function, solver_history
+            else:
+                print('skip')
+            old_max_val_per_belief = max_val_per_belief
+
+        return value_function, solver_history
+
+
 class SimulationHistory(MDP_SimulationHistory):
     '''
     Class to represent a list of rewards received during a Simulation.
@@ -1130,7 +1234,7 @@ class SimulationHistory(MDP_SimulationHistory):
     ...
 
     Attributes
-    ------------
+    ----------
     model: mdp.Model
         The model on which the simulation happened on.
     start_state: int

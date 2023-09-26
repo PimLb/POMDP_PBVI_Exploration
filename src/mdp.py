@@ -8,18 +8,23 @@ from typing import Self, Union, Tuple
 
 import copy
 import json
-# import numpy as np
-import cupy as np
 import os
 import pandas as pd
 import random
+
+# import numpy as np
+try:
+    import cupy as np
+except:
+    print('[Warning] Cupy could not be loaded: using numpy by default.')
+    import numpy as np
 
 
 COLOR_LIST = [{
     'name': item.replace('tab:',''),
     'id': item,
     'hex': value,
-    'rgb': tuple(int(value.lstrip('#')[i:i + (len(value)-1) // 3], 16) for i in range(0, (len(value)-1), (len(value)-1) // 3))
+    'rgb': [int(value.lstrip('#')[i:i + (len(value)-1) // 3], 16) for i in range(0, (len(value)-1), (len(value)-1) // 3)]
     } for item, value in colors.TABLEAU_COLORS.items()] # type: ignore
 
 
@@ -301,8 +306,7 @@ class Model:
                 Returns:
                         s_p (int): The posterior state
         '''
-        ri = int(np.argmax(np.random.multinomial(n=1, pvals=self.reachable_probabilities[s,a,:])))
-        s_p = int(self.reachable_states[s,a,ri])
+        s_p = int(np.random.choice(a=self.reachable_states[s,a], size=1, p=self.reachable_probabilities[s,a])[0])
         return s_p
     
 
@@ -518,7 +522,7 @@ class ValueFunction:
     
 
     @property
-    def actions(self) -> int:
+    def actions(self) -> list[int]:
         if self._actions is None:
             self._vector_array = np.array(self._vector_list)
             self._actions = [v.action for v in self._vector_list]
@@ -856,8 +860,8 @@ class ValueFunction:
 
         dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
 
-        value_table = np.full(dimensions, np.nan)
-        best_action_table = np.full([*dimensions,3],0)
+        value_table = np.empty(dimensions)
+        best_action_table = np.zeros([*dimensions,3],dtype=int)
 
         for x in range(value_table.shape[0]):
             for y in range(value_table.shape[1]):
@@ -867,9 +871,15 @@ class ValueFunction:
 
                     best_vector = np.argmax(self.alpha_vector_array[:,state_id])
                     value_table[x,y] = self.alpha_vector_array[best_vector, state_id]
-                    best_action_table[x,y,:] = COLOR_LIST[self.actions[best_vector]]['rgb']
+                    best_action_table[x,y,:] = np.array(COLOR_LIST[self.actions[best_vector].item()]['rgb'])
 
         fig, (ax1,ax2) = plt.subplots(1,2, figsize=(size*2, size), width_ratios=(0.55,0.45))
+
+        try:
+            value_table = np.asnumpy(value_table)
+            best_action_table = np.asnumpy(best_action_table)
+        except:
+            pass
 
         ax1.set_title('Value function')
         ax1_plot = ax1.imshow(value_table)
@@ -879,7 +889,7 @@ class ValueFunction:
 
         ax2.set_title('Action policy')
         ax2.imshow(best_action_table)
-        p = [ patches.Patch(color=COLOR_LIST[i]['id'], label=self.model.action_labels[i]) for i in self.model.actions]
+        p = [ patches.Patch(color=COLOR_LIST[i]['id'], label=self.model.action_labels[i].item()) for i in self.model.actions]
         ax2.legend(handles=p, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
         ax2.set_xticks([i for i in range(dimensions[1])])
         ax2.set_yticks([i for i in range(dimensions[0])])
@@ -998,7 +1008,7 @@ class VI_Solver(Solver):
             V = ValueFunction(model, model.expected_rewards_table.T, model.actions)
         else:
             V = copy.deepcopy(initial_value_function)
-        V_opt = V.alpha_vector_list[0]
+        V_opt = V.alpha_vector_array[0]
 
         solve_history = SolverHistory(model, V, self.gamma, self.eps)
 
@@ -1008,7 +1018,7 @@ class VI_Solver(Solver):
             old_V_opt = V_opt
             
             # Computing the new alpha vectors
-            alpha_vectors = model.expected_rewards_table + (self.gamma * np.einsum('sar,sar->sa', model.reachable_probabilities, V_opt.take(model.reachable_states)))
+            alpha_vectors = model.expected_rewards_table.T + (self.gamma * np.einsum('sar,sar->as', model.reachable_probabilities, V_opt[model.reachable_states]))
             V = ValueFunction(model, alpha_vectors, model.actions)
 
             V_opt = np.max(V.alpha_vector_array, axis=0)
@@ -1306,7 +1316,7 @@ class Simulation:
                         state (int): The state the agent will start in.
         '''
         if start_state < 0:
-            self.agent_state = int(np.argmax(np.random.multinomial(n=1, pvals=self.model.start_probabilities)))
+            self.agent_state = int(np.random.choice(a=self.model.states, size=1, p=self.model.start_probabilities)[0])
         else:
             self.agent_state = start_state
         
