@@ -13,12 +13,13 @@ import math
 import os
 import random
 
-# import numpy as np
+import numpy as np
+gpu_support = False
 try:
-    import cupy as np
+    import cupy as cp
+    gpu_support = True
 except:
-    print('[Warning] Cupy could not be loaded: using numpy by default.')
-    import numpy as np
+    print('[Warning] Cupy could not be loaded: GPU support is not available.')
 
 from src.mdp import log
 from src.mdp import AlphaVector, ValueFunction
@@ -216,44 +217,9 @@ class Model(MDP_Model):
                 Returns:
                         o (int): An observation
         '''
-        o = int(np.random.choice(a=self.observations, size=1, p=self.observation_table[s_p,a])[0])
+        xp = cp if self.is_on_gpu else np
+        o = int(xp.random.choice(a=self.observations, size=1, p=self.observation_table[s_p,a])[0])
         return o
-    
-
-# TODO: Update this
-    # def to_dict(self) -> dict:
-    #     '''
-    #     Function to return a python dictionary with all the information of the model.
-
-    #             Returns:
-    #                     model_dict (dict): The representation of the model in a dictionary format.
-    #     '''
-    #     model_dict = super().to_dict()
-    #     model_dict['observations'] = self.observation_labels
-    #     model_dict['observation_table'] = self.observation_table.tolist()
-
-    #     return model_dict
-    
-    
-    # @classmethod
-    # def load_from_json(cls, file:str) -> Self:
-    #     '''
-    #     Function to load a POMDP model from a json file. The json structure must contain the same items as in the constructor of this class.
-
-    #             Parameters:
-    #                     file (str): The file and path of the model to be loaded.
-    #             Returns:
-    #                     loaded_model (pomdp.Model): An instance of the loaded model.
-    #     '''
-    #     with open(file, 'r') as openfile:
-    #         json_model = json.load(openfile)
-
-    #     loaded_model = Model(**json_model)
-
-    #     if 'grid_states' in json_model:
-    #         loaded_model.convert_to_grid(json_model['grid_states'])
-
-    #     return loaded_model
 
 
 class Belief:
@@ -288,8 +254,13 @@ class Belief:
 
         if values is not None:
             assert values.shape[0] == model.state_count, "Belief must contain be of dimension |S|"
-            prob_sum = np.round(np.sum(values), decimals=3)
-            assert prob_sum == 1, f"States probabilities in belief must sum to 1 (found: {prob_sum})"
+
+            xp = np if not gpu_support else cp.get_array_module(values)
+
+            prob_sum = xp.sum(values)
+            rounded_sum = xp.round(prob_sum, decimals=3)
+            assert rounded_sum == 1.0, f"States probabilities in belief must sum to 1 (found: {prob_sum}; rounded {rounded_sum})"
+
             self._values = values
         else:
             self._values = model.start_probabilities
@@ -314,13 +285,19 @@ class Belief:
                         new_belief (Belief): An updated belief
 
         '''
-        new_state_probabilities = np.einsum('sr,sr->s', self.model.reachable_transitional_observation_table[:,a,o,:], self.values.take(self.model.reachable_states[:,a,:]))
+        xp = np if not gpu_support else cp.get_array_module(self._values)
+
+        new_state_probabilities = xp.sum(self.model.reachable_transitional_observation_table[:,a,o,:] * self.values[self.model.reachable_states[:,a,:]], axis=1)
         
         # Normalization
-        prob_sum = np.sum(new_state_probabilities)
-        if prob_sum != 1.0:
-            new_state_probabilities /= prob_sum
-        new_belief = Belief(self.model, new_state_probabilities)
+        new_state_probabilities /= xp.sum(new_state_probabilities)
+
+        # Generation of new belief from new state probabilities
+        new_belief = super().__new__(self.__class__)
+        new_belief.model = self.model
+        new_belief._values = new_state_probabilities
+        new_belief._grid_values = None
+
         return new_belief
     
 
@@ -331,13 +308,15 @@ class Belief:
                 Returns:
                         rand_s (int): A random state
         '''
-        rand_s = int(np.random.choice(a=self.model.states, size=1, p=self.values)[0])
+        xp = np if not gpu_support else cp.get_array_module(self._values)
+
+        rand_s = int(xp.random.choice(a=self.model.states, size=1, p=self._values)[0])
         return rand_s
     
 
     @property
-    def grid_values(self) -> np.ndarray:
-        if self._grid_values is None:
+    def grid_values(self) -> np.ndarray: # TODO improve grid values computation
+        if self._grid_values is None: # TODO make it work for potential gpu array
             dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
 
             self._grid_values = np.zeros(dimensions)
@@ -400,18 +379,31 @@ class BeliefSet:
         self._belief_list = None
         self._belief_array = None
 
-        if isinstance(beliefs, np.ndarray):
-            assert beliefs.shape[1] == model.state_count, f"Belief array provided doesnt have the right shape (expected (-,{model.state_count}), received {beliefs.shape})"
-            self._belief_array = beliefs
-        else:
+        self.is_on_gpu = False
+
+        if isinstance(beliefs, list):
             assert all(len(b.values) == model.state_count for b in beliefs), f"Beliefs in belief list provided dont all have shape ({model.state_count},)"
             self._belief_list = beliefs
+
+            # Check if on gpu and make sure all beliefs are also on the gpu
+            if (len(beliefs) > 0) and gpu_support and cp.get_array_module(beliefs[0].values) == cp:
+                assert all(cp.get_array_module(b.values) == cp for b in beliefs), "Either all or none of the alpha vectors should be on the GPU, not just some."
+                self.is_on_gpu = True
+        else:
+            assert beliefs.shape[1] == model.state_count, f"Belief array provided doesnt have the right shape (expected (-,{model.state_count}), received {beliefs.shape})"
+            self._belief_array = beliefs
+
+            # Check if array is on gpu
+            if gpu_support and cp.get_array_module(beliefs) == cp:
+                self.is_on_gpu = True
 
 
     @property
     def belief_array(self) -> np.ndarray:
+        xp = cp if (gpu_support and self.is_on_gpu) else np
+
         if self._belief_array is None:
-            self._belief_array = np.array([b.values for b in self._belief_list])
+            self._belief_array = xp.array([b.values for b in self._belief_list])
         return self._belief_array
     
 
@@ -420,6 +412,51 @@ class BeliefSet:
         if self._belief_list is None:
             self._belief_list = [Belief(self.model, belief_vector) for belief_vector in self._belief_array]
         return self._belief_list
+    
+
+    def to_gpu(self) -> Self:
+        '''
+        Function returning an equivalent belief set object with the array of values stored on GPU instead of CPU.
+
+                Returns:
+                        gpu_belief_set (BeliefSet): A new belief set with array on GPU.
+        '''
+        assert gpu_support, "GPU support is not enabled, unable to execute this function"
+
+        gpu_model = self.model.gpu_model
+
+        gpu_belief_set = None
+        if self._belief_array is not None:
+            gpu_belief_array = cp.array(self._belief_array)
+            gpu_belief_set = BeliefSet(gpu_model, gpu_belief_array)
+        else:
+            gpu_belief_list = [Belief(gpu_model, cp.array(b.values)) for b in self._belief_list]
+            gpu_belief_set = BeliefSet(gpu_model, gpu_belief_list)
+
+        return gpu_belief_set
+    
+
+    def to_cpu(self) -> Self:
+        '''
+        Function returning an equivalent belief set object with the array of values stored on CPU instead of GPU.
+
+                Returns:
+                        cpu_belief_set (BeliefSet): A new belief set with array on CPU.
+        '''
+        assert gpu_support, "GPU support is not enabled, unable to execute this function"
+
+        cpu_model = self.model.cpu_model
+
+        cpu_belief_set = None
+        if self._belief_array is not None:
+            cpu_belief_array = cp.asnumpy(self._belief_array)
+            cpu_belief_set = BeliefSet(cpu_model, cpu_belief_array)
+        
+        else:
+            cpu_belief_list = [Belief(cpu_model, cp.asnumpy(b.values)) for b in self._belief_list]
+            cpu_belief_set = BeliefSet(cpu_model, cpu_belief_list)
+
+        return cpu_belief_set
     
     
     def plot(self, size:int=15):
@@ -431,7 +468,14 @@ class BeliefSet:
                         size (int): The figure size and general scaling factor
         '''
         assert self.model.state_count in [2,3], "Can't plot for models with state count other than 2 or 3"
-        
+
+        # If on GPU, convert to CPU and plot that one
+        if self.is_on_gpu:
+            print('[Warning] Value function on GPU, converting to numpy before plotting...')
+            cpu_belief_set = self.to_cpu()
+            cpu_belief_set.plot(size)
+            return
+
         if self.model.state_count == 2:
             self._plot_2D(size)
         elif self.model.state_count == 3:
@@ -630,7 +674,7 @@ class SolverHistory(MDP_SolverHistory):
                            compare_with:Union[list, ValueFunction, MDP_SolverHistory]=[],
                            graph_names:list[str]=[],
                            fps:int=10
-                           ) -> None:
+                           ) -> None: # TODO check support with cupy arrays
         '''
         Function to generate a video of the training history. Another solved solver or list of solvers can be put in the 'compare_with' parameter.
         These other solver's value function will be overlapped with the 1st value function.
@@ -645,7 +689,7 @@ class SolverHistory(MDP_SolverHistory):
                         graph_names (list[str]): Optional, names of the graphs for the legend of which graph is being plot.
                         fps (int): How many frames per second should the saved video have. (Default: 10)
         '''
-        assert self.model.state_count in [2,3], "Can't plot for models with state count other than 2 or 3"
+        assert self.model.state_count in [2,3], "Can't plot for models with state count other than 2 or 3" # TODO Make support for gird videos
         if self.model.state_count == 2:
             self._save_history_video_2D(custom_name, compare_with, copy.copy(graph_names), fps)
         elif self.model.state_count == 3:
@@ -834,31 +878,34 @@ class PBVI_Solver(Solver):
                 Returns:
                         new_alpha_set (ValueFunction): A list of updated alpha vectors.
         '''
-        
+        # Get numpy corresponding to the arrays
+        xp = np if not gpu_support else cp.get_array_module(value_function.alpha_vector_array)
+
         # Step 1
         vector_array = value_function.alpha_vector_array
-        vectors_array_reachable_states = vector_array[np.arange(vector_array.shape[0])[:,None,None,None], model.reachable_states[None,:,:,:]]
+        vectors_array_reachable_states = vector_array[xp.arange(vector_array.shape[0])[:,None,None,None], model.reachable_states[None,:,:,:]]
         
-        gamma_a_o_t = self.gamma * np.einsum('saor,vsar->aovs', model.reachable_transitional_observation_table, vectors_array_reachable_states)
+        gamma_a_o_t = self.gamma * xp.einsum('saor,vsar->aovs', model.reachable_transitional_observation_table, vectors_array_reachable_states)
 
         # Step 2
         belief_array = belief_set.belief_array
-        best_alpha_ind = np.argmax(np.tensordot(belief_array, gamma_a_o_t, (1,3)), axis=3)
+        best_alpha_ind = xp.argmax(xp.tensordot(belief_array, gamma_a_o_t, (1,3)), axis=3)
 
         best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]]
 
-        alpha_a = model.expected_rewards_table.T + np.sum(best_alphas_per_o, axis=2)
+        alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2)
 
         # Step 3 # TODO potential improvement could be done here?
-        alpha_vectors = np.zeros(belief_array.shape)
+        alpha_vectors = xp.zeros(belief_array.shape)
         best_actions = []
         for i, b in enumerate(belief_array):
-            best_ind = int(np.argmax(np.dot(alpha_a[i,:,:], b)))
+            best_ind = int(xp.argmax(xp.dot(alpha_a[i,:,:], b)))
             alpha_vectors[i,:] = alpha_a[i, best_ind,:]
             best_actions.append(best_ind)
 
-        all_vectors = np.concatenate((value_function.alpha_vector_array, alpha_vectors))
-        all_actions = value_function.actions + best_actions
+        # Appending old alpha vectors before uniqueness pruning
+        all_vectors = xp.concatenate((value_function.alpha_vector_array, alpha_vectors))
+        all_actions = (value_function.actions if isinstance(value_function.actions, list) else value_function.actions.tolist()) + best_actions
         new_value_function = ValueFunction(model, all_vectors, all_actions)
 
         # Pruning
@@ -881,9 +928,11 @@ class PBVI_Solver(Solver):
                 Returns:
                         belief_set_new (BeliefSet): union of the belief_set and the expansions of the beliefs in the belief_set
         '''
+        xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
+
         old_shape = belief_set.belief_array.shape
 
-        new_belief_array = np.empty((old_shape[0] * 2, old_shape[1]))
+        new_belief_array = xp.empty((old_shape[0] * 2, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
 
         for i, belief_vector in enumerate(belief_set.belief_array):
@@ -917,9 +966,11 @@ class PBVI_Solver(Solver):
                 Returns:
                         belief_set_new (BeliefSet): union of the belief_set and the expansions of the beliefs in the belief_set
         '''
+        xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
+
         old_shape = belief_set.belief_array.shape
 
-        new_belief_array = np.empty((old_shape[0] * 2, old_shape[1]))
+        new_belief_array = xp.empty((old_shape[0] * 2, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
                 
         for i, belief_vector in enumerate(belief_set.belief_array):
@@ -929,7 +980,7 @@ class PBVI_Solver(Solver):
             if random.random() < eps:
                 a = random.choice(model.actions)
             else:
-                best_alpha_index = np.argmax(np.dot(value_function.alpha_vector_array, b.values))
+                best_alpha_index = xp.argmax(xp.dot(value_function.alpha_vector_array, b.values))
                 a = value_function.actions[best_alpha_index]
             
             s_p = model.transition(s, a)
@@ -956,9 +1007,11 @@ class PBVI_Solver(Solver):
                 Returns:
                         belief_set_new (BeliefSet): union of the belief_set and the expansions of the beliefs in the belief_set
         '''
+        xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
+
         old_shape = belief_set.belief_array.shape
 
-        new_belief_array = np.empty((old_shape[0] * 2, old_shape[1]))
+        new_belief_array = xp.empty((old_shape[0] * 2, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
         
         for i, belief_vector in enumerate(belief_set.belief_array):
@@ -973,7 +1026,7 @@ class PBVI_Solver(Solver):
                 b_a = b.update(a, o)
                 
                 # Check distance with other beliefs
-                min_dist = min(float(np.linalg.norm(b_p - b_a.values)) for b_p in new_belief_array)
+                min_dist = min(float(xp.linalg.norm(b_p - b_a.values)) for b_p in new_belief_array)
                 if min_dist > max_dist:
                     max_dist = min_dist
                     best_b = b_a
@@ -1040,6 +1093,7 @@ class PBVI_Solver(Solver):
               initial_belief:Union[BeliefSet, Belief, None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
               expand_prune_level:Union[int,None]=None,
+              use_gpu:bool=False,
               print_progress:bool=True
               ) -> tuple[ValueFunction, SolverHistory]:
         '''
@@ -1061,25 +1115,37 @@ class PBVI_Solver(Solver):
                         initial_belief (BeliefSet, Belief) - Optional: An initial list of beliefs to start with.
                         initial_value_function (ValueFunction) - Optional: An initial value function to start the solving process with.
                         expand_prune_level (int) - Optional: Parameter to prune the value function further before the expand function.
+                        use_gpu (bool): Whether to use the GPU with cupy array to accelerate solving. (Default: False)
                         print_progress (bool): Whether or not to print out the progress of the value iteration process. (Default: True)
 
                 Returns:
                         value_function (ValueFunction): The alpha vectors approximating the value function.
         '''
+        # numpy or cupy module
+        xp = np
+
+        # If GPU usage
+        if use_gpu:
+            assert gpu_support, "GPU support is not enabled, Cupy might need to be installed..."
+            model = model.gpu_model
+
+            # Replace numpy module by cupy for computations
+            xp = cp
 
         # Initial belief
-        if isinstance(initial_belief, BeliefSet):
-            belief_set = initial_belief
-        elif isinstance(initial_belief, Belief):
-            belief_set = BeliefSet(model, [initial_belief])
-        else:
+        if initial_belief is None:
             belief_set = BeliefSet(model, [Belief(model)])
+        elif isinstance(initial_belief, BeliefSet):
+            belief_set = initial_belief.to_gpu() if use_gpu else initial_belief 
+        else:
+            initial_belief = Belief(model, xp.array(initial_belief.values))
+            belief_set = BeliefSet(model, [initial_belief])
         
         # Initial value function
         if initial_value_function is None:
             value_function = ValueFunction(model, model.expected_rewards_table.T, model.actions)
         else:
-            value_function = initial_value_function
+            value_function = initial_value_function.to_gpu() if use_gpu else initial_value_function 
 
         # Convergence check boundary
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
@@ -1112,9 +1178,9 @@ class PBVI_Solver(Solver):
                 solver_history.add(value_function, belief_set)
 
                 # convergence check
-                max_val_per_belief = np.max(np.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
+                max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
                 if old_max_val_per_belief is not None:
-                    max_change = np.max(np.abs(max_val_per_belief - old_max_val_per_belief))
+                    max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
                     if max_change < max_allowed_change:
                         print('Converged early...')
                         return value_function, solver_history
@@ -1129,17 +1195,18 @@ class FSVI_Solver(PBVI_Solver):
         self.eps = eps
 
 
-    # TODO: Check if better to only collect beliefs and compute value function at once later
     def MDPExplore(self, model:Model, b:Belief, s:int, mdp_policy:ValueFunction, depth:int, horizon:int) -> BeliefSet:
         '''
         TODO: Write description
         '''
-        belief_list = []
+        xp = np if not gpu_support else cp.get_array_module(b.values)
+        belief_list = [b]
+
         if depth >= horizon:
             log('Horizon reached before goal...')
         elif s not in model.end_states:
             # Choose action based on mdp value function
-            a_star = np.argmax(mdp_policy.alpha_vector_array[:,s])
+            a_star = xp.argmax(mdp_policy.alpha_vector_array[:,s])
 
             # Pick a random next state (weighted by transition probabilities)
             s_p = model.transition(s, a_star)
@@ -1148,13 +1215,24 @@ class FSVI_Solver(PBVI_Solver):
             o = model.observe(s_p, a_star)
 
             # Generate a new belief based on a_star and o
-            b_p = b.update(a_star, o)
+            try:
+                b_p = b.update(a_star, o)
+            except Exception as e:
+                print(f'b: {b.values}')
+                print(f'a: {a_star}, s_p: {s_p}, o: {o}')
+
+                with open('./out_b.txt', 'w') as fp:
+                    for item in b.values.tolist():
+                        # write each item on a new line
+                        fp.write("%s\n" % item)
+
+                print(e)
+                raise Exception('Bla')
 
             # Recursive call to go closer to goal
             b_set = self.MDPExplore(model, b_p, s_p, mdp_policy, depth+1, horizon)
             belief_list.extend(b_set.belief_list)
         
-        belief_list.append(b)
         return BeliefSet(model, belief_list)
 
 
@@ -1163,25 +1241,37 @@ class FSVI_Solver(PBVI_Solver):
               expansions:int,
               horizon:int,
               mdp_policy:ValueFunction,
-              initial_belief:Belief|None=None,
-              initial_value_function:ValueFunction | None = None,
-              expand_prune_level: int | None = None, # TODO: Implement prune level config
-              print_progress: bool = True
+              initial_belief:Union[Belief,None]=None,
+              initial_value_function:Union[ValueFunction,None]=None,
+              expand_prune_level:Union[int,None]=None, # TODO: Implement prune level config
+              use_gpu:bool=False,
+              print_progress:bool=True
               ) -> tuple[ValueFunction, SolverHistory]:
         '''
         TODO: Write description
         '''
+        # numpy or cupy module
+        xp = np
+
+        # If GPU usage
+        if use_gpu:
+            assert gpu_support, "GPU support is not enabled, Cupy might need to be installed..."
+            model = model.gpu_model
+
+            # Replace numpy module by cupy for computations
+            xp = cp
+
         # Initial belief
-        if isinstance(initial_belief, Belief):
-            b = initial_belief
-        else:
+        if initial_belief is None:
             b = Belief(model)
-        
+        else:
+            b = Belief(model, xp.array(initial_belief.values))
+
         # Initial value function
         if initial_value_function is None:
-            value_function = ValueFunction(model, model.expected_rewards_table.T, model.actions.tolist())
+            value_function = ValueFunction(model, model.expected_rewards_table.T, model.actions)
         else:
-            value_function = initial_value_function
+            value_function = initial_value_function.to_gpu() if use_gpu else initial_value_function
 
         # Convergence check boundary
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
@@ -1204,18 +1294,16 @@ class FSVI_Solver(PBVI_Solver):
             # Backup (update of value function)
             value_function = self.backup(model, belief_set, value_function)
 
-            # History tracking
-            solver_history.add(value_function, belief_set)
+            # # History tracking
+            # solver_history.add(value_function, belief_set)
 
             # convergence check
-            max_val_per_belief = np.max(np.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
+            max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
             if old_max_val_per_belief is not None:
-                max_change = np.max(np.abs(max_val_per_belief - old_max_val_per_belief))
+                max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
                 if max_change < max_allowed_change:
                     print('Converged early...')
                     return value_function, solver_history
-            else:
-                print('skip')
             old_max_val_per_belief = max_val_per_belief
 
         return value_function, solver_history

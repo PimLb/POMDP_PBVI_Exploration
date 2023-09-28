@@ -3,6 +3,7 @@ from inspect import signature
 from matplotlib import animation, colors, patches
 from matplotlib import pyplot as plt
 from scipy.optimize import milp, LinearConstraint
+from scipy.spatial.distance import cdist
 from tqdm.auto import trange
 from typing import Self, Union, Tuple
 
@@ -12,12 +13,13 @@ import os
 import pandas as pd
 import random
 
-# import numpy as np
+import numpy as np
+gpu_support = False
 try:
-    import cupy as np
+    import cupy as cp
+    gpu_support = True
 except:
-    print('[Warning] Cupy could not be loaded: using numpy by default.')
-    import numpy as np
+    print('[Warning] Cupy could not be loaded: GPU support is not available.')
 
 
 COLOR_LIST = [{
@@ -87,6 +89,10 @@ class Model:
                  end_actions:list[int]=[]
                  ):
         
+        # Empty variable
+        self._alt_model = None
+        self.is_on_gpu = False
+        
         log('Instantiation of MDP Model:')
         
         # ------------------------- States -------------------------
@@ -130,9 +136,9 @@ class Model:
         if reachable_states is not None:
             self.reachable_states = np.array(reachable_states)
             assert self.reachable_states.shape[:2] == (self.state_count, self.action_count), f"Reachable states provided is not of the expected shape (received {self.reachable_states.shape}, expected ({self.state_count}, {self.action_count}, :))"
-            self.max_reachable_states = self.reachable_states.shape[2]
+            self.reachable_state_count = self.reachable_states.shape[2]
 
-            log(f'- At most {self.max_reachable_states} reachable states per state-action pair')
+            log(f'- At most {self.reachable_state_count} reachable states per state-action pair')
 
         # ------------------------- Transitions -------------------------
         log('- Starting generation of transitions table')
@@ -150,7 +156,7 @@ class Model:
                 self.transition_table = random_probs / np.sum(random_probs, axis=2, keepdims=True)
             else:
                 # Make uniform transition probabilities over reachable states
-                print(f'[Warning] No transition matrix or function provided but reachable states are, so probability to reach any reachable states will "1 / reachable state count" so here: {1/self.max_reachable_states:.3f}.')
+                print(f'[Warning] No transition matrix or function provided but reachable states are, so probability to reach any reachable states will "1 / reachable state count" so here: {1/self.reachable_state_count:.3f}.')
 
         elif callable(transitions): # Transition function
             self.transition_function = transitions
@@ -204,7 +210,7 @@ class Model:
             start_ts = datetime.now()
 
             self.reachable_states = []
-            self.max_reachable_states = 0
+            self.reachable_state_count = 0
             for s in self.states:
                 reachable_states_for_action = []
                 for a in self.actions:
@@ -217,8 +223,8 @@ class Model:
                                 reachable_list.append(sn)
                     reachable_states_for_action.append(reachable_list)
                     
-                    if len(reachable_list) > self.max_reachable_states:
-                        self.max_reachable_states = len(reachable_list)
+                    if len(reachable_list) > self.reachable_state_count:
+                        self.reachable_state_count = len(reachable_list)
 
                 self.reachable_states.append(reachable_states_for_action)
 
@@ -226,7 +232,7 @@ class Model:
             for s in self.states:
                 for a in self.actions:
                     to_add = 0
-                    while len(self.reachable_states[s][a]) < self.max_reachable_states:
+                    while len(self.reachable_states[s][a]) < self.reachable_state_count:
                         if to_add not in self.reachable_states[s][a]:
                             self.reachable_states[s][a].append(to_add)
                         to_add += 1
@@ -236,14 +242,14 @@ class Model:
 
             duration = (datetime.now() - start_ts).total_seconds()
             log(f'    > Done in {duration:.3f}s')
-            log(f'- At most {self.max_reachable_states} reachable states per state-action pair')
+            log(f'- At most {self.reachable_state_count} reachable states per state-action pair')
 
         # ------------------------- Reachable state probabilities -------------------------
         log('- Starting computation of reachable state probabilities from transition data')
         start_ts = datetime.now()
 
         if self.transition_function is None and self.transition_table is None:
-            self.reachable_probabilities = np.full(self.reachable_states.shape, 1/self.max_reachable_states)
+            self.reachable_probabilities = np.full(self.reachable_states.shape, 1/self.reachable_state_count)
         elif self.transition_table is not None:
             self.reachable_probabilities = self.transition_table[self.states[:,None,None], self.actions[None,:,None], self.reachable_states]
         else:
@@ -306,7 +312,8 @@ class Model:
                 Returns:
                         s_p (int): The posterior state
         '''
-        s_p = int(np.random.choice(a=self.reachable_states[s,a], size=1, p=self.reachable_probabilities[s,a])[0])
+        xp = cp if self.is_on_gpu else np
+        s_p = int(xp.random.choice(a=self.reachable_states[s,a], size=1, p=self.reachable_probabilities[s,a])[0])
         return s_p
     
 
@@ -367,48 +374,34 @@ class Model:
                 for x, x_state in enumerate(y_state_list):
                     if x_state == state:
                         self.state_grid_points.append([x,y])
-
-
-    # TODO: Fix this
-    # def to_dict(self) -> dict:
-    #     '''
-    #     Function to return a python dictionary with all the information of the model.
-
-    #             Returns:
-    #                     model_dict (dict): The representation of the model in a dictionary format.
-    #     '''
-    #     model_dict = {
-    #         'states': self.state_labels,
-    #         'actions': self.action_labels,
-    #         'transition_table': self.transition_table.tolist(),
-    #         'immediate_reward_table': self.immediate_reward_table.tolist(),
-    #         'probabilistic_rewards': self.probabilistic_rewards,
-    #         'grid_states': self.grid_states
-    #     }
-
-    #     return model_dict
     
 
-    # def save(self, file_name:str, path:str='./Models') -> None:
-    #     '''
-    #     Function to save the current model in a json file.
-    #     By default, the model will be saved in 'Models' directory in the current working directory but this can be changed using the 'path' parameter.
+    def save(self, file_name:str, path:str='./Models') -> None:
+        '''
+        Function to save the current model in a json file.
+        By default, the model will be saved in 'Models' directory in the current working directory but this can be changed using the 'path' parameter.
 
-    #             Parameters:
-    #                     file_name (str): The name of the json file the model will be saved in.
-    #                     path (str): The path at which the model will be saved. (Default: './Models')
-    #     '''
-    #     if not os.path.exists(path):
-    #         print('Folder does not exist yet, creating it...')
-    #         os.makedirs(path)
+                Parameters:
+                        file_name (str): The name of the json file the model will be saved in.
+                        path (str): The path at which the model will be saved. (Default: './Models')
+        '''
+        if not os.path.exists(path):
+            print('Folder does not exist yet, creating it...')
+            os.makedirs(path)
 
-    #     if not file_name.endswith('.json'):
-    #         file_name += '.json'
+        if not file_name.endswith('.json'):
+            file_name += '.json'
 
-    #     model_dict = self.to_dict()
-    #     json_object = json.dumps(model_dict, indent=4)
-    #     with open(path + '/' + file_name, 'w') as outfile:
-    #         outfile.write(json_object)
+        # Taking the arguments of the CPU version of the model
+        argument_dict = self.cpu_model.__dict__
+
+        # Converting the numpy array to lists
+        for k,v in argument_dict.items():
+            argument_dict.__setattr__(k, v.tolist() if isinstance(v, np.ndarray) else v)
+
+        json_object = json.dumps(argument_dict, indent=4)
+        with open(path + '/' + file_name, 'w') as outfile:
+            outfile.write(json_object)
 
 
     @classmethod
@@ -424,12 +417,68 @@ class Model:
         with open(file, 'r') as openfile:
             json_model = json.load(openfile)
 
-        loaded_model = Model(**json_model)
+        loaded_model = super().__new__(cls)
+        for k,v in json_model.items():
+            loaded_model.__setattr__(k, np.array(v) if isinstance(v, list) else v)
 
         if 'grid_states' in json_model:
             loaded_model.convert_to_grid(json_model['grid_states'])
 
         return loaded_model
+
+
+    @property
+    def gpu_model(self) -> Self:
+        if self.is_on_gpu:
+            return self
+        
+        assert gpu_support, "GPU Support is not available, try installing cupy..."
+        
+        if self._alt_model is None:
+            log('Sending Model to GPU...')
+            start = datetime.now()
+
+            # Setting all the arguments of the new class and convert to cupy if numpy array
+            new_model = super().__new__(self.__class__)
+            for arg, val in self.__dict__.items():
+                new_model.__setattr__(arg, cp.array(val) if isinstance(val, np.ndarray) else val)
+
+            # GPU/CPU variables
+            new_model.is_on_gpu = True
+            new_model._alt_model = self
+            self._alt_model = new_model
+            
+            duration = (datetime.now() - start).total_seconds()
+            log(f'    > Done in {duration:.3f}s')
+
+        return self._alt_model
+
+
+    @property
+    def cpu_model(self) -> Self:
+        if not self.is_on_gpu:
+            return self
+        
+        assert gpu_support, "GPU Support is not available, try installing cupy..."
+
+        if self._alt_model is None:
+            log('Sending Model to CPU...')
+            start = datetime.now()
+
+            # Setting all the arguments of the new class and convert to numpy if cupy array
+            new_model = super().__new__(self.__class__)
+            for arg, val in self.__dict__.items():
+                new_model.__setattr__(arg, cp.asnumpy(val) if isinstance(val, cp.ndarray) else val)
+            
+            # GPU/CPU variables
+            new_model.is_on_gpu = False
+            new_model._alt_model = self
+            self._alt_model = new_model
+            
+            duration = (datetime.now() - start).total_seconds()
+            log(f'    > Done in {duration:.3f}s')
+
+        return self._alt_model
 
 
 class AlphaVector:
@@ -490,8 +539,20 @@ class ValueFunction:
         self._vector_array = None
         self._actions = None
 
+        self.is_on_gpu = False
+
+        # List of alpha vectors
+        if isinstance(alpha_vectors, list):
+            assert all(v.values.shape[0] == model.state_count for v in alpha_vectors), f"Some or all alpha vectors in the list provided dont have the right size, they should be of shape: {model.state_count}"
+            self._vector_list = alpha_vectors
+            
+            # Check if on gpu and make sure all vectors are also on the gpu
+            if (len(alpha_vectors) > 0) and gpu_support and cp.get_array_module(alpha_vectors[0].values) == cp:
+                assert all(cp.get_array_module(v.values) == cp for v in alpha_vectors), "Either all or none of the alpha vectors should be on the GPU, not just some."
+                self.is_on_gpu = True
+        
         # As numpy array
-        if isinstance(alpha_vectors, np.ndarray):
+        else:
             av_shape = alpha_vectors.shape
             exp_shape = (len(action_list), model.state_count)
             assert av_shape == exp_shape, f"Alpha vector array does not have the right shape (received: {av_shape}; expected: {exp_shape})"
@@ -499,9 +560,9 @@ class ValueFunction:
             self._vector_array = alpha_vectors
             self._actions = action_list
 
-        # List of alpha vectors
-        else:
-            self._vector_list = alpha_vectors
+            # Check if array is on gpu
+            if gpu_support and cp.get_array_module(alpha_vectors) == cp:
+                self.is_on_gpu = True
 
 
     @property
@@ -515,16 +576,20 @@ class ValueFunction:
 
     @property
     def alpha_vector_array(self) -> np.ndarray:
+        xp = cp if (gpu_support and self.is_on_gpu) else np
+
         if self._vector_array is None:
-            self._vector_array = np.array([v.values for v in self._vector_list])
+            self._vector_array = xp.array([v.values for v in self._vector_list])
             self._actions = [v.action for v in self._vector_list]
         return self._vector_array
     
 
     @property
     def actions(self) -> list[int]:
+        xp = cp if (gpu_support and self.is_on_gpu) else np
+
         if self._actions is None:
-            self._vector_array = np.array(self._vector_list)
+            self._vector_array = xp.array(self._vector_list)
             self._actions = [v.action for v in self._vector_list]
         return self._actions
     
@@ -533,16 +598,69 @@ class ValueFunction:
         return len(self._vector_list) if self._vector_list is not None else self._vector_array.shape[0]
     
 
-    def append(self, alpha_vector:AlphaVector):
+    def append(self, alpha_vector:AlphaVector) -> None:
         '''
         Function to add an alpha vector to the value function.
         '''
+        # Make sure size is correct
+        assert alpha_vector.values.shape[0] == self.model.state_count, f"Vector to add to value function doesn't have the right size (received: {alpha_vector.values.shape[0]}, expected: {self.model.state_count})"
+        
+        # GPU support check
+        xp = cp if (gpu_support and self.is_on_gpu) else np
+        assert gpu_support and cp.get_array_module(alpha_vector.values) == xp, f"Vector is{' not' if self.is_on_gpu else ''} on GPU while value function is{'' if self.is_on_gpu else ' not'}."
+
         if self._vector_array is not None:
-            self._vector_array = np.append(self._vector_array, alpha_vector[None,:], axis=0)
+            self._vector_array = xp.append(self._vector_array, alpha_vector[None,:], axis=0)
             self._actions.append(alpha_vector.action)
         
         if self._vector_list is not None:
             self._vector_list.append(alpha_vector)
+
+
+    def to_gpu(self) -> Self:
+        '''
+        Function returning an equivalent value function object with the arrays stored on GPU instead of CPU.
+
+                Returns:
+                        gpu_value_function (ValueFunction): A new value function with arrays on GPU.
+        '''
+        assert gpu_support, "GPU support is not enabled, unable to execute this function"
+
+        gpu_model = self.model.gpu_model
+
+        gpu_value_function = None
+        if self._vector_array is not None:
+            gpu_vector_array = cp.array(self._vector_array)
+            gpu_value_function = ValueFunction(gpu_model, gpu_vector_array, self._actions)
+        
+        else:
+            gpu_alpha_vectors = [AlphaVector(cp.array(av.values), av.action) for av in self._vector_list]
+            gpu_value_function = ValueFunction(gpu_model, gpu_alpha_vectors)
+
+        return gpu_value_function
+    
+
+    def to_cpu(self) -> Self:
+        '''
+        Function returning an equivalent value function object with the arrays stored on CPU instead of GPU.
+
+                Returns:
+                        cpu_value_function (ValueFunction): A new value function with arrays on CPU.
+        '''
+        assert gpu_support, "GPU support is not enabled, unable to execute this function"
+
+        cpu_model = self.model.cpu_model
+
+        cpu_value_function = None
+        if self._vector_array is not None:
+            cpu_vector_array = cp.asnumpy(self._vector_array)
+            cpu_value_function = ValueFunction(cpu_model, cpu_vector_array, self._actions)
+        
+        else:
+            cpu_alpha_vectors = [AlphaVector(cp.asnumpy(av.values), av.action) for av in self._vector_list]
+            cpu_value_function = ValueFunction(cpu_model, cpu_alpha_vectors)
+
+        return cpu_value_function
 
 
     def prune(self, level:int=1) -> Self:
@@ -562,28 +680,34 @@ class ValueFunction:
                 Returns:
                         new_value_function (ValueFunction): A new value function with a pruned set of alpha vectors.
         '''
+        # GPU support check
+        xp = cp if (gpu_support and self.is_on_gpu) else np
+
         if level < 1:
-            return copy.deepcopy(self)
+            return ValueFunction(self.model, xp.copy(self))
         
-        # Level 1 pruning: Check for duplicates
+        # Level 1 pruning: Check for duplicates - works equally for cupy array (on gpu)
         L = {alpha_vector.values.tobytes(): alpha_vector for alpha_vector in self.alpha_vector_list}
         pruned_alpha_set = ValueFunction(self.model, list(L.values()))
 
-        # Level 2 pruning: Check for absolute domination # TODO check this
+        # Level 2 pruning: Check for absolute domination
         if level >= 2:
-            alpha_set = pruned_alpha_set
-            pruned_alpha_set = ValueFunction(self.model)
-            for alpha_vector in alpha_set:
-                dominated = False
-                for compare_alpha_vector in alpha_set:
-                    if all(alpha_vector < compare_alpha_vector):
-                        dominated = True
-                if not dominated:
-                    pruned_alpha_set.append(alpha_vector)
+            # Beyond this point, gpu can't be used due to the functions used so if on gpu, converting it back to cpu
+            if pruned_alpha_set.is_on_gpu:
+                pruned_alpha_set = pruned_alpha_set.to_cpu()
+
+            alpha_vector_array = pruned_alpha_set.alpha_vector_array
+            X = cdist(alpha_vector_array, alpha_vector_array, metric=(lambda a,b:(a <= b).all() and not (a == b).all())).astype(bool)
+            non_dominated_vector_indices = np.invert(X).all(axis=1)
+
+            non_dominated_vectors = alpha_vector_array[non_dominated_vector_indices]
+            non_dominated_actions = np.array(pruned_alpha_set.actions)[non_dominated_vector_indices].tolist()
+
+            pruned_alpha_set = ValueFunction(self.model, non_dominated_vectors, non_dominated_actions)
 
         # Level 3 pruning: LP to check for more complex domination #TODO check this
         if level >= 3:
-            alpha_set = pruned_alpha_set
+            alpha_set = pruned_alpha_set.alpha_vector_list
             pruned_alpha_set = ValueFunction(self.model)
 
             for i, alpha_vect in enumerate(alpha_set):
@@ -613,6 +737,10 @@ class ValueFunction:
                 else:
                     pruned_alpha_set.append(alpha_vect)
         
+        # If initial value function was on gpu, and intermediate array was converted to cpu, convert it back to gpu
+        if self.is_on_gpu and not pruned_alpha_set.is_on_gpu:
+            pruned_alpha_set = pruned_alpha_set.to_cpu()
+
         return pruned_alpha_set
     
 
@@ -633,7 +761,15 @@ class ValueFunction:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             file_name = timestamp + '_value_function.csv'
 
-        data = np.array([[alpha.action, *alpha] for alpha in self.alpha_vector_list])
+        vector_array = self.alpha_vector_array
+        actions = self.actions
+
+        # Convert arrays to numpy if on gpu
+        if self.is_on_gpu:
+            vector_array = cp.asnumpy(vector_array)
+            actions = cp.asnumpy(actions)
+
+        data = np.concatenate((np.array(self.actions)[:,None], self.alpha_vector_array), axis=1)
         columns = ['action', *self.model.state_labels]
 
         df = pd.DataFrame(data)
@@ -655,20 +791,14 @@ class ValueFunction:
         df = pd.read_csv(file, header=0, index_col=False)
         alpha_vectors = df.to_numpy()
 
-        vector_count = alpha_vectors.shape[0]
+        return ValueFunction(model, alpha_vectors[:,1:], alpha_vectors[:,0].astype(int))
 
-        vector_list = []
-        for i in range(vector_count):
-            vector_list.append(AlphaVector(alpha_vectors[i,1:], action=int(alpha_vectors[i,0])))
-
-        return ValueFunction(model, vector_list)
-    
 
     def plot(self,
              as_grid:bool=False,
              size:int=5,
              belief_set=None
-             ):
+             ) -> None:
         '''
         Function to plot out the value function in 2 or 3 dimensions.
 
@@ -677,6 +807,13 @@ class ValueFunction:
                         belief_set (list[Belief]): Optional, a set of belief to plot the belief points that were explored.
         '''
         assert len(self) > 0, "Value function is empty, plotting is impossible..."
+        
+        # If on GPU, convert to CPU and plot that one
+        if self.is_on_gpu:
+            print('[Warning] Value function on GPU, converting to numpy before plotting...')
+            cpu_value_function = self.to_cpu()
+            cpu_value_function.plot(as_grid, size, belief_set)
+            return
 
         func = None
         if as_grid:
@@ -845,7 +982,7 @@ class ValueFunction:
         # Action policy ax
         ax4.set_title("Action policy")
         ax4.contourf(x, y, best_a, 1, colors=[c['id'] for c in COLOR_LIST])
-        proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[a]['id']) for a in self.model.actions]
+        proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[int(a)]['id']) for a in self.model.actions]
         ax4.legend(proxy, self.model.action_labels)
 
         if belief_points is not None:
@@ -889,7 +1026,7 @@ class ValueFunction:
 
         ax2.set_title('Action policy')
         ax2.imshow(best_action_table)
-        p = [ patches.Patch(color=COLOR_LIST[i]['id'], label=self.model.action_labels[i].item()) for i in self.model.actions]
+        p = [ patches.Patch(color=COLOR_LIST[int(i)]['id'], label=str(self.model.action_labels[int(i)])) for i in self.model.actions]
         ax2.legend(handles=p, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
         ax2.set_xticks([i for i in range(dimensions[1])])
         ax2.set_yticks([i for i in range(dimensions[0])])
@@ -989,6 +1126,7 @@ class VI_Solver(Solver):
     def solve(self, 
               model: Model,
               initial_value_function:Union[ValueFunction,None]=None,
+              use_gpu:bool=False,
               print_progress:bool=True
               ) -> tuple[ValueFunction, SolverHistory]:
         '''
@@ -998,35 +1136,51 @@ class VI_Solver(Solver):
                 Parameters:
                         model (mdp.Model): The model on which to run value iteration.
                         initial_value_function (ValueFunction): An optional initial value function to kick-start the value iteration process. (Optional)
+                        use_gpu (bool): Whether to use the GPU with cupy array to accelerate solving. (Default: False)
                         print_progress (bool): Whether or not to print out the progress of the value iteration process. (Default: True)
 
                 Returns:
                         value_function (ValueFunction): The resulting value function solution to the model.
                         history (SolverHistory): The tracking of the solution over time.
         '''
-        if not initial_value_function:
+        # numpy or cupy module
+        xp = np
+
+        # If GPU usage
+        if use_gpu:
+            assert gpu_support, "GPU support is not enabled, Cupy might need to be installed..."
+            model = model.gpu_model
+
+            # Replace numpy module by cupy for computations
+            xp = cp
+
+        # Value function initialization
+        if initial_value_function is None:
             V = ValueFunction(model, model.expected_rewards_table.T, model.actions)
         else:
-            V = copy.deepcopy(initial_value_function)
-        V_opt = V.alpha_vector_array[0]
+            V = initial_value_function.to_gpu() if use_gpu else initial_value_function
+        V_opt = xp.max(V.alpha_vector_array, axis=0)
 
+        # History tracking setup
         solve_history = SolverHistory(model, V, self.gamma, self.eps)
 
+        # Computing max allowed change from epsilon and gamma parameters
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
 
         for _ in trange(self.horizon) if print_progress else range(self.horizon):
             old_V_opt = V_opt
             
             # Computing the new alpha vectors
-            alpha_vectors = model.expected_rewards_table.T + (self.gamma * np.einsum('sar,sar->as', model.reachable_probabilities, V_opt[model.reachable_states]))
+            alpha_vectors = model.expected_rewards_table.T + (self.gamma * xp.einsum('sar,sar->as', model.reachable_probabilities, V_opt[model.reachable_states]))
             V = ValueFunction(model, alpha_vectors, model.actions)
 
-            V_opt = np.max(V.alpha_vector_array, axis=0)
+            V_opt = xp.max(V.alpha_vector_array, axis=0)
 
             # Tracking the history
             solve_history.add(V)
-                
-            max_change = np.max(np.abs(V_opt - old_V_opt))
+            
+            # Convergence check
+            max_change = xp.max(xp.abs(V_opt - old_V_opt))
             if max_change < max_allowed_change:
                 break
 
