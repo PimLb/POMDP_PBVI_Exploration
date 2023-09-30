@@ -1044,23 +1044,44 @@ class SolverHistory:
 
     Attributes
     ----------
+    tracking_level: int
+        The tracking level of the solver.
     model: mdp.Model
-        The model that has been solved by the Solver
+        The model that has been solved by the Solver.
+    gamma: float
+        The gamma parameter used by the solver (learning rate).
+    eps: float
+        The epsilon parameter used by the solver (covergence bound).
     initial_value_function: ValueFunction
         The initial value function the solver will use to start the solving process.
-    params: dict
-        Additional Solver parameters used to make better visualizations
+    
+    Methods
+    -------
+    add(iteration_time, value_function_change, value_function:ValueFunction):
+        Function to add an iteration to the solving process with the various information that will be recorded.
+    plot_changes():
+        Function to plot the change between value functions over the solving process.
     '''
     def __init__(self,
+                 tracking_level:int,
                  model:Model,
-                 initial_value_function:ValueFunction,
                  gamma:float,
-                 eps:float):
+                 eps:float,
+                 initial_value_function:Union[ValueFunction,None]=None
+                 ):
+        self.tracking_level = tracking_level
         self.model = model
-        self.value_functions = [initial_value_function]
         self.gamma = gamma
         self.eps = eps
         self.run_ts = datetime.now()
+
+        # Tracking metrics
+        self.iteration_times = []
+        self.value_function_changes = []
+
+        self.value_functions = []
+        if self.tracking_level >= 2:
+            self.value_functions.append(initial_value_function)
 
 
     @property
@@ -1068,21 +1089,56 @@ class SolverHistory:
         '''
         The last Value function of the solving process
         '''
+        assert self.tracking_level >= 2, "Tracking level is set too low, increase it to 2 if you want to have value function tracking as well."
         return self.value_functions[-1]
     
 
-    def add(self, value_function:ValueFunction) -> None:
+    def add(self,
+            iteration_time:float,
+            value_function_change:float,
+            value_function:ValueFunction
+            ) -> None:
         '''
         Function to add a step in the simulation history.
 
                 Parameters:
+                        iteration_time (float): The time it took to run the iteration.
+                        value_function_change (float): The change between the value function of this iteration and of the previous iteration.
                         value_function (ValueFunction): The value function resulting after a step of the solving process.
         '''
-        self.value_functions.append(value_function)
+        if self.tracking_level >= 1:
+            self.iteration_times.append(float(iteration_time))
+            self.value_function_changes.append(float(value_function_change))
 
+        if self.tracking_level >= 2:
+            self.value_functions.append(value_function)
+    
 
-    def __len__(self):
-        return len(self.value_functions)
+    @property
+    def summary(self) -> str:
+        '''
+        A summary as a string of the information recorded.
+
+                Returns:
+                        summary_str (str): The summary of the information.
+        '''
+        summary_str =  f'Summary of Value Iteration run'
+        summary_str += f'\n  - Model: {self.model.state_count}-state, {self.model.action_count}-action'
+        summary_str += f'\n  - Converged in {len(self.iteration_times)} iterations and {sum(self.iteration_times):.4f} seconds'
+        
+        if self.tracking_level >= 1:
+            summary_str += f'\n  - Took on average {sum(self.iteration_times) / len(self.iteration_times):.4f}s per iteration'
+        
+        return summary_str
+    
+
+    def plot_changes(self) -> None:
+        '''
+        Function to plot the value function changes over the solving process.
+        '''
+        assert self.tracking_level >= 1, "To plot the change of the value function over time, use tracking level 1 or higher."
+        plt.plot(np.arange(len(self.value_function_changes)), self.value_function_changes)
+        plt.show()
 
 
 class Solver:
@@ -1127,6 +1183,7 @@ class VI_Solver(Solver):
               model: Model,
               initial_value_function:Union[ValueFunction,None]=None,
               use_gpu:bool=False,
+              history_tracking_level:int=1,
               print_progress:bool=True
               ) -> tuple[ValueFunction, SolverHistory]:
         '''
@@ -1162,7 +1219,11 @@ class VI_Solver(Solver):
         V_opt = xp.max(V.alpha_vector_array, axis=0)
 
         # History tracking setup
-        solve_history = SolverHistory(model, V, self.gamma, self.eps)
+        solve_history = SolverHistory(tracking_level=history_tracking_level,
+                                      model=model,
+                                      gamma=self.gamma,
+                                      eps=self.eps,
+                                      initial_value_function=V)
 
         # Computing max allowed change from epsilon and gamma parameters
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
@@ -1170,17 +1231,24 @@ class VI_Solver(Solver):
         for _ in trange(self.horizon) if print_progress else range(self.horizon):
             old_V_opt = V_opt
             
+            start = datetime.now()
+
             # Computing the new alpha vectors
             alpha_vectors = model.expected_rewards_table.T + (self.gamma * xp.einsum('sar,sar->as', model.reachable_probabilities, V_opt[model.reachable_states]))
             V = ValueFunction(model, alpha_vectors, model.actions)
 
             V_opt = xp.max(V.alpha_vector_array, axis=0)
+            
+            # Change computation
+            max_change = xp.max(xp.abs(V_opt - old_V_opt))
 
             # Tracking the history
-            solve_history.add(V)
-            
+            iteration_time = (datetime.now() - start).total_seconds()
+            solve_history.add(iteration_time=iteration_time,
+                              value_function_change=max_change,
+                              value_function=V)
+
             # Convergence check
-            max_change = xp.max(xp.abs(V_opt - old_V_opt))
             if max_change < max_allowed_change:
                 break
 

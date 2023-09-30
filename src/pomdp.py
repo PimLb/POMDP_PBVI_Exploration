@@ -287,7 +287,7 @@ class Belief:
         '''
         xp = np if not gpu_support else cp.get_array_module(self._values)
 
-        new_state_probabilities = xp.sum(self.model.reachable_transitional_observation_table[:,a,o,:] * self.values[self.model.reachable_states[:,a,:]], axis=1)
+        new_state_probabilities = xp.einsum('sr,sr->s', self.model.reachable_transitional_observation_table[:,a,o,:], self.values[self.model.reachable_states[:,a,:]])
         
         # Normalization
         new_state_probabilities /= xp.sum(new_state_probabilities)
@@ -412,6 +412,10 @@ class BeliefSet:
         if self._belief_list is None:
             self._belief_list = [Belief(self.model, belief_vector) for belief_vector in self._belief_array]
         return self._belief_list
+    
+
+    def __len__(self) -> int:
+        return len(self._belief_list) if self._belief_list is not None else self._belief_array.shape[0]
     
 
     def to_gpu(self) -> Self:
@@ -576,7 +580,7 @@ class BeliefSet:
         plt.show()
 
 
-class SolverHistory(MDP_SolverHistory):
+class SolverHistory:
     '''
     Class to represent the history of a solver for a POMDP solver.
     It has mainly the purpose to have visualizations for the solution, belief set and the whole solving history.
@@ -589,21 +593,25 @@ class SolverHistory(MDP_SolverHistory):
 
     Attributes
     ----------
+    level: int
+        The tracking level of the solver.
     model: pomdp.Model
-        The model the solver has solved
-    initial_value_function: ValueFunction
-        The initial value function the solver will use to start the solving process.
-    initial_belief_set: BeliefSet
-        The initial belief set the solver will use to start the solving process.
+        The model the solver has solved.
     gamma: float
         The gamma parameter used by the solver (learning rate).
     eps: float
         The epsilon parameter used by the solver (covergence bound).
     expand_function: str
         The expand (exploration) function used by the solver.
+    initial_value_function: ValueFunction
+        The initial value function the solver will use to start the solving process.
+    initial_belief_set: BeliefSet
+        The initial belief set the solver will use to start the solving process.
 
     Methods
     -------
+    add(iteration_time, expansion_time, backup_time, value_function_change, value_function:ValueFunction, belief_set:BeliefSet):
+        Function to add a step to the solving process. The required amount of data will be recorded according to the tracking level.
     plot_belief_set(size:int=15):
         Once solve() has been run, the explored beliefs can be plot for 2- and 3- state models.
     plot_solution(size:int=5, plot_belief:bool=True):
@@ -612,19 +620,43 @@ class SolverHistory(MDP_SolverHistory):
         Once the solve has been run, we can save a video of the history of the solving process.
     '''
     def __init__(self,
+                 tracking_level:int,
                  model:Model,
-                 initial_value_function:ValueFunction,
-                 initial_belief_set:BeliefSet,
                  gamma:float,
                  eps:float,
-                 expand_function:str
+                 expand_function:str,
+                 initial_value_function:ValueFunction,
+                 initial_belief_set:BeliefSet
                  ):
-        super().__init__(model,
-                         initial_value_function,
-                         gamma,
-                         eps)
-        self.belief_sets = [initial_belief_set]
+        
+        self.tracking_level = tracking_level
+        self.model = model
+        self.gamma = gamma
+        self.eps = eps
+        self.run_ts = datetime.now()
+        
         self.expand_function = expand_function
+
+        # Time tracking
+        self.expansion_times = []
+        self.backup_times = []
+
+        # Value function and belief set sizes tracking
+        self.alpha_vector_counts = []
+        self.beliefs_counts = []
+
+        if self.tracking_level >= 1:
+            self.alpha_vector_counts.append(len(initial_value_function))
+            self.beliefs_counts.append(len(initial_belief_set))
+
+        # Value function and belief set tracking
+        self.belief_sets = []
+        self.value_functions = []
+        self.value_function_changes = []
+
+        if self.tracking_level >= 2:
+            self.belief_sets.append(initial_belief_set)
+            self.value_functions.append(initial_value_function)
 
 
     @property
@@ -632,20 +664,76 @@ class SolverHistory(MDP_SolverHistory):
         '''
         The final set of beliefs explored during the solving.
         '''
+        assert self.tracking_level >= 2, "Tracking level is set too low, increase it to 2 if you want to have belief sets tracking as well."
         return self.belief_sets[-1]
     
 
-    def add(self, value_function:ValueFunction, belief_set:list[Belief]) -> None:
+    def add_expand_step(self,
+                        expansion_time:float,
+                        belief_set:BeliefSet
+                        ) -> None:
         '''
-        Function to add a step in the simulation history by recording the value function and the explored belief set.
+        Function to add an expansion step in the simulation history by the explored belief set the expand function generated.
 
                 Parameters:
-                        value_function (ValueFunction): The value function resulting after a step of the solving process.
-                        belief_set (list[Belief]): The belief set used for the Update step of the solving process.
+                        expansion_time (float): The time it took to run a step of expansion of the belief set. (Also known as the exploration step.)
+                        belief_set (BeliefSet): The belief set used for the Update step of the solving process.
         '''
-        self.value_functions.append(value_function)
-        self.belief_sets.append(belief_set)
+        if self.tracking_level >= 1:
+            self.expansion_times.append(float(expansion_time))
+            self.beliefs_counts.append(len(belief_set))
 
+        if self.tracking_level >= 2:
+            self.belief_sets.append(belief_set)
+
+
+    def add_backup_step(self,
+                        backup_time:float,
+                        value_function_change:float,
+                        value_function:ValueFunction
+                        ) -> None:
+        '''
+        Function to add a backup step in the simulation history by recording the value function the backup function generated.
+
+                Parameters:
+                        backup_time (float): The time it took to run a step of backup of the value function. (Also known as the value function update.)
+                        value_function_change (float): The change between the value function of this iteration and of the previous iteration.
+                        value_function (ValueFunction): The value function resulting after a step of the solving process.
+        '''
+
+        if self.tracking_level >= 1:
+            self.backup_times.append(float(backup_time))
+            self.alpha_vector_counts.append(len(value_function))
+            self.value_function_changes.append(float(value_function_change))
+
+        if self.tracking_level >= 2:
+            self.value_functions.append(value_function)
+
+
+    @property
+    def summary(self) -> str:
+        '''
+        A summary as a string of the information recorded.
+
+                Returns:
+                        summary_str (str): The summary of the information.
+        '''
+        summary_str =  f'Summary of Value Iteration run'
+        summary_str += f'\n  - Model: {self.model.state_count} state, {self.model.action_count} action, {self.model.observation_count} observations'
+        summary_str += f'\n  - Converged or stopped after {len(self.expansion_times)} expansion steps and {len(self.backup_times)} backup steps.'
+        
+        if self.tracking_level >= 1:
+            summary_str += f'\n  - Converged in {(sum(self.expansion_times) + sum(self.backup_times)):.4f}s'
+            summary_str += f'\n'
+
+            summary_str += f'\n  - Expand function took on average {sum(self.expansion_times) /len(self.expansion_times):.4f}s '
+            summary_str += f'and yielded on average {sum(self.beliefs_counts[1:]) / len(self.beliefs_counts[1:]):.2f} beliefs per iteration.'
+
+            summary_str += f'\n  - Backup function took on average {sum(self.backup_times) /len(self.backup_times):.4f}s '
+            summary_str += f'and yielded on average value functions of size {sum(self.alpha_vector_counts[1:]) / len(self.alpha_vector_counts[1:]):.2f} per iteration.'
+        
+        return summary_str
+    
 
     def plot_belief_set(self, size:int=15):
         '''
@@ -689,7 +777,9 @@ class SolverHistory(MDP_SolverHistory):
                         graph_names (list[str]): Optional, names of the graphs for the legend of which graph is being plot.
                         fps (int): How many frames per second should the saved video have. (Default: 10)
         '''
+        assert self.tracking_level >= 2, "Tracking level is set too low, increase it to 2 if you want to have value function and belief sets tracking as well."
         assert self.model.state_count in [2,3], "Can't plot for models with state count other than 2 or 3" # TODO Make support for gird videos
+
         if self.model.state_count == 2:
             self._save_history_video_2D(custom_name, compare_with, copy.copy(graph_names), fps)
         elif self.model.state_count == 3:
@@ -1094,6 +1184,7 @@ class PBVI_Solver(Solver):
               initial_value_function:Union[ValueFunction,None]=None,
               expand_prune_level:Union[int,None]=None,
               use_gpu:bool=False,
+              history_tracking_level:int=1,
               print_progress:bool=True
               ) -> tuple[ValueFunction, SolverHistory]:
         '''
@@ -1151,12 +1242,13 @@ class PBVI_Solver(Solver):
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
 
         # History tracking
-        solver_history = SolverHistory(model=model,
-                                       initial_value_function=value_function,
-                                       initial_belief_set=belief_set,
+        solver_history = SolverHistory(tracking_level=history_tracking_level,
+                                       model=model,
                                        expand_function=self.expand_function,
                                        gamma=self.gamma,
-                                       eps=self.eps)
+                                       eps=self.eps,
+                                       initial_value_function=value_function,
+                                       initial_belief_set=belief_set)
 
         # Loop
         for expansion_i in range(expansions) if not print_progress else trange(expansions, desc='Expansions'):
@@ -1166,24 +1258,33 @@ class PBVI_Solver(Solver):
                 value_function = value_function.prune(expand_prune_level)
 
             # 1: Expand belief set
+            start_ts = datetime.now()
+
             belief_set = self.expand(model=model, belief_set=belief_set, value_function=value_function, **self.expand_function_params)
 
-            old_max_val_per_belief = None
+            expand_time = (datetime.now() - start_ts).total_seconds()
+            solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
 
             # 2: Backup, update value function (alpha vector set)
+            old_max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
+
             for _ in range(horizon) if not print_progress else trange(horizon, desc=f'Backups {expansion_i}'):
+                start_ts = datetime.now()
+
                 value_function = self.backup(model, belief_set, value_function)
 
+                # Max change
+                max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
+                max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
+                
                 # History tracking
-                solver_history.add(value_function, belief_set)
+                backup_time = (datetime.now() - start_ts).total_seconds()
+                solver_history.add_backup_step(backup_time, max_change, value_function)
 
                 # convergence check
-                max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
-                if old_max_val_per_belief is not None:
-                    max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
-                    if max_change < max_allowed_change:
-                        print('Converged early...')
-                        return value_function, solver_history
+                if max_change < max_allowed_change:
+                    print('Converged early...')
+                    return value_function, solver_history
                 old_max_val_per_belief = max_val_per_belief
 
         return value_function, solver_history
@@ -1215,19 +1316,7 @@ class FSVI_Solver(PBVI_Solver):
             o = model.observe(s_p, a_star)
 
             # Generate a new belief based on a_star and o
-            try:
-                b_p = b.update(a_star, o)
-            except Exception as e:
-                print(f'b: {b.values}')
-                print(f'a: {a_star}, s_p: {s_p}, o: {o}')
-
-                with open('./out_b.txt', 'w') as fp:
-                    for item in b.values.tolist():
-                        # write each item on a new line
-                        fp.write("%s\n" % item)
-
-                print(e)
-                raise Exception('Bla')
+            b_p = b.update(a_star, o)
 
             # Recursive call to go closer to goal
             b_set = self.MDPExplore(model, b_p, s_p, mdp_policy, depth+1, horizon)
@@ -1245,6 +1334,7 @@ class FSVI_Solver(PBVI_Solver):
               initial_value_function:Union[ValueFunction,None]=None,
               expand_prune_level:Union[int,None]=None, # TODO: Implement prune level config
               use_gpu:bool=False,
+              history_tracking_level:int=1,
               print_progress:bool=True
               ) -> tuple[ValueFunction, SolverHistory]:
         '''
@@ -1275,35 +1365,47 @@ class FSVI_Solver(PBVI_Solver):
 
         # Convergence check boundary
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
-        old_max_val_per_belief = None
+        old_max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
 
         # History tracking
-        solver_history = SolverHistory(model=model,
-                                       initial_value_function=value_function,
-                                       initial_belief_set=BeliefSet(model, [b]),
-                                       expand_function='MDP',
+        solver_history = SolverHistory(tracking_level=history_tracking_level,
+                                       model=model,
                                        gamma=self.gamma,
-                                       eps=self.eps)
+                                       eps=self.eps,
+                                       expand_function='MDP',
+                                       initial_value_function=value_function,
+                                       initial_belief_set=BeliefSet(model, [b])
+                                       )
 
-        for expansion_i in range(expansions) if not print_progress else trange(expansions, desc='Expansions'):
+        for _ in trange(expansions, desc='Expansions') if print_progress else range(expansions):
 
             # Exploration
+            start_ts = datetime.now()
+
             s0 = b.random_state()
             belief_set = self.MDPExplore(model, b, s0, mdp_policy, 0, horizon)
 
+            expand_time = (datetime.now() - start_ts).total_seconds()
+            solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
+
             # Backup (update of value function)
+            start_ts = datetime.now()
+
             value_function = self.backup(model, belief_set, value_function)
 
-            # # History tracking
-            # solver_history.add(value_function, belief_set)
-
-            # convergence check
+            # Change computation
             max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
-            if old_max_val_per_belief is not None:
-                max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
-                if max_change < max_allowed_change:
-                    print('Converged early...')
-                    return value_function, solver_history
+            max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
+
+            # History tracking
+            backup_time = (datetime.now() - start_ts).total_seconds()
+            solver_history.add_backup_step(backup_time, max_change, value_function)
+            
+            # Convergence check
+            if max_change < max_allowed_change:
+                print('Converged early...')
+                return value_function, solver_history
+            
             old_max_val_per_belief = max_val_per_belief
 
         return value_function, solver_history
