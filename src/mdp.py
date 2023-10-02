@@ -45,7 +45,7 @@ class Model:
 
     ...
 
-    Attributes
+    Parameters
     ----------
     states: int | list[str] | list[list[str]]
         A list of state labels or an amount of states to be used. Also allows to provide a matrix of states to define a grid model.
@@ -72,6 +72,10 @@ class Model:
         Optional, entering either state in the list during a simulation will end the simulation.
     end_action: list
         Optional, playing action of the list during a simulation will end the simulation.
+    
+    Attributes # TODO: update this
+    ----------
+
         
     Methods
     -------
@@ -237,8 +241,11 @@ class Model:
         # ------------------------- Reachable states -------------------------
         # If not set yet
         if self.reachable_states is None:
-            # TODO Optimize reachable state computation
             log('- Starting computation of reachable states from transition data')
+            
+            if self.state_count > 1000:
+                log('-    > Warning: For models with large amounts of states, this operation can take time. Try generating it advance and use the parameter \'reachable_states\'...')
+            
             start_ts = datetime.now()
 
             self.reachable_states = []
@@ -423,6 +430,9 @@ class Model:
 
     @property
     def gpu_model(self) -> Self:
+        '''
+        The same model but on the GPU instead of the CPU. If already on the GPU, the current model object is returned.
+        '''
         if self.is_on_gpu:
             return self
         
@@ -450,6 +460,9 @@ class Model:
 
     @property
     def cpu_model(self) -> Self:
+        '''
+        The same model but on the CPU instead of the GPU. If already on the CPU, the current model object is returned.
+        '''
         if not self.is_on_gpu:
             return self
         
@@ -481,7 +494,7 @@ class AlphaVector:
 
     ...
 
-    Attributes
+    Parameters
     ----------
     values: np.ndarray
         The actual vector with the value for each state.
@@ -489,19 +502,8 @@ class AlphaVector:
         The action associated with the vector.
     '''
     def __init__(self, values:np.ndarray, action:int) -> None:
-        self._values = values
-        self._action = action
-
-
-    @property
-    def values(self) -> np.ndarray:
-        return self._values
-
-
-    @property
-    def action(self) -> int:
-        assert self._action is not None
-        return self._action
+        self.values = values
+        self.action = action
 
 
 class ValueFunction:
@@ -510,7 +512,7 @@ class ValueFunction:
 
     ...
 
-    Attributes
+    Parameters
     ----------
     model: (mdp.Model)
         The model the value function is associated with.
@@ -518,8 +520,9 @@ class ValueFunction:
         The alpha vectors composing the value function, if none are provided, it will be empty to start with and AlphaVectors can be appended.
     action_list: (list[int])
         The actions associated with alpha vectors in the case the alpha vectors are provided as an numpy array.
-
-    Methods
+    
+    # TODO: Add list of attributes
+    Methods # TODO: update list of functions
     -------
     prune(level:int=1):
         Provides a ValueFunction where the alpha vector set is pruned with a certain level of pruning.
@@ -560,7 +563,10 @@ class ValueFunction:
 
 
     @property
-    def alpha_vector_list(self) -> AlphaVector:
+    def alpha_vector_list(self) -> list[AlphaVector]:
+        '''
+        A list of AlphaVector objects. If the value function is defined as an matrix of vectors and a list of actions, the list of AlphaVectors will be generated from them.
+        '''
         if self._vector_list is None:
             self._vector_list = []
             for alpha_vect, action in zip(self._vector_array, self._actions):
@@ -570,6 +576,10 @@ class ValueFunction:
 
     @property
     def alpha_vector_array(self) -> np.ndarray:
+        '''
+        A matrix of size N x S, containing all the alpha vectors making up the value function. (N is the number of alpha vectors and S the amount of states in the model)
+        If the value function is defined as a list of AlphaVector objects, the matrix will the generated from them.
+        '''
         xp = cp if (gpu_support and self.is_on_gpu) else np
 
         if self._vector_array is None:
@@ -580,6 +590,10 @@ class ValueFunction:
 
     @property
     def actions(self) -> list[int]:
+        '''
+        A list of N actions corresponding to the N alpha vectors making up the value function.
+        If the value function is defined as a list of AlphaVector objects, the list will the generated from the actions of those alpha vector objects.
+        '''
         xp = cp if (gpu_support and self.is_on_gpu) else np
 
         if self._actions is None:
@@ -701,7 +715,7 @@ class ValueFunction:
 
             pruned_alpha_set = ValueFunction(self.model, non_dominated_vectors, non_dominated_actions)
 
-        # Level 3 pruning: LP to check for more complex domination #TODO check this
+        # Level 3 pruning: LP to check for more complex domination
         if level >= 3:
             alpha_set = pruned_alpha_set.alpha_vector_list
             pruned_alpha_set = ValueFunction(self.model)
@@ -715,8 +729,6 @@ class ValueFunction:
                 # Alpha vector contraints
                 other_count = len(other_alphas)
                 A = np.c_[np.ones(other_count), np.multiply(np.array(other_alphas), -1)]
-                # b_l = np.zeros(other_count)
-                # b_u = np.full_like(b_l, np.inf)
                 alpha_constraints = LinearConstraint(A, 0, np.inf)
 
                 # Constraints that sum of beliefs is 1
@@ -1021,7 +1033,7 @@ class SolverHistory:
 
     ...
 
-    Attributes
+    Parameters
     ----------
     tracking_level: int
         The tracking level of the solver.
@@ -1034,6 +1046,7 @@ class SolverHistory:
     initial_value_function: ValueFunction
         The initial value function the solver will use to start the solving process.
     
+    # TODO: Add list of attributes
     Methods
     -------
     add(iteration_time, value_function_change, value_function:ValueFunction):
@@ -1066,7 +1079,7 @@ class SolverHistory:
     @property
     def solution(self) -> ValueFunction:
         '''
-        The last Value function of the solving process
+        The last value function of the solving process.
         '''
         assert self.tracking_level >= 2, "Tracking level is set too low, increase it to 2 if you want to have value function tracking as well."
         return self.value_functions[-1]
@@ -1097,9 +1110,6 @@ class SolverHistory:
     def summary(self) -> str:
         '''
         A summary as a string of the information recorded.
-
-                Returns:
-                        summary_str (str): The summary of the information.
         '''
         summary_str =  f'Summary of Value Iteration run'
         summary_str += f'\n  - Model: {self.model.state_count}-state, {self.model.action_count}-action'
@@ -1138,7 +1148,7 @@ class VI_Solver(Solver):
     
     ...
 
-    Attributes
+    Parameters
     ----------
     horizon: int
         Controls for how many epochs the learning can run for (works as an infinite loop safety).
@@ -1149,7 +1159,7 @@ class VI_Solver(Solver):
 
     Methods
     -------
-    solve(model: mdp.Model):
+    solve(model: mdp.Model, initial_value_function(ValueFunction), use_gpu(bool), history_tracking_level(int), print_progress(bool)):
         The method to run the solving step that returns a value function.
     '''
     def __init__(self, horizon:int=10000, gamma:float=0.99, eps:float=0.001):
@@ -1173,6 +1183,7 @@ class VI_Solver(Solver):
                         model (mdp.Model): The model on which to run value iteration.
                         initial_value_function (ValueFunction): An optional initial value function to kick-start the value iteration process. (Optional)
                         use_gpu (bool): Whether to use the GPU with cupy array to accelerate solving. (Default: False)
+                        history_tracking_level (int): How thorough the tracking of the solving process should be. (0: Nothing; 1: Times and sizes of belief sets and value function; 2: The actual value functions and beliefs sets) (Default: 1)
                         print_progress (bool): Whether or not to print out the progress of the value iteration process. (Default: True)
 
                 Returns:
@@ -1243,14 +1254,14 @@ class RewardSet(list):
 
     ...
 
-    Attributes
+    Parameters
     ----------
     items: list
         The rewards in the set.
 
     Methods
     -------
-    plot_rewards(type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
+    plot(type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
         Function to summarize the rewards with a plot of one of ('Total', 'Moving Average' or 'Histogram')
     '''
     def __init__(self, items:list=[]):
@@ -1363,7 +1374,7 @@ class SimulationHistory:
 
     ...
 
-    Attributes
+    Parameters
     ----------
     model: mdp.Model
         The model on which the simulation happened on.
@@ -1489,7 +1500,7 @@ class Simulation:
     Can be overwritten to be fit simulation needs of particular problems.
 
     ...
-    Attributes
+    Parameters
     ----------
     model: pomdp.Model
         The POMDP model the simulation will be applied on.
@@ -1564,7 +1575,7 @@ class Agent:
 
     ...
 
-    Attributes
+    Parameters
     ----------
     model: mdp.Model
         The model in which the agent can run

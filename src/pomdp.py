@@ -47,7 +47,7 @@ class Model(MDP_Model):
 
     ...
 
-    Attributes
+    Parameters
     ----------
     states: int | list[str] | list[list[str]]
         A list of state labels or an amount of states to be used. Also allows to provide a matrix of states to define a grid model.
@@ -79,7 +79,8 @@ class Model(MDP_Model):
     end_action: list
         Optional, playing action of the list during a simulation will end the simulation.
 
-    Methods
+    # TODO: Add list of attributes
+    Methods # TODO: Update list of methods
     -------
     transition(s:int, a:int):
         Returns a random state given a prior state and an action.
@@ -234,11 +235,11 @@ class Belief:
 
     ...
 
-    Attributes
+    Parameters
     ----------
     model: Model
         The model on which the belief applies on.
-    state_probabilities: np.ndarray|None
+    values: np.ndarray|None
         A vector of the probabilities to be in each state of the model. The sum of the probabilities must sum to 1. If not specifies it will be set as the start probabilities of the model.
 
     Methods
@@ -270,6 +271,9 @@ class Belief:
     
     @property
     def values(self) -> np.ndarray:
+        '''
+        An array of the probability distribution to be in each state.
+        '''
         return self._values
     
 
@@ -383,6 +387,9 @@ class BeliefSet:
 
     @property
     def belief_array(self) -> np.ndarray:
+        '''
+        A matrix of size N x S containing N belief vectors. If belief set is stored as a list of Belief objects, the matrix of beliefs will be generated from them.
+        '''
         xp = cp if (gpu_support and self.is_on_gpu) else np
 
         if self._belief_array is None:
@@ -392,6 +399,9 @@ class BeliefSet:
 
     @property
     def belief_list(self) -> list[Belief]:
+        '''
+        A list of Belief objects. If the belief set is represented as a matrix of Belief vectors, the list of Belief objects will be generated from it.
+        '''
         if self._belief_list is None:
             self._belief_list = [Belief(self.model, belief_vector) for belief_vector in self._belief_array]
         return self._belief_list
@@ -893,7 +903,7 @@ class PBVI_Solver(Solver):
     The various expand functions and the backup function have been implemented based on the pseudocodes found the paper from J. Pineau, G. Gordon, and S. Thrun, 'Point-based approximations for fast POMDP solving'
 
     ...
-    Attributes
+    Parameters
     ----------
     gamma: float (default 0.9)
         The learning rate, used to control how fast the value function will change after the each iterations.
@@ -1112,7 +1122,7 @@ class PBVI_Solver(Solver):
 
     def expand_ger(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction) -> BeliefSet:
         '''
-        Greedy Error Reduction
+        Greedy Error Reduction. NOT IMPLEMENTED YET.
 
                 Parameters:
                         model (POMDP): the POMDP model on which to expand the belief set on.
@@ -1183,13 +1193,14 @@ class PBVI_Solver(Solver):
             - ger: Greedy Error Reduction. Extra params: /
 
                 Parameters:
-                        model (pomdp.Model) - The model to solve.
-                        expansions (int) - How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
-                        horizon (int) - How many times the alpha vector set must be updated every time the belief set is expanded.
+                        model (pomdp.Model): The model to solve.
+                        expansions (int): How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
+                        horizon (int): How many times the alpha vector set must be updated every time the belief set is expanded.
                         initial_belief (BeliefSet, Belief) - Optional: An initial list of beliefs to start with.
                         initial_value_function (ValueFunction) - Optional: An initial value function to start the solving process with.
                         expand_prune_level (int) - Optional: Parameter to prune the value function further before the expand function.
                         use_gpu (bool): Whether to use the GPU with cupy array to accelerate solving. (Default: False)
+                        history_tracking_level (int): How thorough the tracking of the solving process should be. (0: Nothing; 1: Times and sizes of belief sets and value function; 2: The actual value functions and beliefs sets) (Default: 1)
                         print_progress (bool): Whether or not to print out the progress of the value iteration process. (Default: True)
 
                 Returns:
@@ -1274,6 +1285,27 @@ class PBVI_Solver(Solver):
 
 
 class FSVI_Solver(PBVI_Solver):
+    '''
+    Solver to solve a POMDP problem based on the Forward Search Value Iteration principle.
+    It has been built based on the paper of G. Shani, R. I. Brafman, and S. I. Shimony: 'Forward Search Value Iteration for POMDPS'.
+    It works by utilizing the optimal MDP policy to generate paths to explore that lead to series of Beliefs
+    that can then be used by the Backup function to update the value function.
+    
+    ...
+    Parameters
+    ----------
+    gamma: float (default 0.9)
+        The learning rate, used to control how fast the value function will change after the each iterations.
+    eps: float (default 0.001)
+        The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.
+
+    Methods
+    -------
+    MDPExplore(model:Model, b:Belief, s:int, mdp_policy:ValueFunction, depth:int, horizon:int):
+        Function to generate a sequence of beliefs that follow a sequence of actions leading to the target state.
+    Solve(model:Model, expansions:int, horizon:int, mdp_policy:ValueFunction, initial_belief, initial_value_function, expand_prune_level:int, use_gpu:bool, history_tracking_level:int, print_progress:bool):
+        Function to solve the provided POMDP Model using FSVI.
+    '''
     def __init__(self, gamma:float=0.9, eps:float=0.001):
         self.gamma = gamma
         self.eps = eps
@@ -1281,7 +1313,19 @@ class FSVI_Solver(PBVI_Solver):
 
     def MDPExplore(self, model:Model, b:Belief, s:int, mdp_policy:ValueFunction, depth:int, horizon:int) -> BeliefSet:
         '''
-        TODO: Write description
+        Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs.
+        It is a recursive function that is started by a initial state 's' and using the MDP policy, chooses the best action to take.
+        Following this, a random next state 's_p' is being sampled from the transition probabilities and a random observation 'o' based on the observation probabilities.
+        Then the given belief is updated using the chosen action and the observation received and the updated belief is added to the sequence.
+        Once the state is a goal state, the recursion is done and the belief sequence is returned.
+
+                Parameters:
+                        model (pomdp.Model): The model in which the exploration process will happen.
+                        b (Belief): A belief to be added to the returned belief sequence and updated for the next step of the recursion.
+                        s (int): The state that starts the exploration sequence and based on which an action will be chosen.
+                        mdp_policy (ValueFunction): The mdp policy used to choose the action from with the given state 's'.
+                        depth (int): The current recursion depth.
+                        horizon (int): The maximum recursion depth that can be reached before the generated belief sequence is returned.
         '''
         xp = np if not gpu_support else cp.get_array_module(b.values)
         belief_list = [b]
@@ -1321,7 +1365,26 @@ class FSVI_Solver(PBVI_Solver):
               print_progress:bool=True
               ) -> tuple[ValueFunction, SolverHistory]:
         '''
-        TODO: Write description
+        The main loop for the forward search value iteration process. The amount of 'expansions' will determine how many the exploration process will run (generating every time a sequence of beliefs).
+        Then the 'horizon' parameter determines how deep the MDP exploration can run for. For example, is it set at 10 but it takes 15 steps to reach the end goal, the MDP exploration process will exit early.
+        It should therefore be set to a bit higher than the maximum amount steps required to reach a goal state from any other state. It is mainly used as a safeguard to avoid infinite looping.
+
+
+
+                Parameters:
+                        model (pomdp.Model): The model to solve.
+                        expansions (int): How many times the MDP exploration process will run.
+                        horizon (int): How many deep the MDP exploration process can run for.
+                        mdp_policy (ValueFunction): The policy that will be used to choose actions from states during the exploration process.
+                        initial_belief (Belief) - Optional: An initial belief that will replace the default initial belief generated from the start probabilities of the model.
+                        initial_value_function (ValueFunction) - Optional: An initial value function to start the solving process with. (Can for example be the MDP value function)
+                        expand_prune_level (int) - Optional: Parameter to prune the value function further before the expand function.
+                        use_gpu (bool): Whether to use the GPU with cupy array to accelerate solving. (Default: False)
+                        history_tracking_level (int): How thorough the tracking of the solving process should be. (0: Nothing; 1: Times and sizes of belief sets and value function; 2: The actual value functions and beliefs sets) (Default: 1)
+                        print_progress (bool): Whether or not to print out the progress of the value iteration process. (Default: True)
+
+                Returns:
+                        value_function (ValueFunction): The alpha vectors approximating the value function.
         '''
         # numpy or cupy module
         xp = np
@@ -1466,7 +1529,7 @@ class Simulation(MDP_Simulation):
     An initial random state is given and action can be applied to the model that impact the actual state of the agent along with returning a reward and an observation.
 
     ...
-    Attributes
+    Parameters
     ----------
     model: pomdp.Model
         The POMDP model the simulation will be applied on.
@@ -1524,7 +1587,7 @@ class Agent:
 
     ...
 
-    Attributes
+    Parameters
     ----------
     model: pomdp.Model
         The model in which the agent can run
