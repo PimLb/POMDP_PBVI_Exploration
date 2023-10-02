@@ -29,6 +29,8 @@ COLOR_LIST = [{
     'rgb': [int(value.lstrip('#')[i:i + (len(value)-1) // 3], 16) for i in range(0, (len(value)-1), (len(value)-1) // 3)]
     } for item, value in colors.TABLEAU_COLORS.items()] # type: ignore
 
+COLOR_ARRAY = np.array([c['rgb'] for c in COLOR_LIST])
+
 
 def log(content:str) -> None:
     '''
@@ -62,8 +64,8 @@ class Model:
         If provided, it will be use in combination with the transition matrix to fill to expected rewards.
     rewards_are_probabilistic: bool
         Whether the rewards provided are probabilistic or pure rewards. If probabilist 0 or 1 will be the reward with a certain probability.
-    grid_states: list[list]]
-        Optional, if provided, the model will be converted to a grid model. Allows for 'None' states if there is a gaps in the grid.
+    grid_states:
+        Optional, if provided, the model will be converted to a grid model.
     start_probabilities: list
         Optional, the distribution of chances to start in each state. If not provided, there will be an uniform chance for each state.
     end_states: list
@@ -83,7 +85,7 @@ class Model:
                  reachable_states=None,
                  rewards=None,
                  rewards_are_probabilistic:bool=False,
-                 grid_states:Union[None,list[list[Union[str,None]]]]=None,
+                 state_grid=None,
                  start_probabilities:Union[list,None]=None,
                  end_states:list[int]=[],
                  end_actions:list[int]=[]
@@ -96,9 +98,9 @@ class Model:
         log('Instantiation of MDP Model:')
         
         # ------------------------- States -------------------------
+        self.state_grid = None
         if isinstance(states, int): # State count
             self.state_labels = [f's_{i}' for i in range(states)]
-            self.grid_states = [self.state_labels]
 
         elif isinstance(states, list) and all(isinstance(item, list) for item in states): # 2D list of states
             dim1 = len(states)
@@ -110,11 +112,10 @@ class Model:
                 for state in state_dim:
                     self.state_labels.append(state)
 
-            self.grid_states = states
+            self.state_grid = np.arange(dim1 * dim2).reshape(dim1, dim2)
 
         else: # Default: single of list of string items
             self.state_labels = [item for item in states if isinstance(item, str)]
-            self.grid_states = [self.state_labels]
 
         self.state_count = len(self.state_labels)
         self.states = np.arange(self.state_count)
@@ -180,15 +181,46 @@ class Model:
         if duration > 1:
             log(f'    > /!\\ Transition table generation took long, if not done already, try to use the reachable_states parameter to speedup the process.')
 
-        # ------------------------- Rewards are probabilistic -------------------------
-        self.probabilistic_rewards = rewards_are_probabilistic
+        # ------------------------- Rewards are probabilistic toggle -------------------------
+        self.rewards_are_probabilistic = rewards_are_probabilistic
 
-        # Convert to grid if grid_states is provided
-        if grid_states is not None:
-            self.convert_to_grid(grid_states)
+        # ------------------------- State grid -------------------------
+        log('- Generation of state grid')
+        if state_grid is None and self.state_grid is None:
+            self.state_grid = np.arange(self.state_count).reshape((1,self.state_count))
+        
+        elif state_grid is not None:
+            assert all(isinstance(l, list) for l in state_grid), "The provided states grid must be a list of lists."
 
-        # TODO: Rework this
-        # self.map_states_to_grid_points()
+            grid_shape = (len(state_grid), len(state_grid[0]))
+            assert all(len(l) == grid_shape[1] for l in state_grid), "All rows must have the same length."
+
+            if all(all(isinstance(e, int) for e in l) for l in state_grid):
+                state_grid = np.array(state_grid)
+                try:
+                    self.states[state_grid]
+                except:
+                    raise Exception('An error occured with the list of state indices provided...')
+                else:
+                    self.state_grid = state_grid
+
+            else:
+                log('    > Warning: looping through all grid states provided to find the corresponding states, can take a while...')
+                
+                np_state_grid = np.zeros(grid_shape, dtype=int)
+                states_covered = 0
+                for i, row in enumerate(state_grid):
+                    for j, element in enumerate(state_grid):
+                        if isinstance(element, str) and (element in self.state_labels):
+                            states_covered += 1
+                            np_state_grid[i,j] = self.state_labels.index(element)
+                        elif isinstance(element, int) and (element < self.state_count):
+                            np_state_grid[i,j] = element
+                        
+                        else:
+                            raise Exception(f'Countains a state (\'{state}\') not in the list of states...')
+
+                assert states_covered == self.state_count, "Some states of the state list are missing..."
 
         # ------------------------- Start state probabilities -------------------------
         log('- Generating start probabilities table')
@@ -331,49 +363,11 @@ class Model:
                         reward (int, float): The reward received.
         '''
         reward = self.immediate_reward_table[s,a,s_p] if self.immediate_reward_table is not None else self.immediate_reward_function(s,a,s_p)
-        if self.probabilistic_rewards:
+        if self.rewards_are_probabilistic:
             rnd = random.random()
             return 1 if rnd < reward else 0
         else:
             return reward
-        
-
-    def convert_to_grid(self, state_grid:list[list]) -> None:
-        '''
-        Function to define the grid structure of the the MDP model.
-
-                Parameters:
-                        state_grid (list[list]): A matrix of states (as their labels), None are allowed, it will just be a gap in the grid.
-        '''
-        assert all(len(state_dim) == len(state_grid[0]) for state_dim in state_grid), "All sublists of states must be of equal size"
-
-        states_covered = 0
-        for dim1_states in state_grid:
-            for state in dim1_states:
-                if state is None:
-                    continue
-
-                if state in self.state_labels:
-                    states_covered += 1
-                elif not (state in self.state_labels):
-                    raise Exception(f'Countains a state (\'{state}\') not in the list of states...')
-
-        assert states_covered == self.state_count, "Some states of the state list are missing..."
-        self.grid_states = state_grid
-        self.map_states_to_grid_points()
-
-
-    def map_states_to_grid_points(self) -> None:
-        '''
-        Function to map states to grid points.
-        '''
-        self.state_grid_points = []
-
-        for state in self.state_labels:
-            for y, y_state_list in enumerate(self.grid_states):
-                for x, x_state in enumerate(y_state_list):
-                    if x_state == state:
-                        self.state_grid_points.append([x,y])
     
 
     def save(self, file_name:str, path:str='./Models') -> None:
@@ -631,7 +625,8 @@ class ValueFunction:
         gpu_value_function = None
         if self._vector_array is not None:
             gpu_vector_array = cp.array(self._vector_array)
-            gpu_value_function = ValueFunction(gpu_model, gpu_vector_array, self._actions)
+            gpu_actions = self._actions if isinstance(self._actions, list) else cp.array(self._actions)
+            gpu_value_function = ValueFunction(gpu_model, gpu_vector_array, gpu_actions)
         
         else:
             gpu_alpha_vectors = [AlphaVector(cp.array(av.values), av.action) for av in self._vector_list]
@@ -654,7 +649,8 @@ class ValueFunction:
         cpu_value_function = None
         if self._vector_array is not None:
             cpu_vector_array = cp.asnumpy(self._vector_array)
-            cpu_value_function = ValueFunction(cpu_model, cpu_vector_array, self._actions)
+            cpu_actions = self._actions if isinstance(self._actions, list) else cp.asnumpy(self._actions)
+            cpu_value_function = ValueFunction(cpu_model, cpu_vector_array, cpu_actions)
         
         else:
             cpu_alpha_vectors = [AlphaVector(cp.asnumpy(av.values), av.action) for av in self._vector_list]
@@ -823,7 +819,7 @@ class ValueFunction:
         elif self.model.state_count == 3:
             func = self._plot_3D
         else:
-            print('Warning: as_grid parameter set to False but state count is >3 so it will be plotted as a grid')
+            print('[Warning] \'as_grid\' parameter set to False but state count is >3 so it will be plotted as a grid')
             func = self._plot_grid
 
         func(size, belief_set)
@@ -993,30 +989,13 @@ class ValueFunction:
 
 
     def _plot_grid(self, size=5, belief_set=None):
-        assert self.model.grid_states is not None, "Model is not in grid format"
+        value_table = np.max(self.alpha_vector_array, axis=0)[self.model.state_grid]
+        best_action_table = np.array(self.actions)[np.argmax(self.alpha_vector_array, axis=0)][self.model.state_grid]
+        best_action_colors = COLOR_ARRAY[best_action_table]
 
-        dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
-
-        value_table = np.empty(dimensions)
-        best_action_table = np.zeros([*dimensions,3],dtype=int)
-
-        for x in range(value_table.shape[0]):
-            for y in range(value_table.shape[1]):
-                state_label = self.model.grid_states[x][y]
-                if state_label in self.model.state_labels:
-                    state_id = self.model.state_labels.index(state_label)
-
-                    best_vector = np.argmax(self.alpha_vector_array[:,state_id])
-                    value_table[x,y] = self.alpha_vector_array[best_vector, state_id]
-                    best_action_table[x,y,:] = np.array(COLOR_LIST[self.actions[best_vector].item()]['rgb'])
+        dimensions = self.model.state_grid.shape
 
         fig, (ax1,ax2) = plt.subplots(1,2, figsize=(size*2, size), width_ratios=(0.55,0.45))
-
-        try:
-            value_table = np.asnumpy(value_table)
-            best_action_table = np.asnumpy(best_action_table)
-        except:
-            pass
 
         ax1.set_title('Value function')
         ax1_plot = ax1.imshow(value_table)
@@ -1025,7 +1004,7 @@ class ValueFunction:
         ax1.set_yticks([i for i in range(dimensions[0])])
 
         ax2.set_title('Action policy')
-        ax2.imshow(best_action_table)
+        ax2.imshow(best_action_colors)
         p = [ patches.Patch(color=COLOR_LIST[int(i)]['id'], label=str(self.model.action_labels[int(i)])) for i in self.model.actions]
         ax2.legend(handles=p, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
         ax2.set_xticks([i for i in range(dimensions[1])])
@@ -1405,7 +1384,7 @@ class SimulationHistory:
         self.model = model
 
         self.states = [start_state]
-        self.grid_point_sequence = [self.model.state_grid_points[start_state]]
+        self.grid_point_sequence = [[i[0] for i in np.where(self.model.state_grid == start_state)]]
         self.actions = []
         self.rewards = RewardSet()
 
@@ -1422,7 +1401,7 @@ class SimulationHistory:
         self.actions.append(action)
         self.rewards.append(reward)
         self.states.append(next_state)
-        self.grid_point_sequence.append(self.model.state_grid_points[next_state])
+        self.grid_point_sequence.append([i[0] for i in np.where(self.model.state_grid == next_state)])
     
 
     def plot_simulation_steps(self, size:int=5):
@@ -1435,7 +1414,7 @@ class SimulationHistory:
         plt.figure(figsize=(size,size))
 
         # Ticks
-        dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
+        dimensions = self.model.state_grid.shape
         plt.xticks([i for i in range(dimensions[1])])
         plt.yticks([i for i in range(dimensions[0])])
 
@@ -1444,8 +1423,8 @@ class SimulationHistory:
 
         # Actual plotting
         data = np.array(self.grid_point_sequence)
-        plt.plot(data[:, 0], data[:, 1], color='red')
-        plt.scatter(data[:, 0], data[:, 1], color='red')
+        plt.plot(data[:,1], data[:,0], color='red')
+        plt.scatter(data[:,1], data[:,0], color='red')
         plt.show()
 
 
@@ -1454,7 +1433,7 @@ class SimulationHistory:
         data = np.array(self.grid_point_sequence)[:(frame_i+1),:]
 
         # Ticks
-        dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
+        dimensions = self.model.state_grid.shape
         x_ticks = [i for i in range(dimensions[1])]
         y_ticks = [i for i in range(dimensions[0])]
 
@@ -1462,8 +1441,8 @@ class SimulationHistory:
         ax.clear()
         ax.set_title(f'Simulation (Frame {frame_i})')
 
-        ax.plot(data[:, 0], data[:, 1], color='red')
-        ax.scatter(data[:, 0], data[:, 1], color='red')
+        ax.plot(data[:,1], data[:,0], color='red')
+        ax.scatter(data[:,1], data[:,0], color='red')
 
         ax.set_xticks(x_ticks)
         ax.set_yticks(y_ticks)

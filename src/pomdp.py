@@ -38,6 +38,8 @@ COLOR_LIST = [{
     'rgb': [int(value.lstrip('#')[i:i + (len(value)-1) // 3], 16) for i in range(0, (len(value)-1), (len(value)-1) // 3)]
     } for item, value in colors.TABLEAU_COLORS.items()] # type: ignore
 
+COLOR_ARRAY = np.array([c['rgb'] for c in COLOR_LIST])
+
 
 class Model(MDP_Model):
     '''
@@ -68,8 +70,8 @@ class Model(MDP_Model):
         The observation matrix, has to be |S| x |A| x |O|. If none is provided, it will be randomly generated.
     rewards_are_probabilistic: bool
         Whether the rewards provided are probabilistic or pure rewards. If probabilist 0 or 1 will be the reward with a certain probability.
-    grid_states: list[list[Union[str,None]]]
-        Optional, if provided, the model will be converted to a grid model. Allows for 'None' states if there is a gaps in the grid.
+    grid_states:
+        Optional, if provided, the model will be converted to a grid model.
     start_probabilities: list
         Optional, the distribution of chances to start in each state. If not provided, there will be an uniform chance for each state. It is also used to represent a belief of complete uncertainty.
     end_states: list
@@ -93,7 +95,7 @@ class Model(MDP_Model):
                  rewards=None,
                  observation_table=None,
                  rewards_are_probabilistic:bool=False,
-                 grid_states:Union[None,list[list[Union[str,None]]]]=None,
+                 grid_states=None,
                  start_probabilities:Union[list,None]=None,
                  end_states:list[int]=[],
                  end_actions:list[int]=[]
@@ -105,7 +107,7 @@ class Model(MDP_Model):
                          reachable_states=reachable_states,
                          rewards=-1, # Defined here lower since immediate reward table has different shape for MDP is different than for POMDP
                          rewards_are_probabilistic=rewards_are_probabilistic,
-                         grid_states=grid_states,
+                         state_grid=grid_states,
                          start_probabilities=start_probabilities,
                          end_states=end_states,
                          end_actions=end_actions)
@@ -265,8 +267,6 @@ class Belief:
         else:
             self._values = model.start_probabilities
 
-        self._grid_values = None
-
     
     @property
     def values(self) -> np.ndarray:
@@ -287,7 +287,8 @@ class Belief:
         '''
         xp = np if not gpu_support else cp.get_array_module(self._values)
 
-        new_state_probabilities = xp.einsum('sr,sr->s', self.model.reachable_transitional_observation_table[:,a,o,:], self.values[self.model.reachable_states[:,a,:]])
+        reachable_state_probabilities = self.model.reachable_transitional_observation_table[:,a,o,:] * self.values[:,None]
+        new_state_probabilities = xp.bincount(self.model.reachable_states[:,a,:].flatten(), weights=reachable_state_probabilities.flatten(), minlength=self.model.state_count)
         
         # Normalization
         new_state_probabilities /= xp.sum(new_state_probabilities)
@@ -296,7 +297,6 @@ class Belief:
         new_belief = super().__new__(self.__class__)
         new_belief.model = self.model
         new_belief._values = new_state_probabilities
-        new_belief._grid_values = None
 
         return new_belief
     
@@ -314,24 +314,6 @@ class Belief:
         return rand_s
     
 
-    @property
-    def grid_values(self) -> np.ndarray: # TODO improve grid values computation
-        if self._grid_values is None: # TODO make it work for potential gpu array
-            dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
-
-            self._grid_values = np.zeros(dimensions)
-
-            for x in range(dimensions[0]):
-                for y in range(dimensions[1]):
-                    state_label = self.model.grid_states[x][y]
-                    
-                    if state_label is not None:
-                        s = self.model.state_labels.index(state_label) # type: ignore
-                        self._grid_values[x,y] = self._values[s]
-
-        return self._grid_values
-    
-
     def plot(self, size:int=5) -> None:
         '''
         Function to plot a heatmap of the belief distribution if the belief is of a grid model.
@@ -343,12 +325,13 @@ class Belief:
         plt.figure(figsize=(size*1.2,size))
 
         # Ticks
-        dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
+        dimensions = self.model.state_grid.shape
         plt.xticks([i for i in range(dimensions[1])])
         plt.yticks([i for i in range(dimensions[0])])
 
         # Actual plot
-        plt.imshow(self.grid_values,cmap='Blues')
+        grid_values = self._values[self.model.state_grid]
+        plt.imshow(grid_values,cmap='Blues')
         plt.colorbar()
         plt.show()
 
@@ -1460,7 +1443,7 @@ class SimulationHistory(MDP_SimulationHistory):
         belief = self.beliefs[frame_i]
 
         # Ticks
-        dimensions = (len(self.model.grid_states), len(self.model.grid_states[0]))
+        dimensions = self.model.state_grid.shape
         x_ticks = [i for i in range(dimensions[1])]
         y_ticks = [i for i in range(dimensions[0])]
 
@@ -1468,9 +1451,10 @@ class SimulationHistory(MDP_SimulationHistory):
         ax.clear()
         ax.set_title(f'Simulation (Frame {frame_i})')
 
-        ax.imshow(belief.grid_values,cmap='Blues')
-        ax.plot(data[:, 0], data[:, 1], color='red')
-        ax.scatter(data[:, 0], data[:, 1], color='red')
+        grid_values = belief.values[self.model.state_grid]
+        ax.imshow(grid_values, cmap='Blues')
+        ax.plot(data[:,1], data[:,0], color='red')
+        ax.scatter(data[:,1], data[:,0], color='red')
 
         ax.set_xticks(x_ticks)
         ax.set_yticks(y_ticks)
@@ -1786,8 +1770,8 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
             # ----------------------------------------------------------------------------------------------
             # Transition table
             # ----------------------------------------------------------------------------------------------
-            if ('states' in model_params) and ('actions' in model_params) and ('observations' in model_params) and not ('transition_table' in model_params):
-                model_params['transition_table'] = np.full((state_count, action_count, state_count), 0.0)
+            if ('states' in model_params) and ('actions' in model_params) and ('observations' in model_params) and not ('transitions' in model_params):
+                model_params['transitions'] = np.full((state_count, action_count, state_count), 0.0)
             
             if line.startswith('T'):
                 transition_params = line.replace(':',' ').split()[1:]
@@ -1809,7 +1793,7 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
                     for s in ids[1]:
                         for a in ids[0]:
                             for s_p in ids[2]:
-                                model_params['transition_table'][s, a, s_p] = float(line_items[-1])
+                                model_params['transitions'][s, a, s_p] = float(line_items[-1])
                 
                 # More items
                 else:
@@ -1832,11 +1816,11 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
                     for s in ids[1]:
                         # Uniform
                         if 'uniform' in line_items:
-                            model_params['transition_table'][s, a, :] = np.ones(state_count) / state_count
+                            model_params['transitions'][s, a, :] = np.ones(state_count) / state_count
                             continue
 
                         for s_p, item in enumerate(line_items):
-                            model_params['transition_table'][s, a, s_p] = float(item)
+                            model_params['transitions'][s, a, s_p] = float(item)
 
                 reading = ''
 
@@ -1856,17 +1840,17 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
                 for a in ids[0]:
                     # Uniform
                     if 'uniform' in line_items:
-                        model_params['transition_table'][:, a, :] = np.ones((state_count, state_count)) / state_count
+                        model_params['transitions'][:, a, :] = np.ones((state_count, state_count)) / state_count
                         reading = ''
                         continue
                     # Identity
                     if 'identity' in line_items:
-                        model_params['transition_table'][:, a, :] = np.eye(state_count)
+                        model_params['transitions'][:, a, :] = np.eye(state_count)
                         reading = ''
                         continue
 
                     for s_p, item in enumerate(line_items):
-                        model_params['transition_table'][s, a, s_p] = float(item)
+                        model_params['transitions'][s, a, s_p] = float(item)
 
                 if ('uniform' not in line_items) and ('identity' not in line_items):
                     read_lines += 1
@@ -1968,8 +1952,8 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
             # ----------------------------------------------------------------------------------------------
             # Rewards table
             # ----------------------------------------------------------------------------------------------
-            if ('states' in model_params) and ('actions' in model_params) and ('observations' in model_params) and not ('immediate_reward_table' in model_params):
-                model_params['immediate_reward_table'] = np.full((state_count, action_count, state_count, observation_count), 0.0)
+            if ('states' in model_params) and ('actions' in model_params) and ('observations' in model_params) and not ('rewards' in model_params):
+                model_params['rewards'] = np.full((state_count, action_count, state_count, observation_count), 0.0)
 
             if line.startswith('R'):
                 reward_params = line.replace(':',' ').split()[1:]
@@ -1994,7 +1978,7 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
                         for s in ids[1]:
                             for s_p in ids[2]:
                                 for o in ids[3]:
-                                    model_params['immediate_reward_table'][s, a, s_p, o] = float(line_items[-1])
+                                    model_params['rewards'][s, a, s_p, o] = float(line_items[-1])
                 
                 elif len(reward_params) == 1:
                     raise Exception('Need more than 1 parameter for rewards')
@@ -2020,7 +2004,7 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
                     for s in ids[1]:
                         for s_p in ids[2]:
                             for o, item in enumerate(line_items):
-                                model_params['immediate_reward_table'][s, a, s_p, o] = float(item)
+                                model_params['rewards'][s, a, s_p, o] = float(item)
 
                 reading = ''
 
@@ -2041,7 +2025,7 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
                 for a in ids[0]:
                     for s in ids[1]:
                         for o, item in enumerate(line_items):
-                            model_params['immediate_reward_table'][s, a, s_p, o] = float(item)
+                            model_params['rewards'][s, a, s_p, o] = float(item)
 
                 read_lines += 1
                 if read_lines == state_count:
