@@ -1103,7 +1103,7 @@ class SolverHistory:
             self.value_function_changes.append(float(value_function_change))
 
         if self.tracking_level >= 2:
-            self.value_functions.append(value_function)
+            self.value_functions.append(value_function if not value_function.is_on_gpu else value_function.to_cpu())
     
 
     @property

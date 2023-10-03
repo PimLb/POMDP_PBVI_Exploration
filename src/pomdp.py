@@ -653,6 +653,15 @@ class SolverHistory:
 
 
     @property
+    def solution(self) -> ValueFunction:
+        '''
+        The last value function of the solving process.
+        '''
+        assert self.tracking_level >= 2, "Tracking level is set too low, increase it to 2 if you want to have value function tracking as well."
+        return self.value_functions[-1]
+    
+
+    @property
     def explored_beliefs(self) -> BeliefSet:
         '''
         The final set of beliefs explored during the solving.
@@ -677,7 +686,7 @@ class SolverHistory:
             self.beliefs_counts.append(len(belief_set))
 
         if self.tracking_level >= 2:
-            self.belief_sets.append(belief_set)
+            self.belief_sets.append(belief_set if not belief_set.is_on_gpu else belief_set.to_cpu())
 
 
     def add_backup_step(self,
@@ -700,7 +709,7 @@ class SolverHistory:
             self.value_function_changes.append(float(value_function_change))
 
         if self.tracking_level >= 2:
-            self.value_functions.append(value_function)
+            self.value_functions.append(value_function if not value_function.is_on_gpu else value_function.to_cpu())
 
 
     @property
@@ -755,7 +764,7 @@ class SolverHistory:
                            compare_with:Union[list, ValueFunction, MDP_SolverHistory]=[],
                            graph_names:list[str]=[],
                            fps:int=10
-                           ) -> None: # TODO check support with cupy arrays
+                           ) -> None:
         '''
         Function to generate a video of the training history. Another solved solver or list of solvers can be put in the 'compare_with' parameter.
         These other solver's value function will be overlapped with the 1st value function.
@@ -776,7 +785,7 @@ class SolverHistory:
         if self.model.state_count == 2:
             self._save_history_video_2D(custom_name, compare_with, copy.copy(graph_names), fps)
         elif self.model.state_count == 3:
-            print('Not implemented...')
+            raise Exception('Not implemented...')
 
 
     def _save_history_video_2D(self, custom_name=None, compare_with=[], graph_names=[], fps=10):
