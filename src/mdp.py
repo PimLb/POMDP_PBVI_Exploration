@@ -34,7 +34,12 @@ COLOR_ARRAY = np.array([c['rgb'] for c in COLOR_LIST])
 
 def log(content:str) -> None:
     '''
-    Function to print a log line with a timestamp 
+    Function to print a log line with a timestamp.
+
+    Parameters
+    ----------
+    content : str
+        The content to be printed as a log.
     '''
     print(f'[{datetime.now().strftime("%m/%d/%Y, %H:%M:%S")}] ' + content)
 
@@ -47,40 +52,85 @@ class Model:
 
     Parameters
     ----------
-    states: int | list[str] | list[list[str]]
+    states : int or list[str] or list[list[str]]
         A list of state labels or an amount of states to be used. Also allows to provide a matrix of states to define a grid model.
-    actions: int|list
+    actions : int or list
         A list of action labels or an amount of actions to be used.
-    transitions:
+    transitions : array-like or function, optional
         The transitions between states, an array can be provided and has to be |S| x |A| x |S| or a function can be provided. 
         If a function is provided, it has be able to deal with np.array arguments.
         If none is provided, it will be randomly generated.
-    reachable_states:
+    reachable_states : array-like, optional
         A list of states that can be reached from each state and actions. It must be a matrix of size |S| x |A| x |R| where |R| is the max amount of states reachable from any given state and action pair.
         It is optional but useful for speedup purposes.
-    rewards:
+    rewards : array-like or function, optional
         The reward matrix, has to be |S| x |A| x |S|.
         A function can also be provided here but it has to be able to deal with np.array arguments.
         If provided, it will be use in combination with the transition matrix to fill to expected rewards.
-    rewards_are_probabilistic: bool
+    rewards_are_probabilistic : bool, default=False
         Whether the rewards provided are probabilistic or pure rewards. If probabilist 0 or 1 will be the reward with a certain probability.
-    grid_states:
-        Optional, if provided, the model will be converted to a grid model.
-    start_probabilities: list
-        Optional, the distribution of chances to start in each state. If not provided, there will be an uniform chance for each state.
-    end_states: list
-        Optional, entering either state in the list during a simulation will end the simulation.
-    end_action: list
-        Optional, playing action of the list during a simulation will end the simulation.
+    state_grid : array-like, optional
+        If provided, the model will be converted to a grid model.
+    start_probabilities : list, optional
+        The distribution of chances to start in each state. If not provided, there will be an uniform chance for each state.
+    end_states : list, optional
+        Entering either state in the list during a simulation will end the simulation.
+    end_action : list, optional
+        Playing action of the list during a simulation will end the simulation.
     
-    Attributes # TODO: update this
+    Attributes
     ----------
-
-        
-    Methods
-    -------
-    transition(s:int, a:int):
-        Returns a random state given a prior state and an action.
+    states : np.ndarray
+        A 1D array of states indices. Used to loop over states.
+    state_labels : list[str]
+        A list of state labels. (To be mainly used for plotting)
+    state_count : int
+        How many states are in the Model.
+    state_grid : np.ndarray
+        The state indices organized as a 2D grid. (Used for plotting purposes)
+    actions : np.ndarry
+        A 1D array of action indices. Used to loop over actions.
+    action_labels : list[str]
+        A list of action labels. (To be mainly used for plotting)
+    action_count : int
+        How many action are in the Model.
+    transition_table : np.ndarray
+        A 3D matrix of the transition probabilities.
+        Can be None in the case a transition function is provided instead.
+        Note: When possible, use reachable states and reachable probabilities instead.
+    transition_function : function
+        A callable function taking 3 arguments: s, a, s_p; and returning a float between 0.0 and 1.0.
+        Can be None in the case a transition table is provided instead.
+        Note: When possible, use reachable states and reachable probabilities instead.
+    reachable_states : np.ndarray
+        A 3D array of the shape S x A x R, where R is max amount to states that can be reached from any state-action pair.
+    reachable_probabilities : np.ndarray
+        A 3D array of the same shape as reachable_states, the array represent the probability of reaching the state pointed by the reachable_states matrix.
+    reachable_state_count : int
+        The maximum of states that can be reached from any state-action combination.
+    immediate_reward_table : np.ndarray
+        A 3D matrix of shape S x A x S of the reward that will received when taking action a, in state s and landing in state s_p.
+        Can be None in the case an immediate rewards function is provided instead.
+    immediate_reward_function : function
+        A callable function taking 3 argments: s, a, s_p and returning the immediate reward the agent will receive.
+        Can be None in the case an immediate rewards function is provided instead.
+    expected_reward_table : np.ndarray
+        A 2D array of shape S x A. It represents the rewards that is expected to be received when taking action a from state s.
+        It is made by taking the weighted average of immediate rewards and the transitions.
+    start_probabilities : np.ndarray
+        A 1D array of length |S| containing the probility distribution of the agent starting in each state.
+    rewards_are_probabilisitic : bool
+        Whether the immediate rewards are probabilitic, ie: returning a 0 or 1 based on the reward that is considered to be a probability.
+    end_states : list[int]
+        A list of states that, when reached, terminate a simulation.
+    end_actions : list[int]
+        A list of actions that, when taken, terminate a simulation.
+    is_on_gpu : bool
+        Whether the numpy array of the model are stored on the gpu or not.
+    gpu_model : mdp.Model
+        An equivalent model with the np.ndarray objects on GPU. (If already on GPU, returns self)
+    cpu_model : mdp.Model
+        An equivalent model with the np.ndarray objects on CPU. (If already on CPU, returns self)
     '''
     def __init__(self,
                  states:Union[int, list[str], list[list[str]]],
@@ -344,12 +394,17 @@ class Model:
         '''
         Returns a random posterior state knowing we take action a in state t and weighted on the transition probabilities.
 
-                Parameters:
-                        s (int): The current state
-                        a (int): The action to take
+        Parameters
+        ----------
+        s : int 
+            The current state
+        a : int
+            The action to take
 
-                Returns:
-                        s_p (int): The posterior state
+        Returns
+        -------
+        s_p : int
+            The posterior state
         '''
         xp = cp if self.is_on_gpu else np
         s_p = int(xp.random.choice(a=self.reachable_states[s,a], size=1, p=self.reachable_probabilities[s,a])[0])
@@ -361,13 +416,19 @@ class Model:
         Returns the rewards of playing action a when in state s and landing in state s_p.
         If the rewards are probabilistic, it will return 0 or 1.
 
-                Parameters:
-                        s (int): The current state
-                        a (int): The action taking in state s
-                        s_p (int): The state landing in after taking action a in state s
+        Parameters
+        ----------
+        s : int
+            The current state
+        a : int
+            The action taking in state s
+        s_p : int
+            The state landing in after taking action a in state s
 
-                Returns:
-                        reward (int, float): The reward received.
+        Returns
+        -------
+        reward : int or float
+            The reward received.
         '''
         reward = self.immediate_reward_table[s,a,s_p] if self.immediate_reward_table is not None else self.immediate_reward_function(s,a,s_p)
         if self.rewards_are_probabilistic:
@@ -382,9 +443,12 @@ class Model:
         Function to save the current model in a json file.
         By default, the model will be saved in 'Models' directory in the current working directory but this can be changed using the 'path' parameter.
 
-                Parameters:
-                        file_name (str): The name of the json file the model will be saved in.
-                        path (str): The path at which the model will be saved. (Default: './Models')
+        Parameters
+        ----------
+        file_name : str
+            The name of the json file the model will be saved in.
+        path : str, default='./Models'
+            The path at which the model will be saved.
         '''
         if not os.path.exists(path):
             print('Folder does not exist yet, creating it...')
@@ -410,10 +474,15 @@ class Model:
         '''
         Function to load a MDP model from a json file. The json structure must contain the same items as in the constructor of this class.
 
-                Parameters:
-                        file (str): The file and path of the model to be loaded.
-                Returns:
-                        loaded_model (mdp.Model): An instance of the loaded model.
+        Parameters
+        ----------
+        file : str
+            The file and path of the model to be loaded.
+                
+        Returns
+        -------
+        loaded_model : mdp.Model
+            An instance of the loaded model.
         '''
         with open(file, 'r') as openfile:
             json_model = json.load(openfile)
@@ -496,9 +565,9 @@ class AlphaVector:
 
     Parameters
     ----------
-    values: np.ndarray
+    values : np.ndarray
         The actual vector with the value for each state.
-    action: int
+    action : int
         The action associated with the vector.
     '''
     def __init__(self, values:np.ndarray, action:int) -> None:
@@ -514,20 +583,20 @@ class ValueFunction:
 
     Parameters
     ----------
-    model: (mdp.Model)
+    model : mdp.Model
         The model the value function is associated with.
-    alpha_vectors: (list[AlphaVector] | np.ndarray) (Optional)
+    alpha_vectors : list[AlphaVector] or np.ndarray, optional
         The alpha vectors composing the value function, if none are provided, it will be empty to start with and AlphaVectors can be appended.
-    action_list: (list[int])
+    action_list : list[int], optional
         The actions associated with alpha vectors in the case the alpha vectors are provided as an numpy array.
     
-    # TODO: Add list of attributes
-    Methods # TODO: update list of functions
-    -------
-    prune(level:int=1):
-        Provides a ValueFunction where the alpha vector set is pruned with a certain level of pruning.
-    plot(size:int=5, state_list:list[str], action_list:list[str], belief_set):
-        Function to plot the value function for 2- or 3-state models.
+    Attributes
+    ----------
+    model : mdp.Model
+        The model the value function is associated with.
+    alpha_vector_list : list[AlphaVector]
+    alpha_vector_array : np.ndarray
+    actions : list[int]
     '''
     def __init__(self, model:Model, alpha_vectors:Union[list[AlphaVector], np.ndarray]=[], action_list:list[int]=[]):
         self.model = model
@@ -609,6 +678,11 @@ class ValueFunction:
     def append(self, alpha_vector:AlphaVector) -> None:
         '''
         Function to add an alpha vector to the value function.
+
+        Parameters
+        ----------
+        alpha_vector : AlphaVector
+            The alpha vector to be added to the value function.
         '''
         # Make sure size is correct
         assert alpha_vector.values.shape[0] == self.model.state_count, f"Vector to add to value function doesn't have the right size (received: {alpha_vector.values.shape[0]}, expected: {self.model.state_count})"
@@ -629,8 +703,10 @@ class ValueFunction:
         '''
         Function returning an equivalent value function object with the arrays stored on GPU instead of CPU.
 
-                Returns:
-                        gpu_value_function (ValueFunction): A new value function with arrays on GPU.
+        Returns
+        -------
+        gpu_value_function : ValueFunction
+            A new value function with arrays on GPU.
         '''
         assert gpu_support, "GPU support is not enabled, unable to execute this function"
 
@@ -653,8 +729,10 @@ class ValueFunction:
         '''
         Function returning an equivalent value function object with the arrays stored on CPU instead of GPU.
 
-                Returns:
-                        cpu_value_function (ValueFunction): A new value function with arrays on CPU.
+        Returns
+        -------
+        cpu_value_function : ValueFunction
+            A new value function with arrays on CPU.
         '''
         assert gpu_support, "GPU support is not enabled, unable to execute this function"
 
@@ -684,11 +762,15 @@ class ValueFunction:
         
         Note that the higher the level, the heavier the time impact will be.
 
-                Parameters:
-                        level (int): Between 0 and 3, how thorough the alpha vector pruning should be.
-                
-                Returns:
-                        new_value_function (ValueFunction): A new value function with a pruned set of alpha vectors.
+        Parameters
+        ----------
+        level : int, default=1
+            Between 0 and 3, how thorough the alpha vector pruning should be.
+            
+        Returns
+        -------
+        new_value_function : ValueFunction
+            A new value function with a pruned set of alpha vectors.
         '''
         # GPU support check
         xp = cp if (gpu_support and self.is_on_gpu) else np
@@ -757,9 +839,12 @@ class ValueFunction:
         Function to save the save function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
         If no file_name is provided, it be saved as '<current_timestamp>_value_function.csv'.
 
-                Parameters:
-                        path (str): The path at which the csv will be saved.
-                        file_name (str): The file name used to save in.
+        Parameters
+        ----------
+        path : str, default='./ValueFunctions'
+            The path at which the csv will be saved.
+        file_name : str, default='<current_timestamp>_value_function.csv'
+            The file name used to save in.
         '''
         if not os.path.exists(path):
             print('Folder does not exist yet, creating it...')
@@ -789,12 +874,17 @@ class ValueFunction:
         '''
         Function to load the value function from a csv file.
 
-                Parameters:
-                        file (str): The path and file_name of the value function to be loaded.
-                        model (mdp.Model): The model the value function is linked to.
-                
-                Returns:
-                        loaded_value_function (ValueFunction): The loaded value function.
+        Parameters
+        ----------
+        file : str
+            The path and file_name of the value function to be loaded.
+        model : mdp.Model
+            The model the value function is linked to.
+            
+        Returns
+        -------
+        loaded_value_function : ValueFunction
+            The loaded value function.
         '''
         df = pd.read_csv(file, header=0, index_col=False)
         alpha_vectors = df.to_numpy()
@@ -805,14 +895,20 @@ class ValueFunction:
     def plot(self,
              as_grid:bool=False,
              size:int=5,
-             belief_set=None
+             belief_set:np.ndarray=None
              ) -> None:
         '''
-        Function to plot out the value function in 2 or 3 dimensions.
+        Function to plot out the value function in 2 or 3 dimensions if possible and the as_grid parameter is kept to false. Else, the value function is plot as a grid.
+        If a belief set array is provided and the model is a 2- or 3-model, it will be plot alongside the value function.
 
-                Parameters:
-                        size (int): Default:5, The actual plot scale.
-                        belief_set (list[Belief]): Optional, a set of belief to plot the belief points that were explored.
+        Parameters
+        ----------
+        as_grid : bool, default=False
+            Forces the plot to be plot as a grid.
+        size : int, default=5
+            The actual plot scale.
+        belief_set : np.ndarray, optional
+            A set of belief to plot the belief points that were explored.
         '''
         assert len(self) > 0, "Value function is empty, plotting is impossible..."
         
@@ -875,8 +971,6 @@ class ValueFunction:
             ax[1].scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
             ax[1].get_yaxis().set_visible(False)
             ax[1].axhline(0, color='black')
-
-        plt.show()
 
 
     def _plot_3D(self, size, belief_set=None):
@@ -997,8 +1091,6 @@ class ValueFunction:
             for ax in [ax1,ax2,ax3,ax4]:
                 ax.scatter(belief_points[:,0], belief_points[:,1], s=1, c='black')
 
-        plt.show()
-
 
     def _plot_grid(self, size=5, belief_set=None):
         value_table = np.max(self.alpha_vector_array, axis=0)[self.model.state_grid]
@@ -1009,20 +1101,22 @@ class ValueFunction:
 
         fig, (ax1,ax2) = plt.subplots(1,2, figsize=(size*2, size), width_ratios=(0.55,0.45))
 
+        # Ticks
+        x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] < 10 else int(dimensions[1] / 10)))
+        y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] < 5 else int(dimensions[0] / 5)))
+
         ax1.set_title('Value function')
         ax1_plot = ax1.imshow(value_table)
         plt.colorbar(ax1_plot, ax=ax1)
-        ax1.set_xticks([i for i in range(dimensions[1])])
-        ax1.set_yticks([i for i in range(dimensions[0])])
+        ax1.set_xticks(x_ticks)
+        ax1.set_yticks(y_ticks)
 
         ax2.set_title('Action policy')
         ax2.imshow(best_action_colors)
         p = [ patches.Patch(color=COLOR_LIST[int(i)]['id'], label=str(self.model.action_labels[int(i)])) for i in self.model.actions]
         ax2.legend(handles=p, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
-        ax2.set_xticks([i for i in range(dimensions[1])])
-        ax2.set_yticks([i for i in range(dimensions[0])])
-
-        plt.show()
+        ax2.set_xticks(x_ticks)
+        ax2.set_yticks(y_ticks)
 
 
 class SolverHistory:
@@ -1035,24 +1129,37 @@ class SolverHistory:
 
     Parameters
     ----------
-    tracking_level: int
+    tracking_level : int
         The tracking level of the solver.
-    model: mdp.Model
+    model : mdp.Model
         The model that has been solved by the Solver.
-    gamma: float
+    gamma : float
         The gamma parameter used by the solver (learning rate).
-    eps: float
+    eps : float
         The epsilon parameter used by the solver (covergence bound).
-    initial_value_function: ValueFunction
+    initial_value_function : ValueFunction, optional
         The initial value function the solver will use to start the solving process.
     
-    # TODO: Add list of attributes
-    Methods
-    -------
-    add(iteration_time, value_function_change, value_function:ValueFunction):
-        Function to add an iteration to the solving process with the various information that will be recorded.
-    plot_changes():
-        Function to plot the change between value functions over the solving process.
+    Attributes
+    ----------
+    tracking_level : int
+        The tracking level of the solver.
+    model : mdp.Model
+        The model that has been solved by the Solver.
+    gamma : float
+        The gamma parameter used by the solver (learning rate).
+    eps : float
+        The epsilon parameter used by the solver (covergence bound).
+    run_ts : datetime
+        The time at which the SolverHistory object was instantiated which is assumed to be the start of the solving run.
+    iteration_times : list[float]
+        A list of recorded iteration times.
+    value_function_changes : list[float]
+        A list of recorded value function changes (the maximum changed value between 2 value functions).
+    value_functions : list[ValueFunction]
+        A list of recorded value functions.
+    solution : ValueFunction
+    summary : str
     '''
     def __init__(self,
                  tracking_level:int,
@@ -1093,10 +1200,14 @@ class SolverHistory:
         '''
         Function to add a step in the simulation history.
 
-                Parameters:
-                        iteration_time (float): The time it took to run the iteration.
-                        value_function_change (float): The change between the value function of this iteration and of the previous iteration.
-                        value_function (ValueFunction): The value function resulting after a step of the solving process.
+        Parameters
+        ----------
+        iteration_time : float
+            The time it took to run the iteration.
+        value_function_change : float
+            The change between the value function of this iteration and of the previous iteration.
+        value_function : ValueFunction
+            The value function resulting after a step of the solving process.
         '''
         if self.tracking_level >= 1:
             self.iteration_times.append(float(iteration_time))
@@ -1150,17 +1261,18 @@ class VI_Solver(Solver):
 
     Parameters
     ----------
-    horizon: int
+    horizon : int, default=1000
         Controls for how many epochs the learning can run for (works as an infinite loop safety).
-    gamma: float
+    gamma : float, default=0.99
         Controls the learning rate, how fast the rewards are discounted at each epoch.
-    eps: float
+    eps : float, default=0.001
         Controls the threshold to determine whether the value functions has settled. If the max change of value for a state is lower than eps, then it has converged.
-
-    Methods
-    -------
-    solve(model: mdp.Model, initial_value_function(ValueFunction), use_gpu(bool), history_tracking_level(int), print_progress(bool)):
-        The method to run the solving step that returns a value function.
+        
+    Attributes
+    ----------
+    horizon : int
+    gamma : float
+    eps : float
     '''
     def __init__(self, horizon:int=10000, gamma:float=0.99, eps:float=0.001):
         self.horizon = horizon
@@ -1179,16 +1291,25 @@ class VI_Solver(Solver):
         Function to solve an MDP model using Value Iteration.
         If an initial value function is not provided, the value function will be initiated with the expected rewards.
 
-                Parameters:
-                        model (mdp.Model): The model on which to run value iteration.
-                        initial_value_function (ValueFunction): An optional initial value function to kick-start the value iteration process. (Optional)
-                        use_gpu (bool): Whether to use the GPU with cupy array to accelerate solving. (Default: False)
-                        history_tracking_level (int): How thorough the tracking of the solving process should be. (0: Nothing; 1: Times and sizes of belief sets and value function; 2: The actual value functions and beliefs sets) (Default: 1)
-                        print_progress (bool): Whether or not to print out the progress of the value iteration process. (Default: True)
+        Parameters
+        ----------
+        model : mdp.Model
+            The model on which to run value iteration.
+        initial_value_function : ValueFunction, optional
+            An optional initial value function to kick-start the value iteration process.
+        use_gpu : bool, default=False
+            Whether to use the GPU with cupy array to accelerate solving.
+        history_tracking_level : int, default=1
+            How thorough the tracking of the solving process should be. (0: Nothing; 1: Times and sizes of belief sets and value function; 2: The actual value functions and beliefs sets)
+        print_progress : bool, default=True
+            Whether or not to print out the progress of the value iteration process.
 
-                Returns:
-                        value_function (ValueFunction): The resulting value function solution to the model.
-                        history (SolverHistory): The tracking of the solution over time.
+        Returns
+        -------
+        value_function: ValueFunction
+            The resulting value function solution to the model.
+        history : SolverHistory
+            The tracking of the solution over time.
         '''
         # numpy or cupy module
         xp = np
@@ -1256,19 +1377,20 @@ class RewardSet(list):
 
     Parameters
     ----------
-    items: list
+    items : list, default=[]
         The rewards in the set.
-
-    Methods
-    -------
-    plot(type:str, size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]):
-        Function to summarize the rewards with a plot of one of ('Total', 'Moving Average' or 'Histogram')
     '''
     def __init__(self, items:list=[]):
         self.extend(items)
 
 
-    def plot(self, type:str='total', size:int=5, max_reward=None, compare_with:Union[Self, list[Self]]=[], graph_names:list[str]=[]) -> None:
+    def plot(self,
+             type:str='total',
+             size:int=5,
+             max_reward=None,
+             compare_with:Union[Self, list[Self]]=[],
+             graph_names:list[str]=[]
+             ) -> None:
         '''
         The method to plot summaries of the rewards received over time.
         The plots available:
@@ -1276,12 +1398,18 @@ class RewardSet(list):
             - Moving average ('moving_average' or 'ma'): to plot the moving average of the rewards
             - Hisotgram ('histogram' or 'h'): to plot the various reward in bins to plot a histogram of what was received
 
-                Parameters:
-                        type (str): The type of plot to generate.
-                        size (int): The plot scale. (Default: 5)
-                        max_reward: An upper bound to rewards that can be received at each timestep. (Optional)
-                        compare_with (RewardSet | list[RewardSet]): One or more RewardSets to plot onlonside this one for comparison. (Optional)
-                        graph_name (list[str]): A list of the names of the comparison graphs.
+        Parameters
+        ----------
+        type : str, default='total'
+            The type of plot to generate.
+        size : int, default=5
+            The plot scale.
+        max_reward : optional
+            An upper bound to rewards that can be received at each timestep.
+        compare_with : RewardSet or list[RewardSet], default=[]
+            One or more RewardSets to plot onlonside this one for comparison.
+        graph_names : list[str], default=[]
+            A list of the names of the comparison graphs.
         '''
         plt.figure(figsize=(size*2,size))
 
@@ -1376,19 +1504,22 @@ class SimulationHistory:
 
     Parameters
     ----------
-    model: mdp.Model
+    model : mdp.Model
         The model on which the simulation happened on.
-    start_state: int
+    start_state : int
         The initial state in the simulation.
-
-    Methods
-    -------
-    plot_simulation_steps(size:int=5):
-        Function to plot the final state of the simulation will all states the agent passed through.
-    save_simulation_video(custom_name:Union[str,None]=None, fps:int=1):
-        Function to save a video of the simulation history with all the states it passes through.
-    add(action:int, reward, next_state:int):
-        Function to add a step in the simulation history.
+        
+    Attributes
+    ----------
+    model : mdp.Model
+    states : list[int]
+        A list of recorded states through which the agent passed by during the simulation process.
+    grid_point_sequence : list[list[int]]
+        A list of 2D points of the grid state through which the agent passed by during the simulation process.
+    actions : list[int]
+        A list of recorded actions the agent took during the simulation process.
+    rewards: RewardSet
+        The set of rewards received by the agent throughout the simulation process.
     '''
 
     def __init__(self, model:Model, start_state:int):
@@ -1404,10 +1535,14 @@ class SimulationHistory:
         '''
         Function to add a step in the simulation history
 
-                Parameters:
-                        action (int): The action that was taken by the agent.
-                        reward: The reward received by the agent after having taken action.
-                        next_state: The state that was reached by the agent after having taken action.
+        Parameters
+        ----------
+        action : int
+            The action that was taken by the agent.
+        reward
+            The reward received by the agent after having taken action.
+        next_state : int
+            The state that was reached by the agent after having taken action.
         '''
         self.actions.append(action)
         self.rewards.append(reward)
@@ -1419,8 +1554,10 @@ class SimulationHistory:
         '''
         Plotting the path that was taken during the simulation.
 
-                Parameters:
-                        size (int): The scale of the plot.
+        Parameters
+        ----------
+        size : int, default=5
+            The scale of the plot.
         '''
         plt.figure(figsize=(size,size))
 
@@ -1464,9 +1601,12 @@ class SimulationHistory:
         '''
         Function to save a video of the simulation history with all the states it passes through.
 
-                Parameters:
-                        custom_name (str): Optional, the name of the file it will be saved under. By default it is will be a combination of the state count, the action count and the run timestamp.
-                        fps (int): The amount of steps per second appearing in the video.
+        Parameters
+        ----------
+        custom_name : str, optional
+            By default, the file name will be a combination of the state count, the action count and the run timestamp. If a custom name is provided, it will be prepended to the rest of the info.
+        fps : int, default=1
+            The amount of steps per second appearing in the video.
         '''
         fig = plt.figure()
         ax = plt.gca()
@@ -1502,32 +1642,42 @@ class Simulation:
     ...
     Parameters
     ----------
-    model: pomdp.Model
-        The POMDP model the simulation will be applied on.
+    model: mdp.Model
+        The MDP model the simulation will be applied on.
 
-    Methods
-    -------
-    initialize_simulation():
-        The function to initialize the simulation with a random state for the agent.
-    run_action(a:int):
-        Runs the action a on the current state of the agent.
+    Attributes
+    ----------
+    model: mdp.Model
+    agent_state : int
+        The agent's state in the running simulation
+    is_done : bool
+        Whether or not the agent has reached an end state or performed an ending action.
     '''
     def __init__(self, model:Model) -> None:
         self.model = model
+        
+        # Simulation variables
+        self.agent_state = -1
+        self.is_done = True # Need to run initialization first
+
         self.initialize_simulation()
 
 
-    def initialize_simulation(self, start_state:int=-1) -> int:
+    def initialize_simulation(self, start_state:Union[int, None]=None) -> int:
         '''
         Function to initialize the simulation by setting a random start state (according to the start probabilities) to the agent.
 
-                Parameters:
-                        start_state (int): The state the agent should start in. (Default: randomly over model's start probabilities)
+        Parameters
+        ----------
+        start_state : int, optional
+            The state the agent should start in. (Default: randomly over model's start probabilities)
 
-                Returns:
-                        state (int): The state the agent will start in.
+        Returns
+        -------
+        state : int
+            The state the agent will start in.
         '''
-        if start_state < 0:
+        if start_state is None:
             self.agent_state = int(np.random.choice(a=self.model.states, size=1, p=self.model.start_probabilities)[0])
         else:
             self.agent_state = start_state
@@ -1540,11 +1690,17 @@ class Simulation:
         '''
         Run one step of simulation with action a.
 
-                Parameters:
-                        a (int): the action to take in the simulation.
+        Parameters
+        ----------
+        a : int
+            The action to take in the simulation.
 
-                Returns:
-                        r (int, float): the reward given when doing action a in state s and landing in state s_p. (s and s_p are hidden from agent)
+        Returns
+        -------
+        r
+            The reward given when doing action a in state s.
+        s_p : int
+            The state the agent lands in.
         '''
         assert not self.is_done, "Action run when simulation is done."
 
@@ -1578,18 +1734,13 @@ class Agent:
     Parameters
     ----------
     model: mdp.Model
-        The model in which the agent can run
+        The model in which the agent can run.
     
-    Methods
-    -------
-    train(solver: Solver):
-        Runs the solver on the agent's model in order to retrieve a value function.
-    get_best_action(state:int):
-        Retrieves the best action from the value function given a state.
-    simulate(simulator:Simulation, max_steps:int=1000):
-        Simulate the process on the Agent's model with the given simulator for up to max_steps iterations.
-    run_n_simulations(simulator:Simulation, n:int):
-        Runs n times the simulate() function.
+    Attributes
+    ----------
+    model : mdp.Model
+    value_function : ValueFunction
+        The value function the agent has come up to after training.
     '''
     def __init__(self, model:Model) -> None:
         super().__init__()
@@ -1598,26 +1749,41 @@ class Agent:
         self.value_function = None
 
 
-    def train(self, solver:Solver) -> None:
+    def train(self, solver:Union[Solver,None]=None) -> SolverHistory:
         '''
         Method to train the agent using a given solver.
         The solver will provide a value function that will map states to actions.
 
-                Parameters:
-                        solver (Solver): The solver to run.
+        Parameters
+        ----------
+        solver : Solver, optional
+            The solver to run. If not provided, will default to the Value-Iteration solver with default parameters
+
+        Returns
+        -------
+        solve_history : SolverHistory
+            The history of the solving process.
         '''
+        if solver is None:
+            solver = VI_Solver()
+        
         self.value_function, solve_history = solver.solve(self.model)
+        return solve_history
 
 
     def get_best_action(self, state:int) -> int:
         '''
         Function to retrieve the best action for a given state based on the value function retrieved from the training.
 
-                Parameters:
-                        state (int): The state to get the best action with.
+        Parameters
+        ----------
+        state : int
+            The state to get the best action with.
                 
-                Returns:
-                        best_action (int): The best action found.
+        Returns
+        -------
+        best_action : int
+            The best action found.
         '''
         assert self.value_function is not None, "No value function, training probably has to be run..."
 
@@ -1630,22 +1796,30 @@ class Agent:
     def simulate(self,
                  simulator:Union[Simulation,None]=None,
                  max_steps:int=1000,
-                 start_state:int=-1,
+                 start_state:Union[int,None]=None,
                  print_progress:bool=True,
                  print_stats:bool=True
                  ) -> SimulationHistory:
         '''
         Function to run a simulation with the current agent for up to 'max_steps' amount of steps using a Simulation simulator.
 
-                Parameters:
-                        simulator (mdp.Simulation): The simulation that will be used by the agent. If not provided, the default MDP simulator will be used. (Optional)
-                        max_steps (int): The max amount of steps the simulation can run for. (Default: 1000)
-                        start_state (int): The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
-                        print_progress (bool): Whether or not to print out the progress of the simulation. (Default: True)
-                        print_stats (bool): Whether or not to print simulation statistics at the end of the simulation (Default: True)
+        Parameters
+        ----------
+        simulator : mdp.Simulation, optional
+            The simulation that will be used by the agent. If not provided, the default MDP simulator will be used.
+        max_steps : int, default=1000
+            The max amount of steps the simulation can run for.
+        start_state : int, optional
+            The state the agent should start in, if not provided, will be set at random based on start probabilities of the model.
+        print_progress : bool, default=True
+            Whether or not to print out the progress of the simulation.
+        print_stats : bool, default=True
+            Whether or not to print simulation statistics at the end of the simulation (Default: True)
 
-                Returns:
-                        history (SimulationHistory): A step by step history of the simulation with additional functionality to plot rewards for example.
+        Returns
+        -------
+        history : SimulationHistory
+            A step by step history of the simulation with additional functionality to plot rewards for example.
         '''
         if simulator is None:
             simulator = Simulation(self.model)
@@ -1672,7 +1846,7 @@ class Agent:
             if simulator.is_done:
                 break
 
-        if print_stats:
+        if print_stats: # Move to SimulationHistory summary function?
             sim_end_ts = datetime.now()
             print('Simulation done:')
             print(f'\t- Runtime (s): {(sim_end_ts - sim_start_ts).total_seconds()}')
@@ -1696,19 +1870,25 @@ class Agent:
         This is useful when the simulation has a 'done' condition.
         In this case, the rewards of individual simulations are summed together under a single number.
 
-        Not implemented:
-            - Overal simulation stats
+        Parameters
+        ----------
+        simulator : mdp.Simulation, optional
+            The simulation that will be used by the agent. If not provided, the default MDP simulator will be used.
+        n : int, default=1000
+            The amount of simulations to run.
+        max_steps : int, default=1000
+            The max_steps to run per simulation.
+        start_state : int, optional
+            The  state the agent should start in, if not provided, will be set at random based on start probabilities of the model.
+        print_progress : bool, default=True
+            Whether or not to print out the progress of the simulation.
+        print_stats : bool, default=True
+            Whether or not to print simulation statistics at the end of the simulation.
 
-                Parameters:
-                        simulator (mdp.Simulation): The simulation that will be used by the agent. If not provided, the default MDP simulator will be used. (Optional)
-                        n (int): the amount of simulations to run. (Default: 1000)
-                        max_steps (int): the max_steps to run per simulation. (Default: 1000)
-                        start_state (int): The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
-                        print_progress (bool): Whether or not to print out the progress of the simulation. (Default: True)
-                        print_stats (bool): Whether or not to print simulation statistics at the end of the simulation (Default: True)
-
-                Returns:
-                        all_histories (RewardSet): A list of the final rewards after each simulation.
+        Returns
+        -------
+        all_final_rewards : RewardSet
+            A list of the final rewards after each simulation.
         '''
         if simulator is None:
             simulator = Simulation(self.model)
