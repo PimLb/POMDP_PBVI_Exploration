@@ -1143,13 +1143,9 @@ class SolverHistory:
     Attributes
     ----------
     tracking_level : int
-        The tracking level of the solver.
     model : mdp.Model
-        The model that has been solved by the Solver.
     gamma : float
-        The gamma parameter used by the solver (learning rate).
     eps : float
-        The epsilon parameter used by the solver (covergence bound).
     run_ts : datetime
         The time at which the SolverHistory object was instantiated which is assumed to be the start of the solving run.
     iteration_times : list[float]

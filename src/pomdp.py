@@ -8,7 +8,6 @@ from tqdm.auto import trange
 from typing import Self, Tuple, Union
 
 import copy
-import json
 import math
 import os
 import random
@@ -22,7 +21,7 @@ except:
     print('[Warning] Cupy could not be loaded: GPU support is not available.')
 
 from src.mdp import log
-from src.mdp import AlphaVector, ValueFunction
+from src.mdp import ValueFunction
 from src.mdp import Model as MDP_Model
 from src.mdp import RewardSet
 from src.mdp import SimulationHistory as MDP_SimulationHistory
@@ -49,43 +48,100 @@ class Model(MDP_Model):
 
     Parameters
     ----------
-    states: int | list[str] | list[list[str]]
+    states : int or list[str] or list[list[str]]
         A list of state labels or an amount of states to be used. Also allows to provide a matrix of states to define a grid model.
-    actions: int|list
+    actions : int or list
         A list of action labels or an amount of actions to be used.
-    observations:
+    observations : int or list
         A list of observation labels or an amount of observations to be used
-    transitions:
+    transitions : array-like or function, optional
         The transitions between states, an array can be provided and has to be |S| x |A| x |S| or a function can be provided. 
         If a function is provided, it has be able to deal with np.array arguments.
         If none is provided, it will be randomly generated.
-    reachable_states:
+    reachable_states : array-like, optional
         A list of states that can be reached from each state and actions. It must be a matrix of size |S| x |A| x |R| where |R| is the max amount of states reachable from any given state and action pair.
         It is optional but useful for speedup purposes.
-    rewards:
+    rewards : array-like or function, optional
         The reward matrix, has to be |S| x |A| x |S|.
         A function can also be provided here but it has to be able to deal with np.array arguments.
         If provided, it will be use in combination with the transition matrix to fill to expected rewards.
-    observation_table:
+    observation_table : array-like or function, optional
         The observation matrix, has to be |S| x |A| x |O|. If none is provided, it will be randomly generated.
-    rewards_are_probabilistic: bool
+    rewards_are_probabilistic: bool, default=False
         Whether the rewards provided are probabilistic or pure rewards. If probabilist 0 or 1 will be the reward with a certain probability.
-    grid_states:
-        Optional, if provided, the model will be converted to a grid model.
-    start_probabilities: list
-        Optional, the distribution of chances to start in each state. If not provided, there will be an uniform chance for each state. It is also used to represent a belief of complete uncertainty.
-    end_states: list
-        Optional, entering either state in the list during a simulation will end the simulation.
-    end_action: list
-        Optional, playing action of the list during a simulation will end the simulation.
+    state_grid : array-like, optional
+        If provided, the model will be converted to a grid model.
+    start_probabilities : list, optional
+        The distribution of chances to start in each state. If not provided, there will be an uniform chance for each state. It is also used to represent a belief of complete uncertainty.
+    end_states : list, optional
+        Entering either state in the list during a simulation will end the simulation.
+    end_action : list, optional
+        Playing action of the list during a simulation will end the simulation.
 
-    # TODO: Add list of attributes
-    Methods # TODO: Update list of methods
-    -------
-    transition(s:int, a:int):
-        Returns a random state given a prior state and an action.
-    observe(s_p:int, a:int):
-        Returns a random observation based on the posterior state and the action that was taken.
+    Attributes
+    ----------
+    states : np.ndarray
+        A 1D array of states indices. Used to loop over states.
+    state_labels : list[str]
+        A list of state labels. (To be mainly used for plotting)
+    state_count : int
+        How many states are in the Model.
+    state_grid : np.ndarray
+        The state indices organized as a 2D grid. (Used for plotting purposes)
+    actions : np.ndarry
+        A 1D array of action indices. Used to loop over actions.
+    action_labels : list[str]
+        A list of action labels. (To be mainly used for plotting)
+    action_count : int
+        How many action are in the Model.
+    observations : np.ndarray
+        A 1D array of observation indices. Used to loop over obervations.
+    observation_labels : list[str]
+        A list of observation labels. (To be mainly used for plotting)
+    observation_count : int
+        How many observations can be made in the Model.
+    transition_table : np.ndarray
+        A 3D matrix of the transition probabilities.
+        Can be None in the case a transition function is provided instead.
+        Note: When possible, use reachable states and reachable probabilities instead.
+    transition_function : function
+        A callable function taking 3 arguments: s, a, s_p; and returning a float between 0.0 and 1.0.
+        Can be None in the case a transition table is provided instead.
+        Note: When possible, use reachable states and reachable probabilities instead.
+    observation_table : np.ndarray
+        A 3D matrix of shape S x A x O representing the probabilies of obsevating o when taking action a and leading to state s_p.
+    reachable_states : np.ndarray
+        A 3D array of the shape S x A x R, where R is max amount to states that can be reached from any state-action pair.
+    reachable_probabilities : np.ndarray
+        A 3D array of the same shape as reachable_states, the array represent the probability of reaching the state pointed by the reachable_states matrix.
+    reachable_state_count : int
+        The maximum of states that can be reached from any state-action combination.
+    reachable_transitional_observation_table : np.ndarray
+        A 4D array of shape S x A x O x R, representing the probabiliies of landing if each reachable state r, while observing o after having taken action a from state s.
+        Mainly used to speedup repeated operations in solver.
+    immediate_reward_table : np.ndarray
+        A 3D matrix of shape S x A x S x O of the reward that will received when taking action a, in state s, landing in state s_p, and observing o.
+        Can be None in the case an immediate rewards function is provided instead.
+    immediate_reward_function : function
+        A callable function taking 4 argments: s, a, s_p, o and returning the immediate reward the agent will receive.
+        Can be None in the case an immediate rewards function is provided instead.
+    expected_reward_table : np.ndarray
+        A 2D array of shape S x A. It represents the rewards that is expected to be received when taking action a from state s.
+        It is made by taking the weighted average of immediate rewards with the transitions and the observation probabilities.
+    start_probabilities : np.ndarray
+        A 1D array of length |S| containing the probility distribution of the agent starting in each state.
+    rewards_are_probabilisitic : bool
+        Whether the immediate rewards are probabilitic, ie: returning a 0 or 1 based on the reward that is considered to be a probability.
+    end_states : list[int]
+        A list of states that, when reached, terminate a simulation.
+    end_actions : list[int]
+        A list of actions that, when taken, terminate a simulation.
+    is_on_gpu : bool
+        Whether the numpy array of the model are stored on the gpu or not.
+    gpu_model : mdp.Model
+        An equivalent model with the np.ndarray objects on GPU. (If already on GPU, returns self)
+    cpu_model : mdp.Model
+        An equivalent model with the np.ndarray objects on CPU. (If already on CPU, returns self)
     '''
     def __init__(self,
                  states:Union[int, list[str], list[list[str]]],
@@ -96,7 +152,7 @@ class Model(MDP_Model):
                  rewards=None,
                  observation_table=None,
                  rewards_are_probabilistic:bool=False,
-                 grid_states=None,
+                 state_grid=None,
                  start_probabilities:Union[list,None]=None,
                  end_states:list[int]=[],
                  end_actions:list[int]=[]
@@ -108,7 +164,7 @@ class Model(MDP_Model):
                          reachable_states=reachable_states,
                          rewards=-1, # Defined here lower since immediate reward table has different shape for MDP is different than for POMDP
                          rewards_are_probabilistic=rewards_are_probabilistic,
-                         state_grid=grid_states,
+                         state_grid=state_grid,
                          start_probabilities=start_probabilities,
                          end_states=end_states,
                          end_actions=end_actions)
@@ -192,14 +248,21 @@ class Model(MDP_Model):
         Returns the rewards of playing action a when in state s and landing in state s_p.
         If the rewards are probabilistic, it will return 0 or 1.
 
-                Parameters:
-                        s (int): The current state
-                        a (int): The action taking in state s
-                        s_p (int): The state landing in after taking action a in state s
-                        o (int): The observation that is done after having played action a in state s and landing in s_p
+        Parameters
+        ----------
+        s : int
+            The current state.
+        a : int
+            The action taking in state s.
+        s_p : int
+            The state landing in after taking action a in state s
+        o : int
+            The observation that is done after having played action a in state s and landing in s_p
 
-                Returns:
-                        reward (int, float): The reward received.
+        Returns
+        -------
+        reward : int or float
+            The reward received.
         '''
         reward = self.immediate_reward_table[s,a,s_p,o] if self.immediate_reward_table is not None else self.immediate_reward_function(s,a,s_p,o)
         if self.rewards_are_probabilistic:
@@ -213,12 +276,17 @@ class Model(MDP_Model):
         '''
         Returns a random observation knowing action a is taken from state s, it is weighted by the observation probabilities.
 
-                Parameters:
-                        s_p (int): The state landed on after having done action a
-                        a (int): The action to take
+        Parameters
+        ----------
+        s_p : int
+            The state landed on after having done action a.
+        a : int
+            The action to take.
 
-                Returns:
-                        o (int): An observation
+        Returns
+        -------
+        o : int
+            A random observation.
         '''
         xp = cp if self.is_on_gpu else np
         o = int(xp.random.choice(a=self.observations, size=1, p=self.observation_table[s_p,a])[0])
@@ -237,19 +305,16 @@ class Belief:
 
     Parameters
     ----------
-    model: Model
+    model : pomdp.Model
         The model on which the belief applies on.
-    values: np.ndarray|None
-        A vector of the probabilities to be in each state of the model. The sum of the probabilities must sum to 1. If not specifies it will be set as the start probabilities of the model.
+    values : np.ndarray, optional
+        A vector of the probabilities to be in each state of the model. The sum of the probabilities must sum to 1.
+        If not specified, it will be set as the start probabilities of the model.
 
-    Methods
-    -------
-    update(a:int, o:int):
-        Function to provide a new Belief object updated using an action 'a' and observation 'o'.
-    random_state():
-        Function to give a random state based with the belief as the probability distribution.
-    plot(size:int=5):
-        Function to plot a value function as a grid heatmap.
+    Attributes
+    ----------
+    model : pomdp.Model
+    values : np.ndarray
     '''
     def __init__(self, model:Model, values:Union[np.ndarray,None]=None):
         assert model is not None
@@ -281,13 +346,17 @@ class Belief:
         '''
         Returns a new belief based on this current belief, the most recent action (a) and the most recent observation (o).
 
-                Parameters:
-                        a (int): The most recent action
-                        o (int): The most recent observation
+        Parameters
+        ----------
+        a : int
+            The most recent action.
+        o : int
+            The most recent observation.
 
-                Returns:
-                        new_belief (Belief): An updated belief
-
+        Returns
+        -------
+        new_belief : Belief
+            An updated belief
         '''
         xp = np if not gpu_support else cp.get_array_module(self._values)
 
@@ -309,8 +378,10 @@ class Belief:
         '''
         Returns a random state of the model weighted by the belief probabily.
 
-                Returns:
-                        rand_s (int): A random state
+        Returns
+        -------
+        rand_s : int
+            A random state.
         '''
         xp = np if not gpu_support else cp.get_array_module(self._values)
 
@@ -322,8 +393,10 @@ class Belief:
         '''
         Function to plot a heatmap of the belief distribution if the belief is of a grid model.
 
-                Parameters:
-                        size (int): The scale of the plot. (Default: 5)
+        Parameters
+        ----------
+        size : int, default=5
+            The scale of the plot.
         '''
         # Plot setup
         plt.figure(figsize=(size*1.2,size))
@@ -348,17 +421,20 @@ class BeliefSet:
     
     ...
 
-    Attributes
+    Parameters
     ----------
-    model: pomdp.Model
+    model : pomdp.Model
         The model on which the beliefs apply.
-    beliefs: list[Belief] | np.ndarray
+    beliefs : list[Belief] | np.ndarray
         The actual set of beliefs.
 
-    Methods
-    -------
-    plot(size=15):
-        A function to plot the beliefs in belief space when in 2- or 3-states models.
+    Attributes
+    ----------
+    model : pomdp.Model
+    belief_array : np.ndarray
+        A 2D array of shape N x S of N belief vectors.
+    belief_list : list[Belief]
+        A list of N Belief object.
     '''
     def __init__(self, model:Model, beliefs:Union[list[Belief],np.ndarray]) -> None:
         self.model = model
@@ -415,8 +491,10 @@ class BeliefSet:
         '''
         Function returning an equivalent belief set object with the array of values stored on GPU instead of CPU.
 
-                Returns:
-                        gpu_belief_set (BeliefSet): A new belief set with array on GPU.
+        Returns
+        -------
+        gpu_belief_set : BeliefSet
+            A new belief set with array on GPU.
         '''
         assert gpu_support, "GPU support is not enabled, unable to execute this function"
 
@@ -437,8 +515,10 @@ class BeliefSet:
         '''
         Function returning an equivalent belief set object with the array of values stored on CPU instead of GPU.
 
-                Returns:
-                        cpu_belief_set (BeliefSet): A new belief set with array on CPU.
+        Returns
+        -------
+        cpu_belief_set : BeliefSet
+            A new belief set with array on CPU.
         '''
         assert gpu_support, "GPU support is not enabled, unable to execute this function"
 
@@ -461,8 +541,10 @@ class BeliefSet:
         Function to plot the beliefs in the belief set.
         Note: Only works for 2-state and 3-state believes.
 
-                Parameters:
-                        size (int): The figure size and general scaling factor
+        Parameters
+        ----------
+        size : int, default=15
+            The figure size and general scaling factor
         '''
         assert self.model.state_count in [2,3], "Can't plot for models with state count other than 2 or 3"
 
@@ -584,33 +666,48 @@ class SolverHistory:
 
     ...
 
-    Attributes
+    Parameters
     ----------
-    level: int
+    tracking_level : int
         The tracking level of the solver.
-    model: pomdp.Model
+    model : pomdp.Model
         The model the solver has solved.
-    gamma: float
+    gamma : float
         The gamma parameter used by the solver (learning rate).
-    eps: float
+    eps : float
         The epsilon parameter used by the solver (covergence bound).
-    expand_function: str
+    expand_function : str
         The expand (exploration) function used by the solver.
-    initial_value_function: ValueFunction
+    initial_value_function : ValueFunction
         The initial value function the solver will use to start the solving process.
-    initial_belief_set: BeliefSet
+    initial_belief_set : BeliefSet
         The initial belief set the solver will use to start the solving process.
 
-    Methods
-    -------
-    add(iteration_time, expansion_time, backup_time, value_function_change, value_function:ValueFunction, belief_set:BeliefSet):
-        Function to add a step to the solving process. The required amount of data will be recorded according to the tracking level.
-    plot_belief_set(size:int=15):
-        Once solve() has been run, the explored beliefs can be plot for 2- and 3- state models.
-    plot_solution(size:int=5, plot_belief:bool=True):
-        Once solve() has been run, the value function solution can be plot for 2- and 3- state models.
-    save_history_video(custom_name:Union[str,None]=None, compare_with:Union[list, ValueFunction, Self]=[]):
-        Once the solve has been run, we can save a video of the history of the solving process.
+    Attributes
+    ----------
+    tracking_level : int
+    model : pomdp.Model
+    gamma : float
+    eps : float
+    expand_function : str
+    run_ts : datetime
+        The time at which the SolverHistory object was instantiated which is assumed to be the start of the solving run.
+    expansion_times : list[float]
+        A list of recorded times of the expand function.
+    backup_times : list[float]
+        A list of recorded times of the backup function.
+    alpha_vector_counts : list[int]
+        A list of recorded alpha vector count making up the value function over the solving process.
+    beliefs_counts : list[int]
+        A list of recorded belief count making up the belief set over the solving process.
+    value_function_changes : list[float]
+        A list of recorded value function changes (the maximum changed value between 2 value functions).
+    value_functions : list[ValueFunction]
+        A list of recorded value functions.
+    belief_sets : list[BeliefSet]
+        A list of recorded belief sets.
+    solution : ValueFunction
+    explored_beliefs : BeliefSet
     '''
     def __init__(self,
                  tracking_level:int,
@@ -677,9 +774,12 @@ class SolverHistory:
         '''
         Function to add an expansion step in the simulation history by the explored belief set the expand function generated.
 
-                Parameters:
-                        expansion_time (float): The time it took to run a step of expansion of the belief set. (Also known as the exploration step.)
-                        belief_set (BeliefSet): The belief set used for the Update step of the solving process.
+        Parameters
+        ----------
+        expansion_time : float
+            The time it took to run a step of expansion of the belief set. (Also known as the exploration step.)
+        belief_set : BeliefSet
+            The belief set used for the Update step of the solving process.
         '''
         if self.tracking_level >= 1:
             self.expansion_times.append(float(expansion_time))
@@ -697,10 +797,14 @@ class SolverHistory:
         '''
         Function to add a backup step in the simulation history by recording the value function the backup function generated.
 
-                Parameters:
-                        backup_time (float): The time it took to run a step of backup of the value function. (Also known as the value function update.)
-                        value_function_change (float): The change between the value function of this iteration and of the previous iteration.
-                        value_function (ValueFunction): The value function resulting after a step of the solving process.
+        Parameters
+        ----------
+        backup_time : float
+            The time it took to run a step of backup of the value function. (Also known as the value function update.)
+        value_function_change : float
+            The change between the value function of this iteration and of the previous iteration.
+        value_function : ValueFunction
+            The value function resulting after a step of the solving process.
         '''
 
         if self.tracking_level >= 1:
@@ -717,8 +821,10 @@ class SolverHistory:
         '''
         A summary as a string of the information recorded.
 
-                Returns:
-                        summary_str (str): The summary of the information.
+        Returns
+        -------
+        summary_str : str
+            The summary of the information.
         '''
         summary_str =  f'Summary of Value Iteration run'
         summary_str += f'\n  - Model: {self.model.state_count} state, {self.model.action_count} action, {self.model.observation_count} observations'
@@ -737,24 +843,29 @@ class SolverHistory:
         return summary_str
     
 
-    def plot_belief_set(self, size:int=15):
+    def plot_belief_set(self, size:int=15) -> None:
         '''
         Function to plot the last belief set explored during the solving process.
 
-                Parameters:
-                        size (int): The scale of the plot
+        Parameters
+        ----------
+        size : int, default=15
+            The scale of the plot.
         '''
         self.explored_beliefs.plot(size=size)
 
 
-    def plot_solution(self, size:int=5, plot_belief:bool=True):
+    def plot_solution(self, size:int=5, plot_belief:bool=True) -> None:
         '''
         Function to plot the value function of the solution.
         Note: only works for 2 and 3 states models
 
-                Parameters:
-                        size (int): The figure size and general scaling factor.
-                        plot_belief (bool): Whether to plot the belief set along with the value function.
+        Parameters
+        ----------
+        size : int, default=5
+            The figure size and general scaling factor.
+        plot_belief : bool, default=True
+            Whether to plot the belief set along with the value function.
         '''
         self.solution.plot(size=size, belief_set=(self.explored_beliefs if plot_belief else None))
 
@@ -773,11 +884,16 @@ class SolverHistory:
 
         Note: only works for 2-state models.
 
-                Parameters:
-                        custom_name (str): Optional, the name the video will be saved with.
-                        compare_with (PBVI, ValueFunction, list): Optional, value functions or other solvers to plot against the current solver's history
-                        graph_names (list[str]): Optional, names of the graphs for the legend of which graph is being plot.
-                        fps (int): How many frames per second should the saved video have. (Default: 10)
+        Parameters
+        ----------
+        custom_name : str, optional
+            The name the video will be saved with.
+        compare_with : PBVI or ValueFunction or list, default=[]
+            Value functions or other solvers to plot against the current solver's history.
+        graph_names : list[str], default=[]
+            Names of the graphs for the legend of which graph is being plot.
+        fps : int, default=10
+            How many frames per second should the saved video have.
         '''
         assert self.tracking_level >= 2, "Tracking level is set too low, increase it to 2 if you want to have value function and belief sets tracking as well."
         assert self.model.state_count in [2,3], "Can't plot for models with state count other than 2 or 3" # TODO Make support for gird videos
@@ -914,31 +1030,21 @@ class PBVI_Solver(Solver):
     ...
     Parameters
     ----------
-    gamma: float (default 0.9)
+    gamma : float, default=0.9
         The learning rate, used to control how fast the value function will change after the each iterations.
-    eps: float (default 0.001)
+    eps : float, default=0.001
         The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.
-    expand_function: str (default 'ssea')
+    expand_function : str, default='ssea'
         The type of expand strategy to use to expand the belief set.
-    expand_function_params: dict (Optional)
+    expand_function_params : dict, optional
         Other required parameters to be sent to the expand function.
 
-    Methods
-    -------
-    backup(model:pomdp.Model, belief_set:list[Belief], alpha_set:list[AlphaVector], discount_factor:float=0.9):
-        The backup function, responsible to update the alpha vector set.
-    expand_ssra(model:pomdp.Model, belief_set:list[Belief]):
-        Random action, belief expansion strategy function.
-    expand_ssga(model:pomdp.Model, belief_set:list[Belief], alpha_set:list[AlphaVector], eps:float=0.1):
-        Expsilon greedy action, belief expansion strategy function.
-    expand_ssea(model:pomdp.Model, belief_set:list[Belief], alpha_set:list[AlphaVector]):
-        Exploratory action, belief expansion strategy function.
-    expand_ger(model:pomdp.Model, belief_set, alpha_set):
-        Greedy error reduction, belief expansion strategy function.
-    expand():
-        The general expand function, used to call the other expand_* functions.
-    solve(model:pomdp.Model, expansions:int, horizon:int, initial_belief:Union[list[Belief], Belief, None]=None, initial_value_function:Union[ValueFunction,None]=None):
-        The general solving function that will call iteratively the expand and the backup function.
+    Attributes
+    ----------
+    gamma : float
+    eps : float
+    expand_function : str
+    expand_function_params : dict
     '''
     def __init__(self,
                  gamma:float=0.9,
@@ -961,14 +1067,19 @@ class PBVI_Solver(Solver):
 
         The alpha vectors are also pruned to avoid duplicates and remove dominated ones.
 
-                Parameters:
-                        model (POMDP): The model on which to run the backup method on.
-                        belief_set (BeliefSet): The belief set to use to generate the new alpha vectors with.
-                        alpha_set (ValueFunction): The alpha vectors to generate the new set from.
-                        gamma (float): The discount factor used for training, default: 0.9.
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model on which to run the backup method on.
+        belief_set : BeliefSet
+            The belief set to use to generate the new alpha vectors with.
+        value_function : ValueFunction
+            The alpha vectors to generate the new set from.
 
-                Returns:
-                        new_alpha_set (ValueFunction): A list of updated alpha vectors.
+        Returns
+        -------
+        new_alpha_set : ValueFunction
+            A list of updated alpha vectors.
         '''
         # Get numpy corresponding to the arrays
         xp = np if not gpu_support else cp.get_array_module(value_function.alpha_vector_array)
@@ -1011,14 +1122,19 @@ class PBVI_Solver(Solver):
         Stochastic Simulation with Random Action.
         Simulates running a single-step forward from the beliefs in the "belief_set".
         The step forward is taking assuming we are in a random state (weighted by the belief) and taking a random action leading to a state s_p and a observation o.
-        From this action a and observation o we can update our belief. 
+        From this action a and observation o we can update our belief.
 
-                Parameters:
-                        model (POMDP): the POMDP model on which to expand the belief set on.
-                        belief_set (BeliefSet): list of beliefs to expand on.
+        Parameters
+        ----------
+        model : pomdp.Model
+            The POMDP model on which to expand the belief set on.
+        belief_set : BeliefSet
+            List of beliefs to expand on.
 
-                Returns:
-                        belief_set_new (BeliefSet): union of the belief_set and the expansions of the beliefs in the belief_set
+        Returns
+        -------
+        belief_set_new : BeliefSet
+            Union of the belief_set and the expansions of the beliefs in the belief_set
         '''
         xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
@@ -1049,14 +1165,21 @@ class PBVI_Solver(Solver):
         These lead to a new state s_p and a observation o.
         From this action a and observation o we can update our belief. 
 
-                Parameters:
-                        model (POMDP): the POMDP model on which to expand the belief set on.
-                        belief_set (BeliefSet): list of beliefs to expand on.
-                        value_function (ValueFunction): Used to find the best action knowing the belief.
-                        eps (float): Parameter tuning how often we take a greedy approach and how often we move randomly.
+        Parameters
+        ----------
+        model : pomdp.Model
+            The POMDP model on which to expand the belief set on.
+        belief_set : BeliefSet
+            List of beliefs to expand on.
+        value_function : ValueFunction
+            Used to find the best action knowing the belief.
+        eps : float
+            Parameter tuning how often we take a greedy approach and how often we move randomly.
 
-                Returns:
-                        belief_set_new (BeliefSet): union of the belief_set and the expansions of the beliefs in the belief_set
+        Returns
+        -------
+        belief_set_new : BeliefSet
+            Union of the belief_set and the expansions of the beliefs in the belief_set
         '''
         xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
@@ -1092,12 +1215,17 @@ class PBVI_Solver(Solver):
         From all these and observation o we can generate updated beliefs. 
         Then it takes the belief that is furthest away from other beliefs, meaning it explores the most the belief space.
 
-                Parameters:
-                        model (POMDP): the POMDP model on which to expand the belief set on.
-                        belief_set (BeliefSet): list of beliefs to expand on.
+        Parameters
+        ----------
+        model : pomdp.Model
+            The POMDP model on which to expand the belief set on.
+        belief_set : BeliefSet
+            List of beliefs to expand on.
 
-                Returns:
-                        belief_set_new (BeliefSet): union of the belief_set and the expansions of the beliefs in the belief_set
+        Returns
+        -------
+        belief_set_new : BeliefSet
+            Union of the belief_set and the expansions of the beliefs in the belief_set
         '''
         xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
@@ -1132,14 +1260,19 @@ class PBVI_Solver(Solver):
     def expand_ger(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction) -> BeliefSet:
         '''
         Greedy Error Reduction. NOT IMPLEMENTED YET.
+        Parameters
+        ----------
+        model : pomdp.Model
+            The POMDP model on which to expand the belief set on.
+        belief_set : BeliefSet
+            List of beliefs to expand on.
+        value_function : ValueFunction
+            Used to find the best action knowing the belief.
 
-                Parameters:
-                        model (POMDP): the POMDP model on which to expand the belief set on.
-                        belief_set (BeliefSet): list of beliefs to expand on.
-                        value_function (ValueFunction): Used to find the best action knowing the belief.
-
-                Returns:
-                        belief_set_new (BeliefSet): union of the belief_set and the expansions of the beliefs in the belief_set
+        Returns
+        -------
+        belief_set_new : BeliefSet
+            Union of the belief_set and the expansions of the beliefs in the belief_set
         '''
         print('Not implemented')
         return []
@@ -1153,13 +1286,19 @@ class PBVI_Solver(Solver):
             - Stochastic Simulation with Exploratory Action (ssea)
             - Greedy Error Reduction (ger) - not implemented
                 
-                Parameters:
-                        model (pomdp.Model): The model on which to run the belief expansion on.
-                        belief_set (BeliefSet): The set of beliefs to expand.
-                        function_specific_parameters: Potential additional parameters necessary for the specific expand function.
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model on which to run the belief expansion on.
+        belief_set : BeliefSet
+            The set of beliefs to expand.
+        function_specific_parameters
+            Potential additional parameters necessary for the specific expand function.
 
-                Returns:
-                        belief_set_new (BeliefSet): The belief set the expansion function returns. 
+        Returns
+        -------
+        belief_set_new : BeliefSet
+            The belief set the expansion function returns. 
         '''
         if self.expand_function in 'expand_ssra':
             return self.expand_ssra(model=model, belief_set=belief_set)
@@ -1201,19 +1340,33 @@ class PBVI_Solver(Solver):
             - ssea: Stochastic Simulation with Exploratory Action. Extra params: /
             - ger: Greedy Error Reduction. Extra params: /
 
-                Parameters:
-                        model (pomdp.Model): The model to solve.
-                        expansions (int): How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
-                        horizon (int): How many times the alpha vector set must be updated every time the belief set is expanded.
-                        initial_belief (BeliefSet, Belief) - Optional: An initial list of beliefs to start with.
-                        initial_value_function (ValueFunction) - Optional: An initial value function to start the solving process with.
-                        expand_prune_level (int) - Optional: Parameter to prune the value function further before the expand function.
-                        use_gpu (bool): Whether to use the GPU with cupy array to accelerate solving. (Default: False)
-                        history_tracking_level (int): How thorough the tracking of the solving process should be. (0: Nothing; 1: Times and sizes of belief sets and value function; 2: The actual value functions and beliefs sets) (Default: 1)
-                        print_progress (bool): Whether or not to print out the progress of the value iteration process. (Default: True)
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model to solve.
+        expansions : int
+            How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
+        horizon : int
+            How many times the alpha vector set must be updated every time the belief set is expanded.
+        initial_belief : BeliefSet or Belief, optional
+            An initial list of beliefs to start with.
+        initial_value_function : ValueFunction, optional
+            An initial value function to start the solving process with.
+        expand_prune_level : int, optional
+            Parameter to prune the value function further before the expand function.
+        use_gpu : bool, default=False
+            Whether to use the GPU with cupy array to accelerate solving. (Default: False)
+        history_tracking_level : int, default=1
+            How thorough the tracking of the solving process should be. (0: Nothing; 1: Times and sizes of belief sets and value function; 2: The actual value functions and beliefs sets)
+        print_progress : bool, default=True
+            Whether or not to print out the progress of the value iteration process.
 
-                Returns:
-                        value_function (ValueFunction): The alpha vectors approximating the value function.
+        Returns
+        -------
+        value_function : ValueFunction
+            The alpha vectors approximating the value function.
+        solver_history : SolverHistory
+            The history of the solving process with some plotting options.
         '''
         # numpy or cupy module
         xp = np
@@ -1303,17 +1456,15 @@ class FSVI_Solver(PBVI_Solver):
     ...
     Parameters
     ----------
-    gamma: float (default 0.9)
+    gamma : float, default=0.9
         The learning rate, used to control how fast the value function will change after the each iterations.
-    eps: float (default 0.001)
+    eps : float, default=0.001
         The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.
 
-    Methods
-    -------
-    MDPExplore(model:Model, b:Belief, s:int, mdp_policy:ValueFunction, depth:int, horizon:int):
-        Function to generate a sequence of beliefs that follow a sequence of actions leading to the target state.
-    Solve(model:Model, expansions:int, horizon:int, mdp_policy:ValueFunction, initial_belief, initial_value_function, expand_prune_level:int, use_gpu:bool, history_tracking_level:int, print_progress:bool):
-        Function to solve the provided POMDP Model using FSVI.
+    Attributes
+    ----------
+    gamma : float
+    eps : float
     '''
     def __init__(self, gamma:float=0.9, eps:float=0.001):
         self.gamma = gamma
@@ -1328,13 +1479,25 @@ class FSVI_Solver(PBVI_Solver):
         Then the given belief is updated using the chosen action and the observation received and the updated belief is added to the sequence.
         Once the state is a goal state, the recursion is done and the belief sequence is returned.
 
-                Parameters:
-                        model (pomdp.Model): The model in which the exploration process will happen.
-                        b (Belief): A belief to be added to the returned belief sequence and updated for the next step of the recursion.
-                        s (int): The state that starts the exploration sequence and based on which an action will be chosen.
-                        mdp_policy (ValueFunction): The mdp policy used to choose the action from with the given state 's'.
-                        depth (int): The current recursion depth.
-                        horizon (int): The maximum recursion depth that can be reached before the generated belief sequence is returned.
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model in which the exploration process will happen.
+        b : Belief
+            A belief to be added to the returned belief sequence and updated for the next step of the recursion.
+        s : int
+            The state that starts the exploration sequence and based on which an action will be chosen.
+        mdp_policy : ValueFunction
+            The mdp policy used to choose the action from with the given state 's'.
+        depth : int
+            The current recursion depth.
+        horizon : int
+            The maximum recursion depth that can be reached before the generated belief sequence is returned.
+
+        Returns
+        -------
+        belief_set : BeliefSet
+            A new sequence of beliefs.
         '''
         xp = np if not gpu_support else cp.get_array_module(b.values)
         belief_list = [b]
@@ -1378,22 +1541,33 @@ class FSVI_Solver(PBVI_Solver):
         Then the 'horizon' parameter determines how deep the MDP exploration can run for. For example, is it set at 10 but it takes 15 steps to reach the end goal, the MDP exploration process will exit early.
         It should therefore be set to a bit higher than the maximum amount steps required to reach a goal state from any other state. It is mainly used as a safeguard to avoid infinite looping.
 
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model to solve.
+        expansions : int
+            How many times the MDP exploration process will run.
+        horizon : int
+            How many deep the MDP exploration process can run for.
+        mdp_policy : ValueFunction
+            The policy that will be used to choose actions from states during the exploration process.
+        initial_belief : Belief, optional
+            An initial belief that will replace the default initial belief generated from the start probabilities of the model.
+        initial_value_function : ValueFunction, optional
+            An initial value function to start the solving process with. (Can for example be the MDP value function)
+        expand_prune_level : int, optional
+            Parameter to prune the value function further before the expand function.
+        use_gpu : bool, default=False
+            Whether to use the GPU with cupy array to accelerate solving.
+        history_tracking_level : int, default=1
+            How thorough the tracking of the solving process should be. (0: Nothing; 1: Times and sizes of belief sets and value function; 2: The actual value functions and beliefs sets)
+        print_progress : bool, default=True
+            Whether or not to print out the progress of the value iteration process.
 
-
-                Parameters:
-                        model (pomdp.Model): The model to solve.
-                        expansions (int): How many times the MDP exploration process will run.
-                        horizon (int): How many deep the MDP exploration process can run for.
-                        mdp_policy (ValueFunction): The policy that will be used to choose actions from states during the exploration process.
-                        initial_belief (Belief) - Optional: An initial belief that will replace the default initial belief generated from the start probabilities of the model.
-                        initial_value_function (ValueFunction) - Optional: An initial value function to start the solving process with. (Can for example be the MDP value function)
-                        expand_prune_level (int) - Optional: Parameter to prune the value function further before the expand function.
-                        use_gpu (bool): Whether to use the GPU with cupy array to accelerate solving. (Default: False)
-                        history_tracking_level (int): How thorough the tracking of the solving process should be. (0: Nothing; 1: Times and sizes of belief sets and value function; 2: The actual value functions and beliefs sets) (Default: 1)
-                        print_progress (bool): Whether or not to print out the progress of the value iteration process. (Default: True)
-
-                Returns:
-                        value_function (ValueFunction): The alpha vectors approximating the value function.
+        Returns
+        -------
+        value_function : ValueFunction
+            The alpha vectors approximating the value function.
         '''
         # numpy or cupy module
         xp = np
@@ -1405,6 +1579,9 @@ class FSVI_Solver(PBVI_Solver):
 
             # Replace numpy module by cupy for computations
             xp = cp
+
+            # Make sure MDP solution is on gpu as well
+            mdp_policy = mdp_policy.to_gpu()
 
         # Initial belief
         if initial_belief is None:
@@ -1478,7 +1655,7 @@ class SimulationHistory(MDP_SimulationHistory):
 
     ...
 
-    Attributes
+    Parameters
     ----------
     model: mdp.Model
         The model on which the simulation happened on.
@@ -1487,14 +1664,21 @@ class SimulationHistory(MDP_SimulationHistory):
     start_belief: Belief
         The initial belief the agent starts with during the simulation.
 
-    Methods
-    -------
-    plot_simulation_steps(size:int=5):
-        Function to plot the final state of the simulation will all states the agent passed through.
-    save_simulation_video(custom_name:Union[str,None]=None, fps:int=1):
-        Function to save a video of the simulation history with all the states it passes through and the believes it explores.
-    add(action:int, reward, next_state:int, next_belief:Belief, observation:int):
-        Function to add a step in the simulation history.
+    Attributes
+    ----------
+    model : mdp.Model
+    states : list[int]
+        A list of recorded states through which the agent passed by during the simulation process.
+    grid_point_sequence : list[list[int]]
+        A list of 2D points of the grid state through which the agent passed by during the simulation process.
+    actions : list[int]
+        A list of recorded actions the agent took during the simulation process.
+    rewards: RewardSet
+        The set of rewards received by the agent throughout the simulation process.
+    beliefs : list[Belief]
+        A list of recorded beliefs the agent is in throughout the simulation process.
+    observations : list[int]
+        A list of recorded observations gotten by the agent during the simulation process.
     '''
     def __init__(self, model:Model, start_state:int, start_belief:Belief):
         super().__init__(model, start_state)
@@ -1503,6 +1687,22 @@ class SimulationHistory(MDP_SimulationHistory):
 
 
     def add(self, action:int, reward, next_state:int, next_belief:Belief, observation:int) -> None:
+        '''
+        Function to add a step in the simulation history
+
+        Parameters
+        ----------
+        action : int
+            The action that was taken by the agent.
+        reward
+            The reward received by the agent after having taken action.
+        next_state : int
+            The state that was reached by the agent after having taken action.
+        next_belief : Belief
+            The new belief of the agent after having taken an action and received an observation.
+        observation:int
+            The observation the agent received after having made an action.
+        '''
         super().add(action, reward, next_state)
         self.beliefs.append(next_belief)
         self.observations.append(observation)
@@ -1538,17 +1738,19 @@ class Simulation(MDP_Simulation):
     An initial random state is given and action can be applied to the model that impact the actual state of the agent along with returning a reward and an observation.
 
     ...
+
     Parameters
     ----------
     model: pomdp.Model
         The POMDP model the simulation will be applied on.
 
-    Methods
-    -------
-    initialize_simulation():
-        The function to initialize the simulation with a random state for the agent.
-    run_action(a:int):
-        Runs the action a on the current state of the agent.
+    Attributes
+    ----------
+    model: pomdp.Model
+    agent_state : int
+        The agent's state in the running simulation
+    is_done : bool
+        Whether or not the agent has reached an end state or performed an ending action.
     '''
     def __init__(self, model:Model) -> None:
         super().__init__(model)
@@ -1559,12 +1761,17 @@ class Simulation(MDP_Simulation):
         '''
         Run one step of simulation with action a.
 
-                Parameters:
-                        a (int): the action to take in the simulation.
+        Parameters
+        ----------
+        a : int
+            The action to take in the simulation.
 
-                Returns:
-                        r (int, float): the reward given when doing action a in state s and landing in state s_p. (s and s_p are hidden from agent)
-                        o (int): the observation following the action applied on the previous state
+        Returns
+        -------
+        r : int or float
+            The reward given when doing action a in state s and landing in state s_p. (s and s_p are hidden from agent)
+        o : int
+            The observation following the action applied on the previous state.
         '''
         assert not self.is_done, "Action run when simulation is done."
 
@@ -1601,46 +1808,53 @@ class Agent:
     model: pomdp.Model
         The model in which the agent can run
     
-    Methods
-    -------
-    train(solver: PBVI_Solver):
-        Runs the solver on the agent's model in order to retrieve a value function.
-    get_best_action(belief:Belief):
-        Retrieves the best action from the value function given a belief (the belief of the agent being in a certain state).
-    simulate(simulator:Simulation, max_steps:int=1000):
-        Simulate the process on the Agent's model with the given simulator for up to max_steps iterations.
-    run_n_simulations(simulator:Simulation, n:int):
-        Runs n times the simulate() function.
+    Attributes
+    ----------
+    model: pomdp.Model
+    value_function : ValueFunction
+        The value function the agent has come up to after training.
     '''
     def __init__(self, model:Model) -> None:
-        super().__init__()
-
         self.model = model
         self.value_function = None
 
 
-    def train(self, solver:PBVI_Solver, expansions:int, horizon:int) -> None:
+    def train(self, solver:PBVI_Solver, expansions:int, horizon:int) -> SolverHistory:
         '''
         Method to train the agent using a given solver.
         The solver will provide a value function that will map beliefs in belief space to actions.
 
-                Parameters:
-                        solver (PBVI_Solver): The solver to run.
-                        expansions (int): How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
-                        horizon (int): How many times the alpha vector set must be updated every time the belief set is expanded.
+        Parameters
+        ----------
+        solver : PBVI_Solver
+            The solver to run.
+        expansions : int
+            How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
+        horizon : int
+            How many times the alpha vector set must be updated every time the belief set is expanded.
+        
+        Returns
+        -------
+        solve_history : SolverHistory
+            The history of the solving process.
         '''
         self.value_function, solve_history = solver.solve(self.model, expansions, horizon)
+        return solve_history
 
 
     def get_best_action(self, belief:Belief) -> int:
         '''
         Function to retrieve the best action for a given belief based on the value function retrieved from the training.
 
-                Parameters:
-                        belief (Belief): The belief to get the best action with.
+        Parameters
+        ----------
+        belief : Belief
+            The belief to get the best action with.
                 
-                Returns:
-                        best_action (int): The best action found.
+        Returns
+        -------
+        best_action : int
+            The best action found.
         '''
         assert self.value_function is not None, "No value function, training probably has to be run..."
 
@@ -1653,26 +1867,35 @@ class Agent:
     def simulate(self,
                  simulator:Union[Simulation,None]=None,
                  max_steps:int=1000,
-                 start_state:int=-1,
+                 start_state:Union[int,None]=None,
                  print_progress:bool=True,
                  print_stats:bool=True
                  ) -> SimulationHistory:
         '''
         Function to run a simulation with the current agent for up to 'max_steps' amount of steps using a Simulation simulator.
 
-                Parameters:
-                        simulator (mdp.Simulation): The simulation that will be used by the agent. If not provided, the default MDP simulator will be used. (Optional)
-                        max_steps (int): the max amount of steps the simulation can run for.
-                        start_state (int): The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
-                        print_progress (bool): Whether or not to print out the progress of the simulation. (Default: True)
-                        print_stats (bool): Whether or not to print simulation statistics at the end of the simulation (Default: True)
+        Parameters
+        ----------
+        simulator : pomdp.Simulation, optional
+            The simulation that will be used by the agent. If not provided, the default MDP simulator will be used.
+        max_steps : int, default=1000
+            The max amount of steps the simulation can run for.
+        start_state : int, optional
+            The state the agent should start in, if not provided, will be set at random based on start probabilities of the model.
+        print_progress : bool, default=True
+            Whether or not to print out the progress of the simulation.
+        print_stats : bool, default=True
+            Whether or not to print simulation statistics at the end of the simulation.
 
-                Returns:
-                        history (SimulationHistory): A list of rewards with the additional functionality that the can be plot with the plot() function.
+        Returns
+        -------
+        history : SimulationHistory
+            A list of rewards with the additional functionality that the can be plot with the plot() function.
         '''
         if simulator is None:
             simulator = Simulation(self.model)
 
+        # reset
         s = simulator.initialize_simulation(start_state=start_state) # s is only used for the simulation history
         belief = Belief(self.model)
 
@@ -1714,7 +1937,7 @@ class Agent:
                           simulator:Union[Simulation,None]=None,
                           n:int=1000,
                           max_steps:int=1000,
-                          start_state:int=-1,
+                          start_state:Union[int,None]=None,
                           print_progress:bool=True,
                           print_stats:bool=True
                           ) -> RewardSet:
@@ -1726,16 +1949,25 @@ class Agent:
         Not implemented:
             - Overal simulation stats
 
-                Parameters:
-                        simulator (mdp.Simulation): The simulation that will be used by the agent. If not provided, the default MDP simulator will be used. (Optional)
-                        n (int): the amount of simulations to run. (Default: 1000)
-                        max_steps (int): the max_steps to run per simulation. (Default: 1000)
-                        start_state (int): The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
-                        print_progress (bool): Whether or not to print out the progress of the simulation. (Default: True)
-                        print_stats (bool): Whether or not to print simulation statistics at the end of the simulation (Default: True)
+        Parameters
+        ----------
+        simulator : pomdp.Simulation, optional
+            The simulation that will be used by the agent. If not provided, the default MDP simulator will be used. (Optional)
+        n : int, default=1000
+            The amount of simulations to run.
+        max_steps : int, default=1000
+            The max_steps to run per simulation.
+        start_state : int, optional
+            The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
+        print_progress : bool, default=True
+            Whether or not to print out the progress of the simulation.
+        print_stats : bool, default=True
+            Whether or not to print simulation statistics at the end of the simulation.
 
-                Returns:
-                        all_histories (RewardSet): A list of the final rewards after each simulation.
+        Returns
+        -------
+        all_histories : RewardSet
+            A list of the final rewards after each simulation.
         '''
         if simulator is None:
             simulator = Simulation(self.model)
@@ -1766,12 +1998,17 @@ def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
      
     Then, example models can be found on the following page: https://pomdp.org/examples/
 
-            Parameters:
-                    file_name (str): The name and path of the file to be loaded.
+    Parameters
+    ----------
+    file_name : str
+        The name and path of the file to be loaded.
 
-            Returns:
-                    loaded_model (pomdp.Model): A POMDP model with the parameters found in the POMDP file. 
-                    loaded_solver (PBVI_Solver): A solver with the gamma parameter from the POMDP file.
+    Returns
+    -------
+    loaded_model : pomdp.Model
+        A POMDP model with the parameters found in the POMDP file. 
+    loaded_solver : PBVI_Solver
+        A solver with the gamma parameter from the POMDP file.
     '''
     # Working params
     gamma_param = 1.0
