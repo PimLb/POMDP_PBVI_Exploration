@@ -403,8 +403,11 @@ class Belief:
 
         # Ticks
         dimensions = self.model.state_grid.shape
-        plt.xticks([i for i in range(dimensions[1])])
-        plt.yticks([i for i in range(dimensions[0])])
+        x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] < 10 else int(dimensions[1] / 10)))
+        y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] < 5 else int(dimensions[0] / 5)))
+
+        plt.xticks(x_ticks)
+        plt.yticks(y_ticks)
 
         # Actual plot
         grid_values = self._values[self.model.state_grid]
@@ -944,7 +947,7 @@ class SolverHistory:
             if isinstance(history, ValueFunction):
                 value_function = history
             else:
-                frame_i = frame_i if frame_i < len(history) else (len(history) - 1)
+                frame_i = frame_i if frame_i < len(history.value_functions) else (len(history.value_functions) - 1)
                 value_function = history.value_functions[frame_i]
 
             alpha_vects = value_function.alpha_vector_array
@@ -962,7 +965,7 @@ class SolverHistory:
             ax1.clear()
             ax2.clear()
 
-            self_frame_i = frame_i if frame_i < len(self) else (len(self) - 1)
+            self_frame_i = frame_i if frame_i < len(self.value_functions) else (len(self.value_functions) - 1)
 
             # Subtitle
             ax1.set_title(title + f'(Frame {frame_i})')
@@ -974,7 +977,7 @@ class SolverHistory:
 
             # Line legend
             lines = []
-            point = self.value_functions[self_frame_i].alpha_vector_list[0][0]
+            point = self.value_functions[self_frame_i].alpha_vector_array[0,0]
             for l in line_types:
                 lines.append(Line2D([0,point],[0,point],linestyle=l))
             ax1.legend(lines, graph_names, loc='lower center')
@@ -984,12 +987,12 @@ class SolverHistory:
                 plot_on_ax(history, frame_i, ax1, line_type)
 
             # Belief plotting
-            beliefs_x = self.belief_sets[frame_i].belief_array[:,1]
+            beliefs_x = self.belief_sets[frame_i if frame_i < len(self.belief_sets) else -1].belief_array[:,1]
             ax2.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
             ax2.get_yaxis().set_visible(False)
             ax2.axhline(0, color='black')
 
-        max_steps = max([len(history) for history in solver_histories if not isinstance(history,ValueFunction)])
+        max_steps = max([len(history.value_functions) for history in solver_histories if not isinstance(history,ValueFunction)])
         ani = animation.FuncAnimation(fig, plt_frame, frames=max_steps, repeat=False)
         
         # File Title
@@ -1057,7 +1060,7 @@ class PBVI_Solver(Solver):
         self.expand_function_params = expand_function_params
 
 
-    def backup(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction) -> ValueFunction:
+    def backup(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, append:bool=False) -> ValueFunction:
         '''
         This function has purpose to update the set of alpha vectors. It does so in 3 steps:
         1. It creates projections from each alpha vector for each possible action and each possible observation
@@ -1075,6 +1078,8 @@ class PBVI_Solver(Solver):
             The belief set to use to generate the new alpha vectors with.
         value_function : ValueFunction
             The alpha vectors to generate the new set from.
+        append : bool, default=False
+            Whether to append the new alpha vectors generated to the old alpha vectors before pruning.
 
         Returns
         -------
@@ -1107,8 +1112,11 @@ class PBVI_Solver(Solver):
             best_actions.append(best_ind)
 
         # Appending old alpha vectors before uniqueness pruning
-        all_vectors = xp.concatenate((value_function.alpha_vector_array, alpha_vectors))
-        all_actions = (value_function.actions if isinstance(value_function.actions, list) else value_function.actions.tolist()) + best_actions
+        all_vectors = alpha_vectors
+        all_actions = best_actions
+        if append:
+            all_vectors = xp.concatenate((value_function.alpha_vector_array, all_vectors))
+            all_actions = (value_function.actions if isinstance(value_function.actions, list) else value_function.actions.tolist()) + all_actions
         new_value_function = ValueFunction(model, all_vectors, all_actions)
 
         # Pruning
@@ -1531,7 +1539,7 @@ class FSVI_Solver(PBVI_Solver):
               mdp_policy:ValueFunction,
               initial_belief:Union[Belief,None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
-              expand_prune_level:Union[int,None]=None, # TODO: Implement prune level config
+              expand_prune_level:Union[int,None]=None,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -1623,7 +1631,11 @@ class FSVI_Solver(PBVI_Solver):
             # Backup (update of value function)
             start_ts = datetime.now()
 
-            value_function = self.backup(model, belief_set, value_function)
+            value_function = self.backup(model, belief_set, value_function, append=True)
+
+            # Additional pruning
+            if expand_prune_level is not None:
+                value_function = value_function.prune(expand_prune_level)
 
             # Change computation
             max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)

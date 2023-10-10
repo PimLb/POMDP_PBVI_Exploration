@@ -829,7 +829,7 @@ class ValueFunction:
         
         # If initial value function was on gpu, and intermediate array was converted to cpu, convert it back to gpu
         if self.is_on_gpu and not pruned_alpha_set.is_on_gpu:
-            pruned_alpha_set = pruned_alpha_set.to_cpu()
+            pruned_alpha_set = pruned_alpha_set.to_gpu()
 
         return pruned_alpha_set
     
