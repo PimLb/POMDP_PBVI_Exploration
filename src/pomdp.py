@@ -1103,17 +1103,13 @@ class PBVI_Solver(Solver):
 
         alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2)
 
-        # Step 3 # TODO potential improvement could be done here?
-        alpha_vectors = xp.zeros(belief_array.shape)
-        best_actions = []
-        for i, b in enumerate(belief_array):
-            best_ind = int(xp.argmax(xp.dot(alpha_a[i,:,:], b)))
-            alpha_vectors[i,:] = alpha_a[i, best_ind,:]
-            best_actions.append(best_ind)
+        # Step 3
+        best_actions = xp.argmax(xp.einsum('bas,bs->ba', alpha_a, belief_array), axis=1)
+        alpha_vectors = cp.take_along_axis(alpha_a, best_actions[:,None,None],axis=1)[:,0,:]
 
-        # Appending old alpha vectors before uniqueness pruning
+        # Appending old alpha vectors before uniqueness pruning # TODO Implement addition operator
         all_vectors = alpha_vectors
-        all_actions = best_actions
+        all_actions = best_actions.tolist()
         if append:
             all_vectors = xp.concatenate((value_function.alpha_vector_array, all_vectors))
             all_actions = (value_function.actions if isinstance(value_function.actions, list) else value_function.actions.tolist()) + all_actions
