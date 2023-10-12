@@ -407,6 +407,11 @@ class Model:
             The posterior state
         '''
         xp = cp if self.is_on_gpu else np
+
+        # Shortcut for deterministic systems
+        if self.reachable_state_count == 1:
+            return int(self.reachable_states[s,a,0])
+
         s_p = int(xp.random.choice(a=self.reachable_states[s,a], size=1, p=self.reachable_probabilities[s,a])[0])
         return s_p
     
@@ -572,7 +577,7 @@ class AlphaVector:
     '''
     def __init__(self, values:np.ndarray, action:int) -> None:
         self.values = values
-        self.action = action
+        self.action = int(action)
 
 
 class ValueFunction:
@@ -587,7 +592,7 @@ class ValueFunction:
         The model the value function is associated with.
     alpha_vectors : list[AlphaVector] or np.ndarray, optional
         The alpha vectors composing the value function, if none are provided, it will be empty to start with and AlphaVectors can be appended.
-    action_list : list[int], optional
+    action_list : list[int] or np.ndarray, optional
         The actions associated with alpha vectors in the case the alpha vectors are provided as an numpy array.
     
     Attributes
@@ -596,9 +601,9 @@ class ValueFunction:
         The model the value function is associated with.
     alpha_vector_list : list[AlphaVector]
     alpha_vector_array : np.ndarray
-    actions : list[int]
+    actions : np.ndarray
     '''
-    def __init__(self, model:Model, alpha_vectors:Union[list[AlphaVector], np.ndarray]=[], action_list:list[int]=[]):
+    def __init__(self, model:Model, alpha_vectors:Union[list[AlphaVector], np.ndarray]=[], action_list:Union[list[int], np.ndarray]=[]): #TODO: Make action list a numpy array
         self.model = model
 
         self._vector_list = None
@@ -623,12 +628,19 @@ class ValueFunction:
             exp_shape = (len(action_list), model.state_count)
             assert av_shape == exp_shape, f"Alpha vector array does not have the right shape (received: {av_shape}; expected: {exp_shape})"
 
-            self._vector_array = alpha_vectors
-            self._actions = action_list
+            self._vector_list = []
+            for alpha_vect, action in zip(alpha_vectors, action_list):
+                self._vector_list.append(AlphaVector(alpha_vect, action))
 
             # Check if array is on gpu
             if gpu_support and cp.get_array_module(alpha_vectors) == cp:
                 self.is_on_gpu = True
+
+        # Deduplication
+        self._uniqueness_dict = {alpha_vector.values.tobytes(): alpha_vector for alpha_vector in self._vector_list}
+        self._vector_list = list(self._uniqueness_dict.values())
+
+        self._pruning_level = 1
 
 
     @property
@@ -653,12 +665,12 @@ class ValueFunction:
 
         if self._vector_array is None:
             self._vector_array = xp.array([v.values for v in self._vector_list])
-            self._actions = [v.action for v in self._vector_list]
+            self._actions = xp.array([v.action for v in self._vector_list])
         return self._vector_array
     
 
     @property
-    def actions(self) -> list[int]:
+    def actions(self) -> np.ndarray:
         '''
         A list of N actions corresponding to the N alpha vectors making up the value function.
         If the value function is defined as a list of AlphaVector objects, the list will the generated from the actions of those alpha vector objects.
@@ -667,13 +679,34 @@ class ValueFunction:
 
         if self._actions is None:
             self._vector_array = xp.array(self._vector_list)
-            self._actions = [v.action for v in self._vector_list]
+            self._actions = xp.array([v.action for v in self._vector_list])
         return self._actions
     
 
     def __len__(self) -> int:
         return len(self._vector_list) if self._vector_list is not None else self._vector_array.shape[0]
     
+
+    def __add__(self, other_value_function:Self) -> Self:
+        # combined_dict = {**self._uniqueness_dict, **other_value_function._uniqueness_dict}
+        combined_dict = {}
+        combined_dict.update(self._uniqueness_dict)
+        combined_dict.update(other_value_function._uniqueness_dict)
+
+        # Instantiation of the new value function
+        new_value_function = super().__new__(self.__class__)
+        new_value_function.model = self.model
+        new_value_function.is_on_gpu = self.is_on_gpu
+
+        new_value_function._vector_list = list(combined_dict.values())
+        new_value_function._uniqueness_dict = combined_dict
+        new_value_function._pruning_level = 1
+
+        new_value_function._vector_array = None
+        new_value_function._actions = None
+
+        return new_value_function
+
 
     def append(self, alpha_vector:AlphaVector) -> None:
         '''
@@ -693,10 +726,29 @@ class ValueFunction:
 
         if self._vector_array is not None:
             self._vector_array = xp.append(self._vector_array, alpha_vector[None,:], axis=0)
-            self._actions.append(alpha_vector.action)
+            self._actions = xp.append(self._actions, alpha_vector.action)
         
         if self._vector_list is not None:
             self._vector_list.append(alpha_vector)
+
+
+    def extend(self, other_value_function:Self) -> None:
+        '''
+        Function to add another value function is place.
+        Effectively, it performs the union of the two sets of alpha vectors.
+
+        Parameters
+        ----------
+        other_value_function : ValueFunction
+            The other side of the union.
+        '''
+        self._uniqueness_dict.update(other_value_function._uniqueness_dict)
+        self._vector_list = list(self._uniqueness_dict.values())
+
+        self._vector_array = None
+        self._actions = None
+
+        self._pruning_level = 1
 
 
     def to_gpu(self) -> Self:
@@ -713,14 +765,14 @@ class ValueFunction:
         gpu_model = self.model.gpu_model
 
         gpu_value_function = None
-        if self._vector_array is not None:
+        if self._vector_list is not None:
+            gpu_alpha_vectors = [AlphaVector(cp.array(av.values), av.action) for av in self._vector_list]
+            gpu_value_function = ValueFunction(gpu_model, gpu_alpha_vectors)
+
+        else:
             gpu_vector_array = cp.array(self._vector_array)
             gpu_actions = self._actions if isinstance(self._actions, list) else cp.array(self._actions)
             gpu_value_function = ValueFunction(gpu_model, gpu_vector_array, gpu_actions)
-        
-        else:
-            gpu_alpha_vectors = [AlphaVector(cp.array(av.values), av.action) for av in self._vector_list]
-            gpu_value_function = ValueFunction(gpu_model, gpu_alpha_vectors)
 
         return gpu_value_function
     
@@ -739,24 +791,22 @@ class ValueFunction:
         cpu_model = self.model.cpu_model
 
         cpu_value_function = None
-        if self._vector_array is not None:
+        if self._vector_list is not None:
+            cpu_alpha_vectors = [AlphaVector(cp.asnumpy(av.values), av.action) for av in self._vector_list]
+            cpu_value_function = ValueFunction(cpu_model, cpu_alpha_vectors)
+
+        else:
             cpu_vector_array = cp.asnumpy(self._vector_array)
             cpu_actions = self._actions if isinstance(self._actions, list) else cp.asnumpy(self._actions)
             cpu_value_function = ValueFunction(cpu_model, cpu_vector_array, cpu_actions)
         
-        else:
-            cpu_alpha_vectors = [AlphaVector(cp.asnumpy(av.values), av.action) for av in self._vector_list]
-            cpu_value_function = ValueFunction(cpu_model, cpu_alpha_vectors)
-
         return cpu_value_function
 
 
-    def prune(self, level:int=1) -> Self:
+    def prune(self, level:int=1) -> None:
         '''
-        Function returning a new value function with the set of alpha vector composing it being it pruned.
+        Function pruning the set of alpha vectors composing the value function.
         The pruning is as thorough as the level:
-            - 0: No pruning, returns a value function with the alpha vector set being an exact copy of the current one.
-            - 1: Simple deduplication of the alpha vectors.
             - 2: 1+ Check of absolute domination (check if dominated at each state).
             - 3: 2+ Solves Linear Programming problem for each alpha vector to see if it is dominated by combinations of other vectors.
         
@@ -766,41 +816,33 @@ class ValueFunction:
         ----------
         level : int, default=1
             Between 0 and 3, how thorough the alpha vector pruning should be.
-            
-        Returns
-        -------
-        new_value_function : ValueFunction
-            A new value function with a pruned set of alpha vectors.
         '''
         # GPU support check
         xp = cp if (gpu_support and self.is_on_gpu) else np
 
-        if level < 1:
-            return ValueFunction(self.model, xp.copy(self))
-        
-        # Level 1 pruning: Check for duplicates - works equally for cupy array (on gpu)
-        L = {alpha_vector.values.tobytes(): alpha_vector for alpha_vector in self.alpha_vector_list}
-        pruned_alpha_set = ValueFunction(self.model, list(L.values()))
+        # Level 1 or under
+        if level < self._pruning_level or level > 3:
+            log('Attempting to prune a value function to a level already reached. Returning \'self\'')
+            return
 
         # Level 2 pruning: Check for absolute domination
-        if level >= 2:
-            # Beyond this point, gpu can't be used due to the functions used so if on gpu, converting it back to cpu
-            if pruned_alpha_set.is_on_gpu:
-                pruned_alpha_set = pruned_alpha_set.to_cpu()
+        if level >= 2 and self._pruning_level < 2:
+            non_dominated_vector_indices = []
 
-            alpha_vector_array = pruned_alpha_set.alpha_vector_array
-            X = cdist(alpha_vector_array, alpha_vector_array, metric=(lambda a,b:(a <= b).all() and not (a == b).all())).astype(bool)
-            non_dominated_vector_indices = np.invert(X).all(axis=1)
+            for i, v in enumerate(self.alpha_vector_array):
+                is_dom_by = xp.all(self.alpha_vector_array >= v, axis=1)
+                if len(xp.where(is_dom_by)[0]) == 1:
+                    non_dominated_vector_indices.append(i)
 
-            non_dominated_vectors = alpha_vector_array[non_dominated_vector_indices]
-            non_dominated_actions = np.array(pruned_alpha_set.actions)[non_dominated_vector_indices].tolist()
-
-            pruned_alpha_set = ValueFunction(self.model, non_dominated_vectors, non_dominated_actions)
+            self._vector_array = self._vector_array[non_dominated_vector_indices]
+            self._actions = self._actions[non_dominated_vector_indices]
 
         # Level 3 pruning: LP to check for more complex domination
         if level >= 3:
-            alpha_set = pruned_alpha_set.alpha_vector_list
-            pruned_alpha_set = ValueFunction(self.model)
+            pruned_alpha_set = pruned_alpha_set.to_cpu()
+
+            alpha_set = pruned_alpha_set.alpha_vector_array
+            non_dominated_vector_indices = []
 
             for i, alpha_vect in enumerate(alpha_set):
                 other_alphas = alpha_set[:i] + alpha_set[(i+1):]
@@ -825,13 +867,13 @@ class ValueFunction:
                     print(alpha_vect)
                     print(' -> Dominated\n')
                 else:
-                    pruned_alpha_set.append(alpha_vect)
-        
-        # If initial value function was on gpu, and intermediate array was converted to cpu, convert it back to gpu
-        if self.is_on_gpu and not pruned_alpha_set.is_on_gpu:
-            pruned_alpha_set = pruned_alpha_set.to_gpu()
+                    non_dominated_vector_indices.append(i)
 
-        return pruned_alpha_set
+            self._vector_array = self._vector_array[non_dominated_vector_indices]
+            self._actions = self._actions[non_dominated_vector_indices]
+
+        # Update the tracked pruned level so far
+        self._pruning_level = level
     
 
     def save(self, path:str='./ValueFunctions', file_name:Union[str,None]=None) -> None:

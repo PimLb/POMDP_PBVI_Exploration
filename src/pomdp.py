@@ -1105,18 +1105,13 @@ class PBVI_Solver(Solver):
 
         # Step 3
         best_actions = xp.argmax(xp.einsum('bas,bs->ba', alpha_a, belief_array), axis=1)
-        alpha_vectors = cp.take_along_axis(alpha_a, best_actions[:,None,None],axis=1)[:,0,:]
+        alpha_vectors = xp.take_along_axis(alpha_a, best_actions[:,None,None],axis=1)[:,0,:]
 
-        # Appending old alpha vectors before uniqueness pruning # TODO Implement addition operator
-        all_vectors = alpha_vectors
-        all_actions = best_actions.tolist()
+        new_value_function = ValueFunction(model, alpha_vectors, best_actions)
+
+        # Union with previous value function
         if append:
-            all_vectors = xp.concatenate((value_function.alpha_vector_array, all_vectors))
-            all_actions = (value_function.actions if isinstance(value_function.actions, list) else value_function.actions.tolist()) + all_actions
-        new_value_function = ValueFunction(model, all_vectors, all_actions)
-
-        # Pruning
-        new_value_function = new_value_function.prune(level=1) # Just check for duplicates
+            new_value_function.extend(value_function)
                 
         return new_value_function
     
@@ -1415,7 +1410,7 @@ class PBVI_Solver(Solver):
 
             # 0: Prune value function at a higher level between expansions
             if expand_prune_level is not None:
-                value_function = value_function.prune(expand_prune_level)
+                value_function.prune(expand_prune_level)
 
             # 1: Expand belief set
             start_ts = datetime.now()
@@ -1613,7 +1608,7 @@ class FSVI_Solver(PBVI_Solver):
                                        initial_belief_set=BeliefSet(model, [b])
                                        )
 
-        for _ in trange(expansions, desc='Expansions') if print_progress else range(expansions):
+        for i in trange(expansions, desc='Expansions') if print_progress else range(expansions):
 
             # Exploration
             start_ts = datetime.now()
@@ -1630,8 +1625,8 @@ class FSVI_Solver(PBVI_Solver):
             value_function = self.backup(model, belief_set, value_function, append=True)
 
             # Additional pruning
-            if expand_prune_level is not None:
-                value_function = value_function.prune(expand_prune_level)
+            if expand_prune_level is not None: # and (i % 20) == 0 and i > 0:
+                value_function.prune(expand_prune_level)
 
             # Change computation
             max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
