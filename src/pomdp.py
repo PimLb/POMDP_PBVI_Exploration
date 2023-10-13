@@ -1,6 +1,6 @@
 from datetime import datetime
 from inspect import signature
-from matplotlib import animation, cm, colors, ticker
+from matplotlib import animation, cm, colors, ticker, patches
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
@@ -409,6 +409,9 @@ class Belief:
         plt.xticks(x_ticks)
         plt.yticks(y_ticks)
 
+        # Title
+        plt.title(f'Belief (probability distribution over states)')
+
         # Actual plot
         grid_values = self._values[self.model.state_grid]
         plt.imshow(grid_values,cmap='Blues')
@@ -572,6 +575,10 @@ class BeliefSet:
         ax = plt.gca()
         ax.get_yaxis().set_visible(False)
 
+        # Set title and ax-label
+        ax.set_title('Set of beliefs')
+        ax.set_xlabel('Belief space')
+
         # X-axis setting
         ticks = [0,0.25,0.5,0.75,1]
         x_ticks = [str(t) for t in ticks]
@@ -648,6 +655,7 @@ class BeliefSet:
 
         # Actual plot
         fig = plt.figure(figsize=(size,size))
+        plt.title('Set of Beliefs')
 
         cmap = cm.get_cmap('Blues')
         norm = colors.Normalize(vmin=0, vmax=self.belief_array.shape[0])
@@ -964,6 +972,10 @@ class SolverHistory:
         def plt_frame(frame_i):
             ax1.clear()
             ax2.clear()
+
+            # Axes labels
+            ax1.set_ylabel('V(b)')
+            ax2.set_xlabel('Belief space')
 
             self_frame_i = frame_i if frame_i < len(self.value_functions) else (len(self.value_functions) - 1)
 
@@ -1466,7 +1478,7 @@ class PBVI_Solver(Solver):
             for _ in range(horizon) if not print_progress else trange(horizon, desc=f'Backups {expansion_i}'):
                 start_ts = datetime.now()
 
-                value_function = self.backup(model, belief_set, value_function)
+                value_function = self.backup(model, belief_set, value_function, belief_dominance_prune=False)
 
                 # Additional pruning
                 if (iteration % prune_interval) == 0 and iteration > 0:
@@ -1803,20 +1815,26 @@ class SimulationHistory(MDP_SimulationHistory):
         # Data
         data = np.array(self.grid_point_sequence)[:(frame_i+1),:]
         belief = self.beliefs[frame_i]
+        observations = self.observations[:(frame_i)]
+        obs_colors = ['#000000'] + [COLOR_LIST[o]['hex'] for o in observations]
 
         # Ticks
         dimensions = self.model.state_grid.shape
-        x_ticks = [i for i in range(dimensions[1])]
-        y_ticks = [i for i in range(dimensions[0])]
+        x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] < 10 else int(dimensions[1] / 10)))
+        y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] < 5 else int(dimensions[0] / 5)))
 
         # Plotting
         ax.clear()
         ax.set_title(f'Simulation (Frame {frame_i})')
 
+        # Observation labels legend
+        proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[o]['id']) for o in self.model.observations]
+        ax.legend(proxy, self.model.observation_labels, title='Observations') # type: ignore
+
         grid_values = belief.values[self.model.state_grid]
         ax.imshow(grid_values, cmap='Blues')
-        ax.plot(data[:,1], data[:,0], color='red')
-        ax.scatter(data[:,1], data[:,0], color='red')
+        ax.plot(data[:,1], data[:,0], color='red', zorder=-1)
+        ax.scatter(data[:,1], data[:,0], c=obs_colors)
 
         ax.set_xticks(x_ticks)
         ax.set_yticks(y_ticks)

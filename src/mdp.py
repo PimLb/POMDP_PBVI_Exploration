@@ -991,9 +991,13 @@ class ValueFunction:
         x = x.reshape((1,x.shape[0])).repeat(m.shape[0],axis=0)
         y = (m*x) + alpha_vects[:,0].reshape(m.shape[0],1)
 
-        ax1 = ax[0] if belief_set is not None else ax
+        ax0 = ax[0] if belief_set is not None else ax
         for i, alpha in enumerate(self.alpha_vector_list):
-            ax1.plot(x[i,:], y[i,:], color=COLOR_LIST[alpha.action]['id']) # type: ignore
+            ax0.plot(x[i,:], y[i,:], color=COLOR_LIST[alpha.action]['id']) # type: ignore
+
+        # Set title
+        title = 'Value function' + ('' if belief_set is None else ' and explored belief points')
+        ax0.set_title(title)
 
         # X-axis setting
         ticks = [0,0.25,0.5,0.75,1]
@@ -1001,11 +1005,11 @@ class ValueFunction:
         x_ticks[0] = self.model.state_labels[0]
         x_ticks[-1] = self.model.state_labels[1]
 
-        ax1.set_xticks(ticks, x_ticks) # type: ignore
+        ax0.set_xticks(ticks, x_ticks) # type: ignore
 
         # Action legend
         proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[a]['id']) for a in self.model.actions]
-        ax1.legend(proxy, self.model.action_labels) # type: ignore
+        ax0.legend(proxy, self.model.action_labels, title='Actions') # type: ignore
 
         # Belief plotting
         if belief_set is not None:
@@ -1013,6 +1017,12 @@ class ValueFunction:
             ax[1].scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c='red')
             ax[1].get_yaxis().set_visible(False)
             ax[1].axhline(0, color='black')
+            ax[1].set_xlabel('Belief space')
+        else:
+            ax0.set_xlabel('Belief space')
+        
+        # Axis labels
+        ax0.set_ylabel('V(b)')
 
 
     def _plot_3D(self, size, belief_set=None):
@@ -1067,7 +1077,7 @@ class ValueFunction:
 
         for alpha in self.alpha_vector_list:
 
-            z = get_alpha_vect_z(xx, yy, alpha)
+            z = get_alpha_vect_z(xx, yy, alpha.values)
 
             # Action array update
             new_a_mask = np.argmax(np.array([max_z, z]), axis=0)
@@ -1076,7 +1086,7 @@ class ValueFunction:
             
             plane[new_a_mask == 1] = random.randrange(100)
             
-            alpha_gradient = get_plane_gradient(alpha)
+            alpha_gradient = get_plane_gradient(alpha.values)
             gradients[new_a_mask == 1] = alpha_gradient
 
             # Max z update
@@ -1092,7 +1102,7 @@ class ValueFunction:
 
         belief_points = None
         if belief_set is not None:
-            belief_points = np.array(belief_set)[:,1:]
+            belief_points = belief_set.belief_array[:,1:]
                     
         fig, ((ax1, ax2),(ax3,ax4)) = plt.subplots(2, 2, figsize=(size*4,size*3.5), sharex=True, sharey=True)
 
@@ -1127,7 +1137,7 @@ class ValueFunction:
         ax4.set_title("Action policy")
         ax4.contourf(x, y, best_a, 1, colors=[c['id'] for c in COLOR_LIST])
         proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[int(a)]['id']) for a in self.model.actions]
-        ax4.legend(proxy, self.model.action_labels)
+        ax4.legend(proxy, self.model.action_labels, title='Actions')
 
         if belief_points is not None:
             for ax in [ax1,ax2,ax3,ax4]:
@@ -1156,7 +1166,7 @@ class ValueFunction:
         ax2.set_title('Action policy')
         ax2.imshow(best_action_colors)
         p = [ patches.Patch(color=COLOR_LIST[int(i)]['id'], label=str(self.model.action_labels[int(i)])) for i in self.model.actions]
-        ax2.legend(handles=p, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
+        ax2.legend(handles=p, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0., title='Actions')
         ax2.set_xticks(x_ticks)
         ax2.set_yticks(y_ticks)
 
@@ -1275,7 +1285,11 @@ class SolverHistory:
         Function to plot the value function changes over the solving process.
         '''
         assert self.tracking_level >= 1, "To plot the change of the value function over time, use tracking level 1 or higher."
+
+        plt.title('Value function change over time')
         plt.plot(np.arange(len(self.value_function_changes)), self.value_function_changes)
+        plt.xlabel('Iteration')
+        plt.ylabel('Value function change')
         plt.show()
 
 
@@ -1489,6 +1503,10 @@ class RewardSet(list):
 
 
     def _plot_total(self, reward_sets, names, max_reward=None):
+        # Plot setup
+        plt.xlabel('Iteration')
+        plt.ylabel('Reward Total')
+
         x = np.arange(len(reward_sets[0]))
 
         # If given plot upper bound
@@ -1503,6 +1521,10 @@ class RewardSet(list):
     
 
     def _plot_moving_average(self, reward_sets, names, max_reward=None):
+        # Plot setup
+        plt.xlabel('Iteration')
+        plt.ylabel('Reward Average')
+        
         x = np.arange(len(reward_sets[0]))
 
         # If given plot upper bound
@@ -1517,6 +1539,10 @@ class RewardSet(list):
 
 
     def _plot_histogram(self, reward_sets, names, max_rewards=None):
+        # Plot setup
+        plt.xlabel('Reward')
+        plt.ylabel('Count')
+
         max_unique = -np.inf
         for rh in reward_sets:
             unique_count = np.unique([r for r in rh]).shape[0]
@@ -1559,7 +1585,6 @@ class SimulationHistory:
     rewards: RewardSet
         The set of rewards received by the agent throughout the simulation process.
     '''
-
     def __init__(self, model:Model, start_state:int):
         self.model = model
 
@@ -1598,12 +1623,17 @@ class SimulationHistory:
             The scale of the plot.
         '''
         plt.figure(figsize=(size,size))
+        plt.title('Simulation steps of the agent')
 
         # Ticks
         dimensions = self.model.state_grid.shape
-        plt.xticks([i for i in range(dimensions[1])])
-        plt.yticks([i for i in range(dimensions[0])])
+        x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] < 10 else int(dimensions[1] / 10)))
+        y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] < 5 else int(dimensions[0] / 5)))
+        
+        plt.xticks(x_ticks)
+        plt.yticks(y_ticks)
 
+        # Inverting y axis
         ax = plt.gca()
         ax.invert_yaxis()
 
