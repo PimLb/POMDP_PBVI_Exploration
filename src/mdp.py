@@ -603,7 +603,7 @@ class ValueFunction:
     alpha_vector_array : np.ndarray
     actions : np.ndarray
     '''
-    def __init__(self, model:Model, alpha_vectors:Union[list[AlphaVector], np.ndarray]=[], action_list:Union[list[int], np.ndarray]=[]): #TODO: Make action list a numpy array
+    def __init__(self, model:Model, alpha_vectors:Union[list[AlphaVector], np.ndarray]=[], action_list:Union[list[int], np.ndarray]=[]):
         self.model = model
 
         self._vector_list = None

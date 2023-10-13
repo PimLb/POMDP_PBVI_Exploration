@@ -1322,7 +1322,7 @@ class PBVI_Solver(Solver):
               horizon:int,
               initial_belief:Union[BeliefSet, Belief, None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
-              expand_prune_level:Union[int,None]=None,
+              prune_level:Union[int,None]=None,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -1351,7 +1351,7 @@ class PBVI_Solver(Solver):
             An initial list of beliefs to start with.
         initial_value_function : ValueFunction, optional
             An initial value function to start the solving process with.
-        expand_prune_level : int, optional
+        prune_level : int, optional
             Parameter to prune the value function further before the expand function.
         use_gpu : bool, default=False
             Whether to use the GPU with cupy array to accelerate solving. (Default: False)
@@ -1409,8 +1409,8 @@ class PBVI_Solver(Solver):
         for expansion_i in range(expansions) if not print_progress else trange(expansions, desc='Expansions'):
 
             # 0: Prune value function at a higher level between expansions
-            if expand_prune_level is not None:
-                value_function.prune(expand_prune_level)
+            if prune_level is not None:
+                value_function.prune(prune_level)
 
             # 1: Expand belief set
             start_ts = datetime.now()
@@ -1469,8 +1469,19 @@ class FSVI_Solver(PBVI_Solver):
         self.gamma = gamma
         self.eps = eps
 
+        self._belief_memory = {}
 
-    def MDPExplore(self, model:Model, b:Belief, s:int, mdp_policy:ValueFunction, depth:int, horizon:int) -> BeliefSet:
+
+    def MDPExplore(self,
+                   model:Model,
+                   b:Belief,
+                   s:int,
+                   mdp_policy:ValueFunction,
+                   depth:int,
+                   horizon:int,
+                   sequence_string:str='',
+                   belief_memory_depth:int=10
+                   ) -> BeliefSet:
         '''
         Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs.
         It is a recursive function that is started by a initial state 's' and using the MDP policy, chooses the best action to take.
@@ -1513,11 +1524,23 @@ class FSVI_Solver(PBVI_Solver):
             # Pick a random observation weighted by observation probabilities in state s_p and after having done action a_star
             o = model.observe(s_p, a_star)
 
-            # Generate a new belief based on a_star and o
-            b_p = b.update(a_star, o)
+            # Update sequence string
+            sequence_string += ('-' if depth > 0 else '') + f'{a_star},{o}'
+
+            # If we are within the memory limits and the sequence is already in the memory, we retrieve it
+            if depth < belief_memory_depth and sequence_string in self._belief_memory:
+                b_p = self._belief_memory[sequence_string]
+            
+            else:
+                # Generate a new belief based on a_star and o
+                b_p = b.update(a_star, o)
+                
+                # Add it to the memory if we are in the depth
+                if depth < belief_memory_depth:
+                    self._belief_memory[sequence_string] = b_p
 
             # Recursive call to go closer to goal
-            b_set = self.MDPExplore(model, b_p, s_p, mdp_policy, depth+1, horizon)
+            b_set = self.MDPExplore(model, b_p, s_p, mdp_policy, depth+1, horizon, sequence_string, belief_memory_depth)
             belief_list.extend(b_set.belief_list)
         
         return BeliefSet(model, belief_list)
@@ -1530,7 +1553,8 @@ class FSVI_Solver(PBVI_Solver):
               mdp_policy:ValueFunction,
               initial_belief:Union[Belief,None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
-              expand_prune_level:Union[int,None]=None,
+              prune_level:Union[int,None]=None,
+              belief_memory_depth:int=10,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -1554,7 +1578,7 @@ class FSVI_Solver(PBVI_Solver):
             An initial belief that will replace the default initial belief generated from the start probabilities of the model.
         initial_value_function : ValueFunction, optional
             An initial value function to start the solving process with. (Can for example be the MDP value function)
-        expand_prune_level : int, optional
+        prune_level : int, optional
             Parameter to prune the value function further before the expand function.
         use_gpu : bool, default=False
             Whether to use the GPU with cupy array to accelerate solving.
@@ -1610,11 +1634,11 @@ class FSVI_Solver(PBVI_Solver):
 
         for i in trange(expansions, desc='Expansions') if print_progress else range(expansions):
 
-            # Exploration
+            # Expand (exploration)
             start_ts = datetime.now()
 
             s0 = b.random_state()
-            belief_set = self.MDPExplore(model, b, s0, mdp_policy, 0, horizon)
+            belief_set = self.MDPExplore(model, b, s0, mdp_policy, 0, horizon, sequence_string='', belief_memory_depth=belief_memory_depth)
 
             expand_time = (datetime.now() - start_ts).total_seconds()
             solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
@@ -1625,8 +1649,8 @@ class FSVI_Solver(PBVI_Solver):
             value_function = self.backup(model, belief_set, value_function, append=True)
 
             # Additional pruning
-            if expand_prune_level is not None: # and (i % 20) == 0 and i > 0:
-                value_function.prune(expand_prune_level)
+            if prune_level is not None: # and (i % 20) == 0 and i > 0:
+                value_function.prune(prune_level)
 
             # Change computation
             max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
