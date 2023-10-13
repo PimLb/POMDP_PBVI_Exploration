@@ -431,8 +431,11 @@ class Belief:
 
         # Ticks
         dimensions = self.model.state_grid.shape
-        plt.xticks([i for i in range(dimensions[1])])
-        plt.yticks([i for i in range(dimensions[0])])
+        x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] &lt; 10 else int(dimensions[1] / 10)))
+        y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] &lt; 5 else int(dimensions[0] / 5)))
+
+        plt.xticks(x_ticks)
+        plt.yticks(y_ticks)
 
         # Actual plot
         grid_values = self._values[self.model.state_grid]
@@ -972,7 +975,7 @@ class SolverHistory:
             if isinstance(history, ValueFunction):
                 value_function = history
             else:
-                frame_i = frame_i if frame_i &lt; len(history) else (len(history) - 1)
+                frame_i = frame_i if frame_i &lt; len(history.value_functions) else (len(history.value_functions) - 1)
                 value_function = history.value_functions[frame_i]
 
             alpha_vects = value_function.alpha_vector_array
@@ -990,7 +993,7 @@ class SolverHistory:
             ax1.clear()
             ax2.clear()
 
-            self_frame_i = frame_i if frame_i &lt; len(self) else (len(self) - 1)
+            self_frame_i = frame_i if frame_i &lt; len(self.value_functions) else (len(self.value_functions) - 1)
 
             # Subtitle
             ax1.set_title(title + f&#39;(Frame {frame_i})&#39;)
@@ -1002,7 +1005,7 @@ class SolverHistory:
 
             # Line legend
             lines = []
-            point = self.value_functions[self_frame_i].alpha_vector_list[0][0]
+            point = self.value_functions[self_frame_i].alpha_vector_array[0,0]
             for l in line_types:
                 lines.append(Line2D([0,point],[0,point],linestyle=l))
             ax1.legend(lines, graph_names, loc=&#39;lower center&#39;)
@@ -1012,12 +1015,12 @@ class SolverHistory:
                 plot_on_ax(history, frame_i, ax1, line_type)
 
             # Belief plotting
-            beliefs_x = self.belief_sets[frame_i].belief_array[:,1]
+            beliefs_x = self.belief_sets[frame_i if frame_i &lt; len(self.belief_sets) else -1].belief_array[:,1]
             ax2.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c=&#39;red&#39;)
             ax2.get_yaxis().set_visible(False)
             ax2.axhline(0, color=&#39;black&#39;)
 
-        max_steps = max([len(history) for history in solver_histories if not isinstance(history,ValueFunction)])
+        max_steps = max([len(history.value_functions) for history in solver_histories if not isinstance(history,ValueFunction)])
         ani = animation.FuncAnimation(fig, plt_frame, frames=max_steps, repeat=False)
         
         # File Title
@@ -1085,7 +1088,13 @@ class PBVI_Solver(Solver):
         self.expand_function_params = expand_function_params
 
 
-    def backup(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction) -&gt; ValueFunction:
+    def backup(self,
+               model:Model,
+               belief_set:BeliefSet,
+               value_function:ValueFunction,
+               append:bool=False,
+               belief_dominance_prune:bool=True
+               ) -&gt; ValueFunction:
         &#39;&#39;&#39;
         This function has purpose to update the set of alpha vectors. It does so in 3 steps:
         1. It creates projections from each alpha vector for each possible action and each possible observation
@@ -1103,7 +1112,11 @@ class PBVI_Solver(Solver):
             The belief set to use to generate the new alpha vectors with.
         value_function : ValueFunction
             The alpha vectors to generate the new set from.
-
+        append : bool, default=False
+            Whether to append the new alpha vectors generated to the old alpha vectors before pruning.
+        belief_dominance_prune : bool, default=True
+            Whether, before returning the new value function, checks what alpha vectors have a supperior 
+            
         Returns
         -------
         new_alpha_set : ValueFunction
@@ -1126,26 +1139,30 @@ class PBVI_Solver(Solver):
 
         alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2)
 
-        # Step 3 # TODO potential improvement could be done here?
-        alpha_vectors = xp.zeros(belief_array.shape)
-        best_actions = []
-        for i, b in enumerate(belief_array):
-            best_ind = int(xp.argmax(xp.dot(alpha_a[i,:,:], b)))
-            alpha_vectors[i,:] = alpha_a[i, best_ind,:]
-            best_actions.append(best_ind)
+        # Step 3
+        best_actions = xp.argmax(xp.einsum(&#39;bas,bs-&gt;ba&#39;, alpha_a, belief_array), axis=1)
+        alpha_vectors = xp.take_along_axis(alpha_a, best_actions[:,None,None],axis=1)[:,0,:]
 
-        # Appending old alpha vectors before uniqueness pruning
-        all_vectors = xp.concatenate((value_function.alpha_vector_array, alpha_vectors))
-        all_actions = (value_function.actions if isinstance(value_function.actions, list) else value_function.actions.tolist()) + best_actions
-        new_value_function = ValueFunction(model, all_vectors, all_actions)
+        # Belief domination
+        if belief_dominance_prune:
+            best_value_per_belief = xp.sum((belief_array * alpha_vectors), axis=1)
+            old_best_value_per_belief = xp.max(xp.matmul(belief_array, vector_array.T), axis=1)
+            dominating_vectors = best_value_per_belief &gt; old_best_value_per_belief
 
-        # Pruning
-        new_value_function = new_value_function.prune(level=1) # Just check for duplicates
+            best_actions = best_actions[dominating_vectors]
+            alpha_vectors = alpha_vectors[dominating_vectors]
+
+        # Creation of value function
+        new_value_function = ValueFunction(model, alpha_vectors, best_actions)
+
+        # Union with previous value function
+        if append:
+            new_value_function.extend(value_function)
                 
         return new_value_function
     
     
-    def expand_ssra(self, model:Model, belief_set:BeliefSet) -&gt; BeliefSet:
+    def expand_ssra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Stochastic Simulation with Random Action.
         Simulates running a single-step forward from the beliefs in the &#34;belief_set&#34;.
@@ -1158,6 +1175,8 @@ class PBVI_Solver(Solver):
             The POMDP model on which to expand the belief set on.
         belief_set : BeliefSet
             List of beliefs to expand on.
+        max_generation : int, default=10
+            The max amount of beliefs that can be added to the belief set at once.
 
         Returns
         -------
@@ -1167,11 +1186,12 @@ class PBVI_Solver(Solver):
         xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
         old_shape = belief_set.belief_array.shape
+        to_generate = min(max_generation, old_shape[0])
 
-        new_belief_array = xp.empty((old_shape[0] * 2, old_shape[1]))
+        new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
 
-        for i, belief_vector in enumerate(belief_set.belief_array):
+        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
             b = Belief(model, belief_vector)
             s = b.random_state()
             a = random.choice(model.actions)
@@ -1184,7 +1204,7 @@ class PBVI_Solver(Solver):
         return BeliefSet(model, new_belief_array)
     
 
-    def expand_ssga(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, eps:float=0.1) -&gt; BeliefSet:
+    def expand_ssga(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, eps:float=0.1, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Stochastic Simulation with Greedy Action.
         Simulates running a single-step forward from the beliefs in the &#34;belief_set&#34;.
@@ -1203,6 +1223,8 @@ class PBVI_Solver(Solver):
             Used to find the best action knowing the belief.
         eps : float
             Parameter tuning how often we take a greedy approach and how often we move randomly.
+        max_generation : int, default=10
+            The max amount of beliefs that can be added to the belief set at once.
 
         Returns
         -------
@@ -1212,11 +1234,12 @@ class PBVI_Solver(Solver):
         xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
         old_shape = belief_set.belief_array.shape
+        to_generate = min(max_generation, old_shape[0])
 
-        new_belief_array = xp.empty((old_shape[0] * 2, old_shape[1]))
+        new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
                 
-        for i, belief_vector in enumerate(belief_set.belief_array):
+        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
             b = Belief(model, belief_vector)
             s = b.random_state()
             
@@ -1235,7 +1258,7 @@ class PBVI_Solver(Solver):
         return BeliefSet(model, new_belief_array)
     
 
-    def expand_ssea(self, model:Model, belief_set:BeliefSet) -&gt; BeliefSet:
+    def expand_ssea(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Stochastic Simulation with Exploratory Action.
         Simulates running steps forward for each possible action knowing we are a state s, chosen randomly with according to the belief probability.
@@ -1249,6 +1272,8 @@ class PBVI_Solver(Solver):
             The POMDP model on which to expand the belief set on.
         belief_set : BeliefSet
             List of beliefs to expand on.
+        max_generation : int, default=10
+            The max amount of beliefs that can be added to the belief set at once.
 
         Returns
         -------
@@ -1258,11 +1283,12 @@ class PBVI_Solver(Solver):
         xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
         old_shape = belief_set.belief_array.shape
+        to_generate = min(max_generation, old_shape[0])
 
-        new_belief_array = xp.empty((old_shape[0] * 2, old_shape[1]))
+        new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
         
-        for i, belief_vector in enumerate(belief_set.belief_array):
+        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
             b = Belief(model, belief_vector)
             best_b = None
             max_dist = -math.inf
@@ -1285,7 +1311,7 @@ class PBVI_Solver(Solver):
         return BeliefSet(model, new_belief_array)
     
 
-    def expand_ger(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction) -&gt; BeliefSet:
+    def expand_ger(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Greedy Error Reduction. NOT IMPLEMENTED YET.
         Parameters
@@ -1296,6 +1322,8 @@ class PBVI_Solver(Solver):
             List of beliefs to expand on.
         value_function : ValueFunction
             Used to find the best action knowing the belief.
+        max_generation : int, default=10
+            The max amount of beliefs that can be added to the belief set at once.
 
         Returns
         -------
@@ -1306,7 +1334,7 @@ class PBVI_Solver(Solver):
         return []
 
 
-    def expand(self, model:Model, belief_set:BeliefSet, **function_specific_parameters) -&gt; BeliefSet:
+    def expand(self, model:Model, belief_set:BeliefSet, max_generation:int, **function_specific_parameters) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Central method to call one of the functions for a particular expansion strategy:
             - Stochastic Simulation with Random Action (ssra)
@@ -1322,6 +1350,8 @@ class PBVI_Solver(Solver):
             The set of beliefs to expand.
         function_specific_parameters
             Potential additional parameters necessary for the specific expand function.
+        max_generation : int
+            The max amount of beliefs that can be added to the belief set at once.
 
         Returns
         -------
@@ -1329,18 +1359,18 @@ class PBVI_Solver(Solver):
             The belief set the expansion function returns. 
         &#39;&#39;&#39;
         if self.expand_function in &#39;expand_ssra&#39;:
-            return self.expand_ssra(model=model, belief_set=belief_set)
+            return self.expand_ssra(model=model, belief_set=belief_set, max_generation=max_generation)
         
         elif self.expand_function in &#39;expand_ssga&#39;:
             args = {arg: function_specific_parameters[arg] for arg in [&#39;value_function&#39;, &#39;eps&#39;] if arg in function_specific_parameters}
-            return self.expand_ssga(model=model, belief_set=belief_set, **args)
+            return self.expand_ssga(model=model, belief_set=belief_set, max_generation=max_generation, **args)
         
         elif self.expand_function in &#39;expand_ssea&#39;:
-            return self.expand_ssea(model=model, belief_set=belief_set)
+            return self.expand_ssea(model=model, belief_set=belief_set, max_generation=max_generation)
         
         elif self.expand_function in &#39;expand_ger&#39;:
             args = {arg: function_specific_parameters[arg] for arg in [&#39;value_function&#39;] if arg in function_specific_parameters}
-            return self.expand_ger(model=model, belief_set=belief_set, **args)
+            return self.expand_ger(model=model, belief_set=belief_set, max_generation=max_generation, **args)
         
         return []
 
@@ -1349,9 +1379,11 @@ class PBVI_Solver(Solver):
               model:Model,
               expansions:int,
               horizon:int,
+              max_belief_growth:int=10,
               initial_belief:Union[BeliefSet, Belief, None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
-              expand_prune_level:Union[int,None]=None,
+              prune_level:int=1,
+              prune_interval:int=10,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -1376,14 +1408,18 @@ class PBVI_Solver(Solver):
             How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
         horizon : int
             How many times the alpha vector set must be updated every time the belief set is expanded.
+        max_belief_growth : int, default=10
+            How many beliefs can be added at every expansion step to the belief set.
         initial_belief : BeliefSet or Belief, optional
             An initial list of beliefs to start with.
         initial_value_function : ValueFunction, optional
             An initial value function to start the solving process with.
-        expand_prune_level : int, optional
+        prune_level : int, default=1
             Parameter to prune the value function further before the expand function.
+        prune_interval : int, default=10
+            How often to prune the value function. It is counted in number of backup iterations.
         use_gpu : bool, default=False
-            Whether to use the GPU with cupy array to accelerate solving. (Default: False)
+            Whether to use the GPU with cupy array to accelerate solving.
         history_tracking_level : int, default=1
             How thorough the tracking of the solving process should be. (0: Nothing; 1: Times and sizes of belief sets and value function; 2: The actual value functions and beliefs sets)
         print_progress : bool, default=True
@@ -1435,27 +1471,34 @@ class PBVI_Solver(Solver):
                                        initial_belief_set=belief_set)
 
         # Loop
+        iteration = 0
+        expand_max_val_per_belief = None
         for expansion_i in range(expansions) if not print_progress else trange(expansions, desc=&#39;Expansions&#39;):
-
-            # 0: Prune value function at a higher level between expansions
-            if expand_prune_level is not None:
-                value_function = value_function.prune(expand_prune_level)
 
             # 1: Expand belief set
             start_ts = datetime.now()
 
-            belief_set = self.expand(model=model, belief_set=belief_set, value_function=value_function, **self.expand_function_params)
+            belief_set = self.expand(model=model,
+                                     belief_set=belief_set,
+                                     value_function=value_function,
+                                     max_generation=max_belief_growth,
+                                     **self.expand_function_params)
 
             expand_time = (datetime.now() - start_ts).total_seconds()
             solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
 
             # 2: Backup, update value function (alpha vector set)
             old_max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
+            expand_max_val_per_belief = xp.copy(old_max_val_per_belief)
 
             for _ in range(horizon) if not print_progress else trange(horizon, desc=f&#39;Backups {expansion_i}&#39;):
                 start_ts = datetime.now()
 
                 value_function = self.backup(model, belief_set, value_function)
+
+                # Additional pruning
+                if (iteration % prune_interval) == 0 and iteration &gt; 0:
+                    value_function.prune(prune_level)
 
                 # Max change
                 max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
@@ -1467,9 +1510,16 @@ class PBVI_Solver(Solver):
 
                 # convergence check
                 if max_change &lt; max_allowed_change:
-                    print(&#39;Converged early...&#39;)
-                    return value_function, solver_history
+                    break
                 old_max_val_per_belief = max_val_per_belief
+
+                # Update iteration counter
+                iteration += 1
+
+            expand_max_change = xp.max(xp.abs(max_val_per_belief - expand_max_val_per_belief))
+            if expand_max_change &lt; max_allowed_change:
+                print(&#39;Converged!&#39;)
+                break
 
         return value_function, solver_history
 
@@ -1498,8 +1548,19 @@ class FSVI_Solver(PBVI_Solver):
         self.gamma = gamma
         self.eps = eps
 
+        self._belief_memory = {}
 
-    def MDPExplore(self, model:Model, b:Belief, s:int, mdp_policy:ValueFunction, depth:int, horizon:int) -&gt; BeliefSet:
+
+    def MDPExplore(self,
+                   model:Model,
+                   b:Belief,
+                   s:int,
+                   mdp_policy:ValueFunction,
+                   depth:int,
+                   horizon:int,
+                   sequence_string:str=&#39;&#39;,
+                   belief_memory_depth:int=10
+                   ) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs.
         It is a recursive function that is started by a initial state &#39;s&#39; and using the MDP policy, chooses the best action to take.
@@ -1521,6 +1582,10 @@ class FSVI_Solver(PBVI_Solver):
             The current recursion depth.
         horizon : int
             The maximum recursion depth that can be reached before the generated belief sequence is returned.
+        sequence_string : str, default=&#39;&#39;
+            The sequence of previously explored actions and observations.
+        belief_memory_depth : int, default=10
+            How deep the belief memory should be. It is used to speedup the MDP expansion process by caching previously explored beliefs based on the sequence that led it there.
 
         Returns
         -------
@@ -1542,11 +1607,23 @@ class FSVI_Solver(PBVI_Solver):
             # Pick a random observation weighted by observation probabilities in state s_p and after having done action a_star
             o = model.observe(s_p, a_star)
 
-            # Generate a new belief based on a_star and o
-            b_p = b.update(a_star, o)
+            # Update sequence string
+            sequence_string += (&#39;-&#39; if depth &gt; 0 else &#39;&#39;) + f&#39;{a_star},{o}&#39;
+
+            # If we are within the memory limits and the sequence is already in the memory, we retrieve it
+            if depth &lt; belief_memory_depth and sequence_string in self._belief_memory:
+                b_p = self._belief_memory[sequence_string]
+            
+            else:
+                # Generate a new belief based on a_star and o
+                b_p = b.update(a_star, o)
+                
+                # Add it to the memory if we are in the depth
+                if depth &lt; belief_memory_depth:
+                    self._belief_memory[sequence_string] = b_p
 
             # Recursive call to go closer to goal
-            b_set = self.MDPExplore(model, b_p, s_p, mdp_policy, depth+1, horizon)
+            b_set = self.MDPExplore(model, b_p, s_p, mdp_policy, depth+1, horizon, sequence_string, belief_memory_depth)
             belief_list.extend(b_set.belief_list)
         
         return BeliefSet(model, belief_list)
@@ -1559,7 +1636,9 @@ class FSVI_Solver(PBVI_Solver):
               mdp_policy:ValueFunction,
               initial_belief:Union[Belief,None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
-              expand_prune_level:Union[int,None]=None, # TODO: Implement prune level config
+              prune_level:int=1,
+              prune_interval:int=10,
+              belief_memory_depth:int=10,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -1583,8 +1662,12 @@ class FSVI_Solver(PBVI_Solver):
             An initial belief that will replace the default initial belief generated from the start probabilities of the model.
         initial_value_function : ValueFunction, optional
             An initial value function to start the solving process with. (Can for example be the MDP value function)
-        expand_prune_level : int, optional
+        prune_level : int, default=1
             Parameter to prune the value function further before the expand function.
+        prune_interval : int, default=10
+            How often to prune the value function. It is counted in number of iterations.
+        belief_memory_depth : int, default=10
+            How deep the belief memory should be. It is used to speedup the MDP expansion process by caching previously explored beliefs based on the sequence that led it there.
         use_gpu : bool, default=False
             Whether to use the GPU with cupy array to accelerate solving.
         history_tracking_level : int, default=1
@@ -1637,13 +1720,13 @@ class FSVI_Solver(PBVI_Solver):
                                        initial_belief_set=BeliefSet(model, [b])
                                        )
 
-        for _ in trange(expansions, desc=&#39;Expansions&#39;) if print_progress else range(expansions):
+        for i in trange(expansions, desc=&#39;Expansions&#39;) if print_progress else range(expansions):
 
-            # Exploration
+            # Expand (exploration)
             start_ts = datetime.now()
 
             s0 = b.random_state()
-            belief_set = self.MDPExplore(model, b, s0, mdp_policy, 0, horizon)
+            belief_set = self.MDPExplore(model, b, s0, mdp_policy, 0, horizon, sequence_string=&#39;&#39;, belief_memory_depth=belief_memory_depth)
 
             expand_time = (datetime.now() - start_ts).total_seconds()
             solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
@@ -1651,7 +1734,11 @@ class FSVI_Solver(PBVI_Solver):
             # Backup (update of value function)
             start_ts = datetime.now()
 
-            value_function = self.backup(model, belief_set, value_function)
+            value_function = self.backup(model, belief_set, value_function, append=True)
+
+            # Additional pruning
+            if (i % prune_interval) == 0 and i &gt; 0:
+                value_function.prune(prune_level)
 
             # Change computation
             max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
@@ -1663,11 +1750,14 @@ class FSVI_Solver(PBVI_Solver):
             
             # Convergence check
             if max_change &lt; max_allowed_change:
-                print(&#39;Converged early...&#39;)
-                return value_function, solver_history
+                print(&#39;Converged!&#39;)
+                break
             
             old_max_val_per_belief = max_val_per_belief
 
+        # Final pruning
+        value_function.prune(prune_level)
+        
         return value_function, solver_history
 
 
@@ -3408,8 +3498,11 @@ If not specified, it will be set as the start probabilities of the model.</dd>
 
         # Ticks
         dimensions = self.model.state_grid.shape
-        plt.xticks([i for i in range(dimensions[1])])
-        plt.yticks([i for i in range(dimensions[0])])
+        x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] &lt; 10 else int(dimensions[1] / 10)))
+        y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] &lt; 5 else int(dimensions[0] / 5)))
+
+        plt.xticks(x_ticks)
+        plt.yticks(y_ticks)
 
         # Actual plot
         grid_values = self._values[self.model.state_grid]
@@ -3465,8 +3558,11 @@ def values(self) -&gt; np.ndarray:
 
     # Ticks
     dimensions = self.model.state_grid.shape
-    plt.xticks([i for i in range(dimensions[1])])
-    plt.yticks([i for i in range(dimensions[0])])
+    x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] &lt; 10 else int(dimensions[1] / 10)))
+    y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] &lt; 5 else int(dimensions[0] / 5)))
+
+    plt.xticks(x_ticks)
+    plt.yticks(y_ticks)
 
     # Actual plot
     grid_values = self._values[self.model.state_grid]
@@ -4042,8 +4138,19 @@ Parameters</p>
         self.gamma = gamma
         self.eps = eps
 
+        self._belief_memory = {}
 
-    def MDPExplore(self, model:Model, b:Belief, s:int, mdp_policy:ValueFunction, depth:int, horizon:int) -&gt; BeliefSet:
+
+    def MDPExplore(self,
+                   model:Model,
+                   b:Belief,
+                   s:int,
+                   mdp_policy:ValueFunction,
+                   depth:int,
+                   horizon:int,
+                   sequence_string:str=&#39;&#39;,
+                   belief_memory_depth:int=10
+                   ) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs.
         It is a recursive function that is started by a initial state &#39;s&#39; and using the MDP policy, chooses the best action to take.
@@ -4065,6 +4172,10 @@ Parameters</p>
             The current recursion depth.
         horizon : int
             The maximum recursion depth that can be reached before the generated belief sequence is returned.
+        sequence_string : str, default=&#39;&#39;
+            The sequence of previously explored actions and observations.
+        belief_memory_depth : int, default=10
+            How deep the belief memory should be. It is used to speedup the MDP expansion process by caching previously explored beliefs based on the sequence that led it there.
 
         Returns
         -------
@@ -4086,11 +4197,23 @@ Parameters</p>
             # Pick a random observation weighted by observation probabilities in state s_p and after having done action a_star
             o = model.observe(s_p, a_star)
 
-            # Generate a new belief based on a_star and o
-            b_p = b.update(a_star, o)
+            # Update sequence string
+            sequence_string += (&#39;-&#39; if depth &gt; 0 else &#39;&#39;) + f&#39;{a_star},{o}&#39;
+
+            # If we are within the memory limits and the sequence is already in the memory, we retrieve it
+            if depth &lt; belief_memory_depth and sequence_string in self._belief_memory:
+                b_p = self._belief_memory[sequence_string]
+            
+            else:
+                # Generate a new belief based on a_star and o
+                b_p = b.update(a_star, o)
+                
+                # Add it to the memory if we are in the depth
+                if depth &lt; belief_memory_depth:
+                    self._belief_memory[sequence_string] = b_p
 
             # Recursive call to go closer to goal
-            b_set = self.MDPExplore(model, b_p, s_p, mdp_policy, depth+1, horizon)
+            b_set = self.MDPExplore(model, b_p, s_p, mdp_policy, depth+1, horizon, sequence_string, belief_memory_depth)
             belief_list.extend(b_set.belief_list)
         
         return BeliefSet(model, belief_list)
@@ -4103,7 +4226,9 @@ Parameters</p>
               mdp_policy:ValueFunction,
               initial_belief:Union[Belief,None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
-              expand_prune_level:Union[int,None]=None, # TODO: Implement prune level config
+              prune_level:int=1,
+              prune_interval:int=10,
+              belief_memory_depth:int=10,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -4127,8 +4252,12 @@ Parameters</p>
             An initial belief that will replace the default initial belief generated from the start probabilities of the model.
         initial_value_function : ValueFunction, optional
             An initial value function to start the solving process with. (Can for example be the MDP value function)
-        expand_prune_level : int, optional
+        prune_level : int, default=1
             Parameter to prune the value function further before the expand function.
+        prune_interval : int, default=10
+            How often to prune the value function. It is counted in number of iterations.
+        belief_memory_depth : int, default=10
+            How deep the belief memory should be. It is used to speedup the MDP expansion process by caching previously explored beliefs based on the sequence that led it there.
         use_gpu : bool, default=False
             Whether to use the GPU with cupy array to accelerate solving.
         history_tracking_level : int, default=1
@@ -4181,13 +4310,13 @@ Parameters</p>
                                        initial_belief_set=BeliefSet(model, [b])
                                        )
 
-        for _ in trange(expansions, desc=&#39;Expansions&#39;) if print_progress else range(expansions):
+        for i in trange(expansions, desc=&#39;Expansions&#39;) if print_progress else range(expansions):
 
-            # Exploration
+            # Expand (exploration)
             start_ts = datetime.now()
 
             s0 = b.random_state()
-            belief_set = self.MDPExplore(model, b, s0, mdp_policy, 0, horizon)
+            belief_set = self.MDPExplore(model, b, s0, mdp_policy, 0, horizon, sequence_string=&#39;&#39;, belief_memory_depth=belief_memory_depth)
 
             expand_time = (datetime.now() - start_ts).total_seconds()
             solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
@@ -4195,7 +4324,11 @@ Parameters</p>
             # Backup (update of value function)
             start_ts = datetime.now()
 
-            value_function = self.backup(model, belief_set, value_function)
+            value_function = self.backup(model, belief_set, value_function, append=True)
+
+            # Additional pruning
+            if (i % prune_interval) == 0 and i &gt; 0:
+                value_function.prune(prune_level)
 
             # Change computation
             max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
@@ -4207,11 +4340,14 @@ Parameters</p>
             
             # Convergence check
             if max_change &lt; max_allowed_change:
-                print(&#39;Converged early...&#39;)
-                return value_function, solver_history
+                print(&#39;Converged!&#39;)
+                break
             
             old_max_val_per_belief = max_val_per_belief
 
+        # Final pruning
+        value_function.prune(prune_level)
+        
         return value_function, solver_history</code></pre>
 </details>
 <h3>Ancestors</h3>
@@ -4223,7 +4359,7 @@ Parameters</p>
 <h3>Methods</h3>
 <dl>
 <dt id="src.pomdp.FSVI_Solver.MDPExplore"><code class="name flex">
-<span>def <span class="ident">MDPExplore</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, b: <a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>, s: int, mdp_policy: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, depth: int, horizon: int) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
+<span>def <span class="ident">MDPExplore</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, b: <a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>, s: int, mdp_policy: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, depth: int, horizon: int, sequence_string: str = '', belief_memory_depth: int = 10) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs.
@@ -4245,6 +4381,10 @@ Once the state is a goal state, the recursion is done and the belief sequence is
 <dd>The current recursion depth.</dd>
 <dt><strong><code>horizon</code></strong> :&ensp;<code>int</code></dt>
 <dd>The maximum recursion depth that can be reached before the generated belief sequence is returned.</dd>
+<dt><strong><code>sequence_string</code></strong> :&ensp;<code>str</code>, default=<code>''</code></dt>
+<dd>The sequence of previously explored actions and observations.</dd>
+<dt><strong><code>belief_memory_depth</code></strong> :&ensp;<code>int</code>, default=<code>10</code></dt>
+<dd>How deep the belief memory should be. It is used to speedup the MDP expansion process by caching previously explored beliefs based on the sequence that led it there.</dd>
 </dl>
 <h2 id="returns">Returns</h2>
 <dl>
@@ -4255,7 +4395,16 @@ Once the state is a goal state, the recursion is done and the belief sequence is
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def MDPExplore(self, model:Model, b:Belief, s:int, mdp_policy:ValueFunction, depth:int, horizon:int) -&gt; BeliefSet:
+<pre><code class="python">def MDPExplore(self,
+               model:Model,
+               b:Belief,
+               s:int,
+               mdp_policy:ValueFunction,
+               depth:int,
+               horizon:int,
+               sequence_string:str=&#39;&#39;,
+               belief_memory_depth:int=10
+               ) -&gt; BeliefSet:
     &#39;&#39;&#39;
     Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs.
     It is a recursive function that is started by a initial state &#39;s&#39; and using the MDP policy, chooses the best action to take.
@@ -4277,6 +4426,10 @@ Once the state is a goal state, the recursion is done and the belief sequence is
         The current recursion depth.
     horizon : int
         The maximum recursion depth that can be reached before the generated belief sequence is returned.
+    sequence_string : str, default=&#39;&#39;
+        The sequence of previously explored actions and observations.
+    belief_memory_depth : int, default=10
+        How deep the belief memory should be. It is used to speedup the MDP expansion process by caching previously explored beliefs based on the sequence that led it there.
 
     Returns
     -------
@@ -4298,18 +4451,30 @@ Once the state is a goal state, the recursion is done and the belief sequence is
         # Pick a random observation weighted by observation probabilities in state s_p and after having done action a_star
         o = model.observe(s_p, a_star)
 
-        # Generate a new belief based on a_star and o
-        b_p = b.update(a_star, o)
+        # Update sequence string
+        sequence_string += (&#39;-&#39; if depth &gt; 0 else &#39;&#39;) + f&#39;{a_star},{o}&#39;
+
+        # If we are within the memory limits and the sequence is already in the memory, we retrieve it
+        if depth &lt; belief_memory_depth and sequence_string in self._belief_memory:
+            b_p = self._belief_memory[sequence_string]
+        
+        else:
+            # Generate a new belief based on a_star and o
+            b_p = b.update(a_star, o)
+            
+            # Add it to the memory if we are in the depth
+            if depth &lt; belief_memory_depth:
+                self._belief_memory[sequence_string] = b_p
 
         # Recursive call to go closer to goal
-        b_set = self.MDPExplore(model, b_p, s_p, mdp_policy, depth+1, horizon)
+        b_set = self.MDPExplore(model, b_p, s_p, mdp_policy, depth+1, horizon, sequence_string, belief_memory_depth)
         belief_list.extend(b_set.belief_list)
     
     return BeliefSet(model, belief_list)</code></pre>
 </details>
 </dd>
 <dt id="src.pomdp.FSVI_Solver.solve"><code class="name flex">
-<span>def <span class="ident">solve</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, expansions: int, horizon: int, mdp_policy: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, initial_belief: Optional[<a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>] = None, initial_value_function: Optional[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>] = None, expand_prune_level: Optional[int] = None, use_gpu: bool = False, history_tracking_level: int = 1, print_progress: bool = True) ‑> tuple[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, <a title="src.pomdp.SolverHistory" href="#src.pomdp.SolverHistory">SolverHistory</a>]</span>
+<span>def <span class="ident">solve</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, expansions: int, horizon: int, mdp_policy: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, initial_belief: Optional[<a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>] = None, initial_value_function: Optional[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>] = None, prune_level: int = 1, prune_interval: int = 10, belief_memory_depth: int = 10, use_gpu: bool = False, history_tracking_level: int = 1, print_progress: bool = True) ‑> tuple[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, <a title="src.pomdp.SolverHistory" href="#src.pomdp.SolverHistory">SolverHistory</a>]</span>
 </code></dt>
 <dd>
 <div class="desc"><p>The main loop for the forward search value iteration process. The amount of 'expansions' will determine how many the exploration process will run (generating every time a sequence of beliefs).
@@ -4329,8 +4494,12 @@ It should therefore be set to a bit higher than the maximum amount steps require
 <dd>An initial belief that will replace the default initial belief generated from the start probabilities of the model.</dd>
 <dt><strong><code>initial_value_function</code></strong> :&ensp;<code>ValueFunction</code>, optional</dt>
 <dd>An initial value function to start the solving process with. (Can for example be the MDP value function)</dd>
-<dt><strong><code>expand_prune_level</code></strong> :&ensp;<code>int</code>, optional</dt>
+<dt><strong><code>prune_level</code></strong> :&ensp;<code>int</code>, default=<code>1</code></dt>
 <dd>Parameter to prune the value function further before the expand function.</dd>
+<dt><strong><code>prune_interval</code></strong> :&ensp;<code>int</code>, default=<code>10</code></dt>
+<dd>How often to prune the value function. It is counted in number of iterations.</dd>
+<dt><strong><code>belief_memory_depth</code></strong> :&ensp;<code>int</code>, default=<code>10</code></dt>
+<dd>How deep the belief memory should be. It is used to speedup the MDP expansion process by caching previously explored beliefs based on the sequence that led it there.</dd>
 <dt><strong><code>use_gpu</code></strong> :&ensp;<code>bool</code>, default=<code>False</code></dt>
 <dd>Whether to use the GPU with cupy array to accelerate solving.</dd>
 <dt><strong><code>history_tracking_level</code></strong> :&ensp;<code>int</code>, default=<code>1</code></dt>
@@ -4354,7 +4523,9 @@ It should therefore be set to a bit higher than the maximum amount steps require
           mdp_policy:ValueFunction,
           initial_belief:Union[Belief,None]=None,
           initial_value_function:Union[ValueFunction,None]=None,
-          expand_prune_level:Union[int,None]=None, # TODO: Implement prune level config
+          prune_level:int=1,
+          prune_interval:int=10,
+          belief_memory_depth:int=10,
           use_gpu:bool=False,
           history_tracking_level:int=1,
           print_progress:bool=True
@@ -4378,8 +4549,12 @@ It should therefore be set to a bit higher than the maximum amount steps require
         An initial belief that will replace the default initial belief generated from the start probabilities of the model.
     initial_value_function : ValueFunction, optional
         An initial value function to start the solving process with. (Can for example be the MDP value function)
-    expand_prune_level : int, optional
+    prune_level : int, default=1
         Parameter to prune the value function further before the expand function.
+    prune_interval : int, default=10
+        How often to prune the value function. It is counted in number of iterations.
+    belief_memory_depth : int, default=10
+        How deep the belief memory should be. It is used to speedup the MDP expansion process by caching previously explored beliefs based on the sequence that led it there.
     use_gpu : bool, default=False
         Whether to use the GPU with cupy array to accelerate solving.
     history_tracking_level : int, default=1
@@ -4432,13 +4607,13 @@ It should therefore be set to a bit higher than the maximum amount steps require
                                    initial_belief_set=BeliefSet(model, [b])
                                    )
 
-    for _ in trange(expansions, desc=&#39;Expansions&#39;) if print_progress else range(expansions):
+    for i in trange(expansions, desc=&#39;Expansions&#39;) if print_progress else range(expansions):
 
-        # Exploration
+        # Expand (exploration)
         start_ts = datetime.now()
 
         s0 = b.random_state()
-        belief_set = self.MDPExplore(model, b, s0, mdp_policy, 0, horizon)
+        belief_set = self.MDPExplore(model, b, s0, mdp_policy, 0, horizon, sequence_string=&#39;&#39;, belief_memory_depth=belief_memory_depth)
 
         expand_time = (datetime.now() - start_ts).total_seconds()
         solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
@@ -4446,7 +4621,11 @@ It should therefore be set to a bit higher than the maximum amount steps require
         # Backup (update of value function)
         start_ts = datetime.now()
 
-        value_function = self.backup(model, belief_set, value_function)
+        value_function = self.backup(model, belief_set, value_function, append=True)
+
+        # Additional pruning
+        if (i % prune_interval) == 0 and i &gt; 0:
+            value_function.prune(prune_level)
 
         # Change computation
         max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
@@ -4458,11 +4637,14 @@ It should therefore be set to a bit higher than the maximum amount steps require
         
         # Convergence check
         if max_change &lt; max_allowed_change:
-            print(&#39;Converged early...&#39;)
-            return value_function, solver_history
+            print(&#39;Converged!&#39;)
+            break
         
         old_max_val_per_belief = max_val_per_belief
 
+    # Final pruning
+    value_function.prune(prune_level)
+    
     return value_function, solver_history</code></pre>
 </details>
 </dd>
@@ -5031,7 +5213,13 @@ Parameters</p>
         self.expand_function_params = expand_function_params
 
 
-    def backup(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction) -&gt; ValueFunction:
+    def backup(self,
+               model:Model,
+               belief_set:BeliefSet,
+               value_function:ValueFunction,
+               append:bool=False,
+               belief_dominance_prune:bool=True
+               ) -&gt; ValueFunction:
         &#39;&#39;&#39;
         This function has purpose to update the set of alpha vectors. It does so in 3 steps:
         1. It creates projections from each alpha vector for each possible action and each possible observation
@@ -5049,7 +5237,11 @@ Parameters</p>
             The belief set to use to generate the new alpha vectors with.
         value_function : ValueFunction
             The alpha vectors to generate the new set from.
-
+        append : bool, default=False
+            Whether to append the new alpha vectors generated to the old alpha vectors before pruning.
+        belief_dominance_prune : bool, default=True
+            Whether, before returning the new value function, checks what alpha vectors have a supperior 
+            
         Returns
         -------
         new_alpha_set : ValueFunction
@@ -5072,26 +5264,30 @@ Parameters</p>
 
         alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2)
 
-        # Step 3 # TODO potential improvement could be done here?
-        alpha_vectors = xp.zeros(belief_array.shape)
-        best_actions = []
-        for i, b in enumerate(belief_array):
-            best_ind = int(xp.argmax(xp.dot(alpha_a[i,:,:], b)))
-            alpha_vectors[i,:] = alpha_a[i, best_ind,:]
-            best_actions.append(best_ind)
+        # Step 3
+        best_actions = xp.argmax(xp.einsum(&#39;bas,bs-&gt;ba&#39;, alpha_a, belief_array), axis=1)
+        alpha_vectors = xp.take_along_axis(alpha_a, best_actions[:,None,None],axis=1)[:,0,:]
 
-        # Appending old alpha vectors before uniqueness pruning
-        all_vectors = xp.concatenate((value_function.alpha_vector_array, alpha_vectors))
-        all_actions = (value_function.actions if isinstance(value_function.actions, list) else value_function.actions.tolist()) + best_actions
-        new_value_function = ValueFunction(model, all_vectors, all_actions)
+        # Belief domination
+        if belief_dominance_prune:
+            best_value_per_belief = xp.sum((belief_array * alpha_vectors), axis=1)
+            old_best_value_per_belief = xp.max(xp.matmul(belief_array, vector_array.T), axis=1)
+            dominating_vectors = best_value_per_belief &gt; old_best_value_per_belief
 
-        # Pruning
-        new_value_function = new_value_function.prune(level=1) # Just check for duplicates
+            best_actions = best_actions[dominating_vectors]
+            alpha_vectors = alpha_vectors[dominating_vectors]
+
+        # Creation of value function
+        new_value_function = ValueFunction(model, alpha_vectors, best_actions)
+
+        # Union with previous value function
+        if append:
+            new_value_function.extend(value_function)
                 
         return new_value_function
     
     
-    def expand_ssra(self, model:Model, belief_set:BeliefSet) -&gt; BeliefSet:
+    def expand_ssra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Stochastic Simulation with Random Action.
         Simulates running a single-step forward from the beliefs in the &#34;belief_set&#34;.
@@ -5104,6 +5300,8 @@ Parameters</p>
             The POMDP model on which to expand the belief set on.
         belief_set : BeliefSet
             List of beliefs to expand on.
+        max_generation : int, default=10
+            The max amount of beliefs that can be added to the belief set at once.
 
         Returns
         -------
@@ -5113,11 +5311,12 @@ Parameters</p>
         xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
         old_shape = belief_set.belief_array.shape
+        to_generate = min(max_generation, old_shape[0])
 
-        new_belief_array = xp.empty((old_shape[0] * 2, old_shape[1]))
+        new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
 
-        for i, belief_vector in enumerate(belief_set.belief_array):
+        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
             b = Belief(model, belief_vector)
             s = b.random_state()
             a = random.choice(model.actions)
@@ -5130,7 +5329,7 @@ Parameters</p>
         return BeliefSet(model, new_belief_array)
     
 
-    def expand_ssga(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, eps:float=0.1) -&gt; BeliefSet:
+    def expand_ssga(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, eps:float=0.1, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Stochastic Simulation with Greedy Action.
         Simulates running a single-step forward from the beliefs in the &#34;belief_set&#34;.
@@ -5149,6 +5348,8 @@ Parameters</p>
             Used to find the best action knowing the belief.
         eps : float
             Parameter tuning how often we take a greedy approach and how often we move randomly.
+        max_generation : int, default=10
+            The max amount of beliefs that can be added to the belief set at once.
 
         Returns
         -------
@@ -5158,11 +5359,12 @@ Parameters</p>
         xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
         old_shape = belief_set.belief_array.shape
+        to_generate = min(max_generation, old_shape[0])
 
-        new_belief_array = xp.empty((old_shape[0] * 2, old_shape[1]))
+        new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
                 
-        for i, belief_vector in enumerate(belief_set.belief_array):
+        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
             b = Belief(model, belief_vector)
             s = b.random_state()
             
@@ -5181,7 +5383,7 @@ Parameters</p>
         return BeliefSet(model, new_belief_array)
     
 
-    def expand_ssea(self, model:Model, belief_set:BeliefSet) -&gt; BeliefSet:
+    def expand_ssea(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Stochastic Simulation with Exploratory Action.
         Simulates running steps forward for each possible action knowing we are a state s, chosen randomly with according to the belief probability.
@@ -5195,6 +5397,8 @@ Parameters</p>
             The POMDP model on which to expand the belief set on.
         belief_set : BeliefSet
             List of beliefs to expand on.
+        max_generation : int, default=10
+            The max amount of beliefs that can be added to the belief set at once.
 
         Returns
         -------
@@ -5204,11 +5408,12 @@ Parameters</p>
         xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
         old_shape = belief_set.belief_array.shape
+        to_generate = min(max_generation, old_shape[0])
 
-        new_belief_array = xp.empty((old_shape[0] * 2, old_shape[1]))
+        new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
         
-        for i, belief_vector in enumerate(belief_set.belief_array):
+        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
             b = Belief(model, belief_vector)
             best_b = None
             max_dist = -math.inf
@@ -5231,7 +5436,7 @@ Parameters</p>
         return BeliefSet(model, new_belief_array)
     
 
-    def expand_ger(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction) -&gt; BeliefSet:
+    def expand_ger(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Greedy Error Reduction. NOT IMPLEMENTED YET.
         Parameters
@@ -5242,6 +5447,8 @@ Parameters</p>
             List of beliefs to expand on.
         value_function : ValueFunction
             Used to find the best action knowing the belief.
+        max_generation : int, default=10
+            The max amount of beliefs that can be added to the belief set at once.
 
         Returns
         -------
@@ -5252,7 +5459,7 @@ Parameters</p>
         return []
 
 
-    def expand(self, model:Model, belief_set:BeliefSet, **function_specific_parameters) -&gt; BeliefSet:
+    def expand(self, model:Model, belief_set:BeliefSet, max_generation:int, **function_specific_parameters) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Central method to call one of the functions for a particular expansion strategy:
             - Stochastic Simulation with Random Action (ssra)
@@ -5268,6 +5475,8 @@ Parameters</p>
             The set of beliefs to expand.
         function_specific_parameters
             Potential additional parameters necessary for the specific expand function.
+        max_generation : int
+            The max amount of beliefs that can be added to the belief set at once.
 
         Returns
         -------
@@ -5275,18 +5484,18 @@ Parameters</p>
             The belief set the expansion function returns. 
         &#39;&#39;&#39;
         if self.expand_function in &#39;expand_ssra&#39;:
-            return self.expand_ssra(model=model, belief_set=belief_set)
+            return self.expand_ssra(model=model, belief_set=belief_set, max_generation=max_generation)
         
         elif self.expand_function in &#39;expand_ssga&#39;:
             args = {arg: function_specific_parameters[arg] for arg in [&#39;value_function&#39;, &#39;eps&#39;] if arg in function_specific_parameters}
-            return self.expand_ssga(model=model, belief_set=belief_set, **args)
+            return self.expand_ssga(model=model, belief_set=belief_set, max_generation=max_generation, **args)
         
         elif self.expand_function in &#39;expand_ssea&#39;:
-            return self.expand_ssea(model=model, belief_set=belief_set)
+            return self.expand_ssea(model=model, belief_set=belief_set, max_generation=max_generation)
         
         elif self.expand_function in &#39;expand_ger&#39;:
             args = {arg: function_specific_parameters[arg] for arg in [&#39;value_function&#39;] if arg in function_specific_parameters}
-            return self.expand_ger(model=model, belief_set=belief_set, **args)
+            return self.expand_ger(model=model, belief_set=belief_set, max_generation=max_generation, **args)
         
         return []
 
@@ -5295,9 +5504,11 @@ Parameters</p>
               model:Model,
               expansions:int,
               horizon:int,
+              max_belief_growth:int=10,
               initial_belief:Union[BeliefSet, Belief, None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
-              expand_prune_level:Union[int,None]=None,
+              prune_level:int=1,
+              prune_interval:int=10,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -5322,14 +5533,18 @@ Parameters</p>
             How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
         horizon : int
             How many times the alpha vector set must be updated every time the belief set is expanded.
+        max_belief_growth : int, default=10
+            How many beliefs can be added at every expansion step to the belief set.
         initial_belief : BeliefSet or Belief, optional
             An initial list of beliefs to start with.
         initial_value_function : ValueFunction, optional
             An initial value function to start the solving process with.
-        expand_prune_level : int, optional
+        prune_level : int, default=1
             Parameter to prune the value function further before the expand function.
+        prune_interval : int, default=10
+            How often to prune the value function. It is counted in number of backup iterations.
         use_gpu : bool, default=False
-            Whether to use the GPU with cupy array to accelerate solving. (Default: False)
+            Whether to use the GPU with cupy array to accelerate solving.
         history_tracking_level : int, default=1
             How thorough the tracking of the solving process should be. (0: Nothing; 1: Times and sizes of belief sets and value function; 2: The actual value functions and beliefs sets)
         print_progress : bool, default=True
@@ -5381,27 +5596,34 @@ Parameters</p>
                                        initial_belief_set=belief_set)
 
         # Loop
+        iteration = 0
+        expand_max_val_per_belief = None
         for expansion_i in range(expansions) if not print_progress else trange(expansions, desc=&#39;Expansions&#39;):
-
-            # 0: Prune value function at a higher level between expansions
-            if expand_prune_level is not None:
-                value_function = value_function.prune(expand_prune_level)
 
             # 1: Expand belief set
             start_ts = datetime.now()
 
-            belief_set = self.expand(model=model, belief_set=belief_set, value_function=value_function, **self.expand_function_params)
+            belief_set = self.expand(model=model,
+                                     belief_set=belief_set,
+                                     value_function=value_function,
+                                     max_generation=max_belief_growth,
+                                     **self.expand_function_params)
 
             expand_time = (datetime.now() - start_ts).total_seconds()
             solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
 
             # 2: Backup, update value function (alpha vector set)
             old_max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
+            expand_max_val_per_belief = xp.copy(old_max_val_per_belief)
 
             for _ in range(horizon) if not print_progress else trange(horizon, desc=f&#39;Backups {expansion_i}&#39;):
                 start_ts = datetime.now()
 
                 value_function = self.backup(model, belief_set, value_function)
+
+                # Additional pruning
+                if (iteration % prune_interval) == 0 and iteration &gt; 0:
+                    value_function.prune(prune_level)
 
                 # Max change
                 max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
@@ -5413,9 +5635,16 @@ Parameters</p>
 
                 # convergence check
                 if max_change &lt; max_allowed_change:
-                    print(&#39;Converged early...&#39;)
-                    return value_function, solver_history
+                    break
                 old_max_val_per_belief = max_val_per_belief
+
+                # Update iteration counter
+                iteration += 1
+
+            expand_max_change = xp.max(xp.abs(max_val_per_belief - expand_max_val_per_belief))
+            if expand_max_change &lt; max_allowed_change:
+                print(&#39;Converged!&#39;)
+                break
 
         return value_function, solver_history</code></pre>
 </details>
@@ -5431,7 +5660,7 @@ Parameters</p>
 <h3>Methods</h3>
 <dl>
 <dt id="src.pomdp.PBVI_Solver.backup"><code class="name flex">
-<span>def <span class="ident">backup</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, value_function: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>) ‑> <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a></span>
+<span>def <span class="ident">backup</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, value_function: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, append: bool = False, belief_dominance_prune: bool = True) ‑> <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>This function has purpose to update the set of alpha vectors. It does so in 3 steps:
@@ -5448,6 +5677,10 @@ In the end we have a set of alpha vectors as large as the amount of beliefs.</p>
 <dd>The belief set to use to generate the new alpha vectors with.</dd>
 <dt><strong><code>value_function</code></strong> :&ensp;<code>ValueFunction</code></dt>
 <dd>The alpha vectors to generate the new set from.</dd>
+<dt><strong><code>append</code></strong> :&ensp;<code>bool</code>, default=<code>False</code></dt>
+<dd>Whether to append the new alpha vectors generated to the old alpha vectors before pruning.</dd>
+<dt><strong><code>belief_dominance_prune</code></strong> :&ensp;<code>bool</code>, default=<code>True</code></dt>
+<dd>Whether, before returning the new value function, checks what alpha vectors have a supperior</dd>
 </dl>
 <h2 id="returns">Returns</h2>
 <dl>
@@ -5458,7 +5691,13 @@ In the end we have a set of alpha vectors as large as the amount of beliefs.</p>
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def backup(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction) -&gt; ValueFunction:
+<pre><code class="python">def backup(self,
+           model:Model,
+           belief_set:BeliefSet,
+           value_function:ValueFunction,
+           append:bool=False,
+           belief_dominance_prune:bool=True
+           ) -&gt; ValueFunction:
     &#39;&#39;&#39;
     This function has purpose to update the set of alpha vectors. It does so in 3 steps:
     1. It creates projections from each alpha vector for each possible action and each possible observation
@@ -5476,7 +5715,11 @@ In the end we have a set of alpha vectors as large as the amount of beliefs.</p>
         The belief set to use to generate the new alpha vectors with.
     value_function : ValueFunction
         The alpha vectors to generate the new set from.
-
+    append : bool, default=False
+        Whether to append the new alpha vectors generated to the old alpha vectors before pruning.
+    belief_dominance_prune : bool, default=True
+        Whether, before returning the new value function, checks what alpha vectors have a supperior 
+        
     Returns
     -------
     new_alpha_set : ValueFunction
@@ -5499,27 +5742,31 @@ In the end we have a set of alpha vectors as large as the amount of beliefs.</p>
 
     alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2)
 
-    # Step 3 # TODO potential improvement could be done here?
-    alpha_vectors = xp.zeros(belief_array.shape)
-    best_actions = []
-    for i, b in enumerate(belief_array):
-        best_ind = int(xp.argmax(xp.dot(alpha_a[i,:,:], b)))
-        alpha_vectors[i,:] = alpha_a[i, best_ind,:]
-        best_actions.append(best_ind)
+    # Step 3
+    best_actions = xp.argmax(xp.einsum(&#39;bas,bs-&gt;ba&#39;, alpha_a, belief_array), axis=1)
+    alpha_vectors = xp.take_along_axis(alpha_a, best_actions[:,None,None],axis=1)[:,0,:]
 
-    # Appending old alpha vectors before uniqueness pruning
-    all_vectors = xp.concatenate((value_function.alpha_vector_array, alpha_vectors))
-    all_actions = (value_function.actions if isinstance(value_function.actions, list) else value_function.actions.tolist()) + best_actions
-    new_value_function = ValueFunction(model, all_vectors, all_actions)
+    # Belief domination
+    if belief_dominance_prune:
+        best_value_per_belief = xp.sum((belief_array * alpha_vectors), axis=1)
+        old_best_value_per_belief = xp.max(xp.matmul(belief_array, vector_array.T), axis=1)
+        dominating_vectors = best_value_per_belief &gt; old_best_value_per_belief
 
-    # Pruning
-    new_value_function = new_value_function.prune(level=1) # Just check for duplicates
+        best_actions = best_actions[dominating_vectors]
+        alpha_vectors = alpha_vectors[dominating_vectors]
+
+    # Creation of value function
+    new_value_function = ValueFunction(model, alpha_vectors, best_actions)
+
+    # Union with previous value function
+    if append:
+        new_value_function.extend(value_function)
             
     return new_value_function</code></pre>
 </details>
 </dd>
 <dt id="src.pomdp.PBVI_Solver.expand"><code class="name flex">
-<span>def <span class="ident">expand</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, **function_specific_parameters) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
+<span>def <span class="ident">expand</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, max_generation: int, **function_specific_parameters) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Central method to call one of the functions for a particular expansion strategy:
@@ -5535,6 +5782,8 @@ In the end we have a set of alpha vectors as large as the amount of beliefs.</p>
 <dd>The set of beliefs to expand.</dd>
 <dt><strong><code>function_specific_parameters</code></strong></dt>
 <dd>Potential additional parameters necessary for the specific expand function.</dd>
+<dt><strong><code>max_generation</code></strong> :&ensp;<code>int</code></dt>
+<dd>The max amount of beliefs that can be added to the belief set at once.</dd>
 </dl>
 <h2 id="returns">Returns</h2>
 <dl>
@@ -5545,7 +5794,7 @@ In the end we have a set of alpha vectors as large as the amount of beliefs.</p>
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def expand(self, model:Model, belief_set:BeliefSet, **function_specific_parameters) -&gt; BeliefSet:
+<pre><code class="python">def expand(self, model:Model, belief_set:BeliefSet, max_generation:int, **function_specific_parameters) -&gt; BeliefSet:
     &#39;&#39;&#39;
     Central method to call one of the functions for a particular expansion strategy:
         - Stochastic Simulation with Random Action (ssra)
@@ -5561,6 +5810,8 @@ In the end we have a set of alpha vectors as large as the amount of beliefs.</p>
         The set of beliefs to expand.
     function_specific_parameters
         Potential additional parameters necessary for the specific expand function.
+    max_generation : int
+        The max amount of beliefs that can be added to the belief set at once.
 
     Returns
     -------
@@ -5568,24 +5819,24 @@ In the end we have a set of alpha vectors as large as the amount of beliefs.</p>
         The belief set the expansion function returns. 
     &#39;&#39;&#39;
     if self.expand_function in &#39;expand_ssra&#39;:
-        return self.expand_ssra(model=model, belief_set=belief_set)
+        return self.expand_ssra(model=model, belief_set=belief_set, max_generation=max_generation)
     
     elif self.expand_function in &#39;expand_ssga&#39;:
         args = {arg: function_specific_parameters[arg] for arg in [&#39;value_function&#39;, &#39;eps&#39;] if arg in function_specific_parameters}
-        return self.expand_ssga(model=model, belief_set=belief_set, **args)
+        return self.expand_ssga(model=model, belief_set=belief_set, max_generation=max_generation, **args)
     
     elif self.expand_function in &#39;expand_ssea&#39;:
-        return self.expand_ssea(model=model, belief_set=belief_set)
+        return self.expand_ssea(model=model, belief_set=belief_set, max_generation=max_generation)
     
     elif self.expand_function in &#39;expand_ger&#39;:
         args = {arg: function_specific_parameters[arg] for arg in [&#39;value_function&#39;] if arg in function_specific_parameters}
-        return self.expand_ger(model=model, belief_set=belief_set, **args)
+        return self.expand_ger(model=model, belief_set=belief_set, max_generation=max_generation, **args)
     
     return []</code></pre>
 </details>
 </dd>
 <dt id="src.pomdp.PBVI_Solver.expand_ger"><code class="name flex">
-<span>def <span class="ident">expand_ger</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, value_function: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
+<span>def <span class="ident">expand_ger</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, value_function: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, max_generation: int = 10) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Greedy Error Reduction. NOT IMPLEMENTED YET.
@@ -5598,6 +5849,8 @@ Parameters</p>
 <dd>List of beliefs to expand on.</dd>
 <dt><strong><code>value_function</code></strong> :&ensp;<code>ValueFunction</code></dt>
 <dd>Used to find the best action knowing the belief.</dd>
+<dt><strong><code>max_generation</code></strong> :&ensp;<code>int</code>, default=<code>10</code></dt>
+<dd>The max amount of beliefs that can be added to the belief set at once.</dd>
 </dl>
 <h2 id="returns">Returns</h2>
 <dl>
@@ -5608,7 +5861,7 @@ Parameters</p>
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def expand_ger(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction) -&gt; BeliefSet:
+<pre><code class="python">def expand_ger(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, max_generation:int=10) -&gt; BeliefSet:
     &#39;&#39;&#39;
     Greedy Error Reduction. NOT IMPLEMENTED YET.
     Parameters
@@ -5619,6 +5872,8 @@ Parameters</p>
         List of beliefs to expand on.
     value_function : ValueFunction
         Used to find the best action knowing the belief.
+    max_generation : int, default=10
+        The max amount of beliefs that can be added to the belief set at once.
 
     Returns
     -------
@@ -5630,7 +5885,7 @@ Parameters</p>
 </details>
 </dd>
 <dt id="src.pomdp.PBVI_Solver.expand_ssea"><code class="name flex">
-<span>def <span class="ident">expand_ssea</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
+<span>def <span class="ident">expand_ssea</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, max_generation: int = 10) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Stochastic Simulation with Exploratory Action.
@@ -5644,6 +5899,8 @@ Then it takes the belief that is furthest away from other beliefs, meaning it ex
 <dd>The POMDP model on which to expand the belief set on.</dd>
 <dt><strong><code>belief_set</code></strong> :&ensp;<code><a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></code></dt>
 <dd>List of beliefs to expand on.</dd>
+<dt><strong><code>max_generation</code></strong> :&ensp;<code>int</code>, default=<code>10</code></dt>
+<dd>The max amount of beliefs that can be added to the belief set at once.</dd>
 </dl>
 <h2 id="returns">Returns</h2>
 <dl>
@@ -5654,7 +5911,7 @@ Then it takes the belief that is furthest away from other beliefs, meaning it ex
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def expand_ssea(self, model:Model, belief_set:BeliefSet) -&gt; BeliefSet:
+<pre><code class="python">def expand_ssea(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
     &#39;&#39;&#39;
     Stochastic Simulation with Exploratory Action.
     Simulates running steps forward for each possible action knowing we are a state s, chosen randomly with according to the belief probability.
@@ -5668,6 +5925,8 @@ Then it takes the belief that is furthest away from other beliefs, meaning it ex
         The POMDP model on which to expand the belief set on.
     belief_set : BeliefSet
         List of beliefs to expand on.
+    max_generation : int, default=10
+        The max amount of beliefs that can be added to the belief set at once.
 
     Returns
     -------
@@ -5677,11 +5936,12 @@ Then it takes the belief that is furthest away from other beliefs, meaning it ex
     xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
     old_shape = belief_set.belief_array.shape
+    to_generate = min(max_generation, old_shape[0])
 
-    new_belief_array = xp.empty((old_shape[0] * 2, old_shape[1]))
+    new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
     new_belief_array[:old_shape[0]] = belief_set.belief_array
     
-    for i, belief_vector in enumerate(belief_set.belief_array):
+    for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
         b = Belief(model, belief_vector)
         best_b = None
         max_dist = -math.inf
@@ -5705,7 +5965,7 @@ Then it takes the belief that is furthest away from other beliefs, meaning it ex
 </details>
 </dd>
 <dt id="src.pomdp.PBVI_Solver.expand_ssga"><code class="name flex">
-<span>def <span class="ident">expand_ssga</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, value_function: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, eps: float = 0.1) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
+<span>def <span class="ident">expand_ssga</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, value_function: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, eps: float = 0.1, max_generation: int = 10) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Stochastic Simulation with Greedy Action.
@@ -5724,6 +5984,8 @@ From this action a and observation o we can update our belief. </p>
 <dd>Used to find the best action knowing the belief.</dd>
 <dt><strong><code>eps</code></strong> :&ensp;<code>float</code></dt>
 <dd>Parameter tuning how often we take a greedy approach and how often we move randomly.</dd>
+<dt><strong><code>max_generation</code></strong> :&ensp;<code>int</code>, default=<code>10</code></dt>
+<dd>The max amount of beliefs that can be added to the belief set at once.</dd>
 </dl>
 <h2 id="returns">Returns</h2>
 <dl>
@@ -5734,7 +5996,7 @@ From this action a and observation o we can update our belief. </p>
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def expand_ssga(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, eps:float=0.1) -&gt; BeliefSet:
+<pre><code class="python">def expand_ssga(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, eps:float=0.1, max_generation:int=10) -&gt; BeliefSet:
     &#39;&#39;&#39;
     Stochastic Simulation with Greedy Action.
     Simulates running a single-step forward from the beliefs in the &#34;belief_set&#34;.
@@ -5753,6 +6015,8 @@ From this action a and observation o we can update our belief. </p>
         Used to find the best action knowing the belief.
     eps : float
         Parameter tuning how often we take a greedy approach and how often we move randomly.
+    max_generation : int, default=10
+        The max amount of beliefs that can be added to the belief set at once.
 
     Returns
     -------
@@ -5762,11 +6026,12 @@ From this action a and observation o we can update our belief. </p>
     xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
     old_shape = belief_set.belief_array.shape
+    to_generate = min(max_generation, old_shape[0])
 
-    new_belief_array = xp.empty((old_shape[0] * 2, old_shape[1]))
+    new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
     new_belief_array[:old_shape[0]] = belief_set.belief_array
             
-    for i, belief_vector in enumerate(belief_set.belief_array):
+    for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
         b = Belief(model, belief_vector)
         s = b.random_state()
         
@@ -5786,7 +6051,7 @@ From this action a and observation o we can update our belief. </p>
 </details>
 </dd>
 <dt id="src.pomdp.PBVI_Solver.expand_ssra"><code class="name flex">
-<span>def <span class="ident">expand_ssra</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
+<span>def <span class="ident">expand_ssra</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, max_generation: int = 10) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Stochastic Simulation with Random Action.
@@ -5799,6 +6064,8 @@ From this action a and observation o we can update our belief.</p>
 <dd>The POMDP model on which to expand the belief set on.</dd>
 <dt><strong><code>belief_set</code></strong> :&ensp;<code><a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></code></dt>
 <dd>List of beliefs to expand on.</dd>
+<dt><strong><code>max_generation</code></strong> :&ensp;<code>int</code>, default=<code>10</code></dt>
+<dd>The max amount of beliefs that can be added to the belief set at once.</dd>
 </dl>
 <h2 id="returns">Returns</h2>
 <dl>
@@ -5809,7 +6076,7 @@ From this action a and observation o we can update our belief.</p>
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def expand_ssra(self, model:Model, belief_set:BeliefSet) -&gt; BeliefSet:
+<pre><code class="python">def expand_ssra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
     &#39;&#39;&#39;
     Stochastic Simulation with Random Action.
     Simulates running a single-step forward from the beliefs in the &#34;belief_set&#34;.
@@ -5822,6 +6089,8 @@ From this action a and observation o we can update our belief.</p>
         The POMDP model on which to expand the belief set on.
     belief_set : BeliefSet
         List of beliefs to expand on.
+    max_generation : int, default=10
+        The max amount of beliefs that can be added to the belief set at once.
 
     Returns
     -------
@@ -5831,11 +6100,12 @@ From this action a and observation o we can update our belief.</p>
     xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
     old_shape = belief_set.belief_array.shape
+    to_generate = min(max_generation, old_shape[0])
 
-    new_belief_array = xp.empty((old_shape[0] * 2, old_shape[1]))
+    new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
     new_belief_array[:old_shape[0]] = belief_set.belief_array
 
-    for i, belief_vector in enumerate(belief_set.belief_array):
+    for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
         b = Belief(model, belief_vector)
         s = b.random_state()
         a = random.choice(model.actions)
@@ -5849,7 +6119,7 @@ From this action a and observation o we can update our belief.</p>
 </details>
 </dd>
 <dt id="src.pomdp.PBVI_Solver.solve"><code class="name flex">
-<span>def <span class="ident">solve</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, expansions: int, horizon: int, initial_belief: Union[<a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, <a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>, ForwardRef(None)] = None, initial_value_function: Optional[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>] = None, expand_prune_level: Optional[int] = None, use_gpu: bool = False, history_tracking_level: int = 1, print_progress: bool = True) ‑> tuple[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, <a title="src.pomdp.SolverHistory" href="#src.pomdp.SolverHistory">SolverHistory</a>]</span>
+<span>def <span class="ident">solve</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, expansions: int, horizon: int, max_belief_growth: int = 10, initial_belief: Union[<a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, <a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>, ForwardRef(None)] = None, initial_value_function: Optional[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>] = None, prune_level: int = 1, prune_interval: int = 10, use_gpu: bool = False, history_tracking_level: int = 1, print_progress: bool = True) ‑> tuple[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, <a title="src.pomdp.SolverHistory" href="#src.pomdp.SolverHistory">SolverHistory</a>]</span>
 </code></dt>
 <dd>
 <div class="desc"><p>Main loop of the Point-Based Value Iteration algorithm.
@@ -5869,14 +6139,18 @@ It consists in 2 steps, Backup and Expand.
 <dd>How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)</dd>
 <dt><strong><code>horizon</code></strong> :&ensp;<code>int</code></dt>
 <dd>How many times the alpha vector set must be updated every time the belief set is expanded.</dd>
+<dt><strong><code>max_belief_growth</code></strong> :&ensp;<code>int</code>, default=<code>10</code></dt>
+<dd>How many beliefs can be added at every expansion step to the belief set.</dd>
 <dt><strong><code>initial_belief</code></strong> :&ensp;<code><a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></code> or <code><a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a></code>, optional</dt>
 <dd>An initial list of beliefs to start with.</dd>
 <dt><strong><code>initial_value_function</code></strong> :&ensp;<code>ValueFunction</code>, optional</dt>
 <dd>An initial value function to start the solving process with.</dd>
-<dt><strong><code>expand_prune_level</code></strong> :&ensp;<code>int</code>, optional</dt>
+<dt><strong><code>prune_level</code></strong> :&ensp;<code>int</code>, default=<code>1</code></dt>
 <dd>Parameter to prune the value function further before the expand function.</dd>
+<dt><strong><code>prune_interval</code></strong> :&ensp;<code>int</code>, default=<code>10</code></dt>
+<dd>How often to prune the value function. It is counted in number of backup iterations.</dd>
 <dt><strong><code>use_gpu</code></strong> :&ensp;<code>bool</code>, default=<code>False</code></dt>
-<dd>Whether to use the GPU with cupy array to accelerate solving. (Default: False)</dd>
+<dd>Whether to use the GPU with cupy array to accelerate solving.</dd>
 <dt><strong><code>history_tracking_level</code></strong> :&ensp;<code>int</code>, default=<code>1</code></dt>
 <dd>How thorough the tracking of the solving process should be. (0: Nothing; 1: Times and sizes of belief sets and value function; 2: The actual value functions and beliefs sets)</dd>
 <dt><strong><code>print_progress</code></strong> :&ensp;<code>bool</code>, default=<code>True</code></dt>
@@ -5897,9 +6171,11 @@ It consists in 2 steps, Backup and Expand.
           model:Model,
           expansions:int,
           horizon:int,
+          max_belief_growth:int=10,
           initial_belief:Union[BeliefSet, Belief, None]=None,
           initial_value_function:Union[ValueFunction,None]=None,
-          expand_prune_level:Union[int,None]=None,
+          prune_level:int=1,
+          prune_interval:int=10,
           use_gpu:bool=False,
           history_tracking_level:int=1,
           print_progress:bool=True
@@ -5924,14 +6200,18 @@ It consists in 2 steps, Backup and Expand.
         How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
     horizon : int
         How many times the alpha vector set must be updated every time the belief set is expanded.
+    max_belief_growth : int, default=10
+        How many beliefs can be added at every expansion step to the belief set.
     initial_belief : BeliefSet or Belief, optional
         An initial list of beliefs to start with.
     initial_value_function : ValueFunction, optional
         An initial value function to start the solving process with.
-    expand_prune_level : int, optional
+    prune_level : int, default=1
         Parameter to prune the value function further before the expand function.
+    prune_interval : int, default=10
+        How often to prune the value function. It is counted in number of backup iterations.
     use_gpu : bool, default=False
-        Whether to use the GPU with cupy array to accelerate solving. (Default: False)
+        Whether to use the GPU with cupy array to accelerate solving.
     history_tracking_level : int, default=1
         How thorough the tracking of the solving process should be. (0: Nothing; 1: Times and sizes of belief sets and value function; 2: The actual value functions and beliefs sets)
     print_progress : bool, default=True
@@ -5983,27 +6263,34 @@ It consists in 2 steps, Backup and Expand.
                                    initial_belief_set=belief_set)
 
     # Loop
+    iteration = 0
+    expand_max_val_per_belief = None
     for expansion_i in range(expansions) if not print_progress else trange(expansions, desc=&#39;Expansions&#39;):
-
-        # 0: Prune value function at a higher level between expansions
-        if expand_prune_level is not None:
-            value_function = value_function.prune(expand_prune_level)
 
         # 1: Expand belief set
         start_ts = datetime.now()
 
-        belief_set = self.expand(model=model, belief_set=belief_set, value_function=value_function, **self.expand_function_params)
+        belief_set = self.expand(model=model,
+                                 belief_set=belief_set,
+                                 value_function=value_function,
+                                 max_generation=max_belief_growth,
+                                 **self.expand_function_params)
 
         expand_time = (datetime.now() - start_ts).total_seconds()
         solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
 
         # 2: Backup, update value function (alpha vector set)
         old_max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
+        expand_max_val_per_belief = xp.copy(old_max_val_per_belief)
 
         for _ in range(horizon) if not print_progress else trange(horizon, desc=f&#39;Backups {expansion_i}&#39;):
             start_ts = datetime.now()
 
             value_function = self.backup(model, belief_set, value_function)
+
+            # Additional pruning
+            if (iteration % prune_interval) == 0 and iteration &gt; 0:
+                value_function.prune(prune_level)
 
             # Max change
             max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
@@ -6015,9 +6302,16 @@ It consists in 2 steps, Backup and Expand.
 
             # convergence check
             if max_change &lt; max_allowed_change:
-                print(&#39;Converged early...&#39;)
-                return value_function, solver_history
+                break
             old_max_val_per_belief = max_val_per_belief
+
+            # Update iteration counter
+            iteration += 1
+
+        expand_max_change = xp.max(xp.abs(max_val_per_belief - expand_max_val_per_belief))
+        if expand_max_change &lt; max_allowed_change:
+            print(&#39;Converged!&#39;)
+            break
 
     return value_function, solver_history</code></pre>
 </details>
@@ -6772,7 +7066,7 @@ The visualizations available are:
             if isinstance(history, ValueFunction):
                 value_function = history
             else:
-                frame_i = frame_i if frame_i &lt; len(history) else (len(history) - 1)
+                frame_i = frame_i if frame_i &lt; len(history.value_functions) else (len(history.value_functions) - 1)
                 value_function = history.value_functions[frame_i]
 
             alpha_vects = value_function.alpha_vector_array
@@ -6790,7 +7084,7 @@ The visualizations available are:
             ax1.clear()
             ax2.clear()
 
-            self_frame_i = frame_i if frame_i &lt; len(self) else (len(self) - 1)
+            self_frame_i = frame_i if frame_i &lt; len(self.value_functions) else (len(self.value_functions) - 1)
 
             # Subtitle
             ax1.set_title(title + f&#39;(Frame {frame_i})&#39;)
@@ -6802,7 +7096,7 @@ The visualizations available are:
 
             # Line legend
             lines = []
-            point = self.value_functions[self_frame_i].alpha_vector_list[0][0]
+            point = self.value_functions[self_frame_i].alpha_vector_array[0,0]
             for l in line_types:
                 lines.append(Line2D([0,point],[0,point],linestyle=l))
             ax1.legend(lines, graph_names, loc=&#39;lower center&#39;)
@@ -6812,12 +7106,12 @@ The visualizations available are:
                 plot_on_ax(history, frame_i, ax1, line_type)
 
             # Belief plotting
-            beliefs_x = self.belief_sets[frame_i].belief_array[:,1]
+            beliefs_x = self.belief_sets[frame_i if frame_i &lt; len(self.belief_sets) else -1].belief_array[:,1]
             ax2.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c=&#39;red&#39;)
             ax2.get_yaxis().set_visible(False)
             ax2.axhline(0, color=&#39;black&#39;)
 
-        max_steps = max([len(history) for history in solver_histories if not isinstance(history,ValueFunction)])
+        max_steps = max([len(history.value_functions) for history in solver_histories if not isinstance(history,ValueFunction)])
         ani = animation.FuncAnimation(fig, plt_frame, frames=max_steps, repeat=False)
         
         # File Title

@@ -1134,7 +1134,7 @@ class PBVI_Solver(Solver):
         return new_value_function
     
     
-    def expand_ssra(self, model:Model, belief_set:BeliefSet) -> BeliefSet:
+    def expand_ssra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -> BeliefSet:
         '''
         Stochastic Simulation with Random Action.
         Simulates running a single-step forward from the beliefs in the "belief_set".
@@ -1147,6 +1147,8 @@ class PBVI_Solver(Solver):
             The POMDP model on which to expand the belief set on.
         belief_set : BeliefSet
             List of beliefs to expand on.
+        max_generation : int, default=10
+            The max amount of beliefs that can be added to the belief set at once.
 
         Returns
         -------
@@ -1156,11 +1158,12 @@ class PBVI_Solver(Solver):
         xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
         old_shape = belief_set.belief_array.shape
+        to_generate = min(max_generation, old_shape[0])
 
-        new_belief_array = xp.empty((old_shape[0] * 2, old_shape[1]))
+        new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
 
-        for i, belief_vector in enumerate(belief_set.belief_array):
+        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
             b = Belief(model, belief_vector)
             s = b.random_state()
             a = random.choice(model.actions)
@@ -1173,7 +1176,7 @@ class PBVI_Solver(Solver):
         return BeliefSet(model, new_belief_array)
     
 
-    def expand_ssga(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, eps:float=0.1) -> BeliefSet:
+    def expand_ssga(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, eps:float=0.1, max_generation:int=10) -> BeliefSet:
         '''
         Stochastic Simulation with Greedy Action.
         Simulates running a single-step forward from the beliefs in the "belief_set".
@@ -1192,6 +1195,8 @@ class PBVI_Solver(Solver):
             Used to find the best action knowing the belief.
         eps : float
             Parameter tuning how often we take a greedy approach and how often we move randomly.
+        max_generation : int, default=10
+            The max amount of beliefs that can be added to the belief set at once.
 
         Returns
         -------
@@ -1201,11 +1206,12 @@ class PBVI_Solver(Solver):
         xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
         old_shape = belief_set.belief_array.shape
+        to_generate = min(max_generation, old_shape[0])
 
-        new_belief_array = xp.empty((old_shape[0] * 2, old_shape[1]))
+        new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
                 
-        for i, belief_vector in enumerate(belief_set.belief_array):
+        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
             b = Belief(model, belief_vector)
             s = b.random_state()
             
@@ -1224,7 +1230,7 @@ class PBVI_Solver(Solver):
         return BeliefSet(model, new_belief_array)
     
 
-    def expand_ssea(self, model:Model, belief_set:BeliefSet) -> BeliefSet:
+    def expand_ssea(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -> BeliefSet:
         '''
         Stochastic Simulation with Exploratory Action.
         Simulates running steps forward for each possible action knowing we are a state s, chosen randomly with according to the belief probability.
@@ -1238,6 +1244,8 @@ class PBVI_Solver(Solver):
             The POMDP model on which to expand the belief set on.
         belief_set : BeliefSet
             List of beliefs to expand on.
+        max_generation : int, default=10
+            The max amount of beliefs that can be added to the belief set at once.
 
         Returns
         -------
@@ -1247,11 +1255,12 @@ class PBVI_Solver(Solver):
         xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
         old_shape = belief_set.belief_array.shape
+        to_generate = min(max_generation, old_shape[0])
 
-        new_belief_array = xp.empty((old_shape[0] * 2, old_shape[1]))
+        new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
         
-        for i, belief_vector in enumerate(belief_set.belief_array):
+        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
             b = Belief(model, belief_vector)
             best_b = None
             max_dist = -math.inf
@@ -1274,7 +1283,7 @@ class PBVI_Solver(Solver):
         return BeliefSet(model, new_belief_array)
     
 
-    def expand_ger(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction) -> BeliefSet:
+    def expand_ger(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, max_generation:int=10) -> BeliefSet:
         '''
         Greedy Error Reduction. NOT IMPLEMENTED YET.
         Parameters
@@ -1285,6 +1294,8 @@ class PBVI_Solver(Solver):
             List of beliefs to expand on.
         value_function : ValueFunction
             Used to find the best action knowing the belief.
+        max_generation : int, default=10
+            The max amount of beliefs that can be added to the belief set at once.
 
         Returns
         -------
@@ -1295,7 +1306,7 @@ class PBVI_Solver(Solver):
         return []
 
 
-    def expand(self, model:Model, belief_set:BeliefSet, **function_specific_parameters) -> BeliefSet:
+    def expand(self, model:Model, belief_set:BeliefSet, max_generation:int, **function_specific_parameters) -> BeliefSet:
         '''
         Central method to call one of the functions for a particular expansion strategy:
             - Stochastic Simulation with Random Action (ssra)
@@ -1311,6 +1322,8 @@ class PBVI_Solver(Solver):
             The set of beliefs to expand.
         function_specific_parameters
             Potential additional parameters necessary for the specific expand function.
+        max_generation : int
+            The max amount of beliefs that can be added to the belief set at once.
 
         Returns
         -------
@@ -1318,18 +1331,18 @@ class PBVI_Solver(Solver):
             The belief set the expansion function returns. 
         '''
         if self.expand_function in 'expand_ssra':
-            return self.expand_ssra(model=model, belief_set=belief_set)
+            return self.expand_ssra(model=model, belief_set=belief_set, max_generation=max_generation)
         
         elif self.expand_function in 'expand_ssga':
             args = {arg: function_specific_parameters[arg] for arg in ['value_function', 'eps'] if arg in function_specific_parameters}
-            return self.expand_ssga(model=model, belief_set=belief_set, **args)
+            return self.expand_ssga(model=model, belief_set=belief_set, max_generation=max_generation, **args)
         
         elif self.expand_function in 'expand_ssea':
-            return self.expand_ssea(model=model, belief_set=belief_set)
+            return self.expand_ssea(model=model, belief_set=belief_set, max_generation=max_generation)
         
         elif self.expand_function in 'expand_ger':
             args = {arg: function_specific_parameters[arg] for arg in ['value_function'] if arg in function_specific_parameters}
-            return self.expand_ger(model=model, belief_set=belief_set, **args)
+            return self.expand_ger(model=model, belief_set=belief_set, max_generation=max_generation, **args)
         
         return []
 
@@ -1338,6 +1351,7 @@ class PBVI_Solver(Solver):
               model:Model,
               expansions:int,
               horizon:int,
+              max_belief_growth:int=10,
               initial_belief:Union[BeliefSet, Belief, None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
               prune_level:int=1,
@@ -1366,6 +1380,8 @@ class PBVI_Solver(Solver):
             How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
         horizon : int
             How many times the alpha vector set must be updated every time the belief set is expanded.
+        max_belief_growth : int, default=10
+            How many beliefs can be added at every expansion step to the belief set.
         initial_belief : BeliefSet or Belief, optional
             An initial list of beliefs to start with.
         initial_value_function : ValueFunction, optional
@@ -1428,18 +1444,24 @@ class PBVI_Solver(Solver):
 
         # Loop
         iteration = 0
+        expand_max_val_per_belief = None
         for expansion_i in range(expansions) if not print_progress else trange(expansions, desc='Expansions'):
 
             # 1: Expand belief set
             start_ts = datetime.now()
 
-            belief_set = self.expand(model=model, belief_set=belief_set, value_function=value_function, **self.expand_function_params)
+            belief_set = self.expand(model=model,
+                                     belief_set=belief_set,
+                                     value_function=value_function,
+                                     max_generation=max_belief_growth,
+                                     **self.expand_function_params)
 
             expand_time = (datetime.now() - start_ts).total_seconds()
             solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
 
             # 2: Backup, update value function (alpha vector set)
             old_max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
+            expand_max_val_per_belief = xp.copy(old_max_val_per_belief)
 
             for _ in range(horizon) if not print_progress else trange(horizon, desc=f'Backups {expansion_i}'):
                 start_ts = datetime.now()
@@ -1460,12 +1482,16 @@ class PBVI_Solver(Solver):
 
                 # convergence check
                 if max_change < max_allowed_change:
-                    print('Converged early...')
-                    return value_function, solver_history
+                    break
                 old_max_val_per_belief = max_val_per_belief
 
                 # Update iteration counter
                 iteration += 1
+
+            expand_max_change = xp.max(xp.abs(max_val_per_belief - expand_max_val_per_belief))
+            if expand_max_change < max_allowed_change:
+                print('Converged!')
+                break
 
         return value_function, solver_history
 
