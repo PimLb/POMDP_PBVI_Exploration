@@ -1060,7 +1060,13 @@ class PBVI_Solver(Solver):
         self.expand_function_params = expand_function_params
 
 
-    def backup(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, append:bool=False) -> ValueFunction:
+    def backup(self,
+               model:Model,
+               belief_set:BeliefSet,
+               value_function:ValueFunction,
+               append:bool=False,
+               belief_dominance_prune:bool=True
+               ) -> ValueFunction:
         '''
         This function has purpose to update the set of alpha vectors. It does so in 3 steps:
         1. It creates projections from each alpha vector for each possible action and each possible observation
@@ -1080,7 +1086,9 @@ class PBVI_Solver(Solver):
             The alpha vectors to generate the new set from.
         append : bool, default=False
             Whether to append the new alpha vectors generated to the old alpha vectors before pruning.
-
+        belief_dominance_prune : bool, default=True
+            Whether, before returning the new value function, checks what alpha vectors have a supperior 
+            
         Returns
         -------
         new_alpha_set : ValueFunction
@@ -1107,6 +1115,16 @@ class PBVI_Solver(Solver):
         best_actions = xp.argmax(xp.einsum('bas,bs->ba', alpha_a, belief_array), axis=1)
         alpha_vectors = xp.take_along_axis(alpha_a, best_actions[:,None,None],axis=1)[:,0,:]
 
+        # Belief domination
+        if belief_dominance_prune:
+            best_value_per_belief = xp.sum((belief_array * alpha_vectors), axis=1)
+            old_best_value_per_belief = xp.max(xp.matmul(belief_array, vector_array.T), axis=1)
+            dominating_vectors = best_value_per_belief > old_best_value_per_belief
+
+            best_actions = best_actions[dominating_vectors]
+            alpha_vectors = alpha_vectors[dominating_vectors]
+
+        # Creation of value function
         new_value_function = ValueFunction(model, alpha_vectors, best_actions)
 
         # Union with previous value function
@@ -1678,11 +1696,14 @@ class FSVI_Solver(PBVI_Solver):
             
             # Convergence check
             if max_change < max_allowed_change:
-                print('Converged early...')
-                return value_function, solver_history
+                print('Converged!')
+                break
             
             old_max_val_per_belief = max_val_per_belief
 
+        # Final pruning
+        value_function.prune(prune_level)
+        
         return value_function, solver_history
 
 
