@@ -1322,7 +1322,8 @@ class PBVI_Solver(Solver):
               horizon:int,
               initial_belief:Union[BeliefSet, Belief, None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
-              prune_level:Union[int,None]=None,
+              prune_level:int=1,
+              prune_interval:int=10,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -1351,10 +1352,12 @@ class PBVI_Solver(Solver):
             An initial list of beliefs to start with.
         initial_value_function : ValueFunction, optional
             An initial value function to start the solving process with.
-        prune_level : int, optional
+        prune_level : int, default=1
             Parameter to prune the value function further before the expand function.
+        prune_interval : int, default=10
+            How often to prune the value function. It is counted in number of backup iterations.
         use_gpu : bool, default=False
-            Whether to use the GPU with cupy array to accelerate solving. (Default: False)
+            Whether to use the GPU with cupy array to accelerate solving.
         history_tracking_level : int, default=1
             How thorough the tracking of the solving process should be. (0: Nothing; 1: Times and sizes of belief sets and value function; 2: The actual value functions and beliefs sets)
         print_progress : bool, default=True
@@ -1406,11 +1409,8 @@ class PBVI_Solver(Solver):
                                        initial_belief_set=belief_set)
 
         # Loop
+        iteration = 0
         for expansion_i in range(expansions) if not print_progress else trange(expansions, desc='Expansions'):
-
-            # 0: Prune value function at a higher level between expansions
-            if prune_level is not None:
-                value_function.prune(prune_level)
 
             # 1: Expand belief set
             start_ts = datetime.now()
@@ -1428,6 +1428,10 @@ class PBVI_Solver(Solver):
 
                 value_function = self.backup(model, belief_set, value_function)
 
+                # Additional pruning
+                if (iteration % prune_interval) == 0 and iteration > 0:
+                    value_function.prune(prune_level)
+
                 # Max change
                 max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
                 max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
@@ -1441,6 +1445,9 @@ class PBVI_Solver(Solver):
                     print('Converged early...')
                     return value_function, solver_history
                 old_max_val_per_belief = max_val_per_belief
+
+                # Update iteration counter
+                iteration += 1
 
         return value_function, solver_history
 
@@ -1503,6 +1510,10 @@ class FSVI_Solver(PBVI_Solver):
             The current recursion depth.
         horizon : int
             The maximum recursion depth that can be reached before the generated belief sequence is returned.
+        sequence_string : str, default=''
+            The sequence of previously explored actions and observations.
+        belief_memory_depth : int, default=10
+            How deep the belief memory should be. It is used to speedup the MDP expansion process by caching previously explored beliefs based on the sequence that led it there.
 
         Returns
         -------
@@ -1553,7 +1564,8 @@ class FSVI_Solver(PBVI_Solver):
               mdp_policy:ValueFunction,
               initial_belief:Union[Belief,None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
-              prune_level:Union[int,None]=None,
+              prune_level:int=1,
+              prune_interval:int=10,
               belief_memory_depth:int=10,
               use_gpu:bool=False,
               history_tracking_level:int=1,
@@ -1578,8 +1590,12 @@ class FSVI_Solver(PBVI_Solver):
             An initial belief that will replace the default initial belief generated from the start probabilities of the model.
         initial_value_function : ValueFunction, optional
             An initial value function to start the solving process with. (Can for example be the MDP value function)
-        prune_level : int, optional
+        prune_level : int, default=1
             Parameter to prune the value function further before the expand function.
+        prune_interval : int, default=10
+            How often to prune the value function. It is counted in number of iterations.
+        belief_memory_depth : int, default=10
+            How deep the belief memory should be. It is used to speedup the MDP expansion process by caching previously explored beliefs based on the sequence that led it there.
         use_gpu : bool, default=False
             Whether to use the GPU with cupy array to accelerate solving.
         history_tracking_level : int, default=1
@@ -1649,7 +1665,7 @@ class FSVI_Solver(PBVI_Solver):
             value_function = self.backup(model, belief_set, value_function, append=True)
 
             # Additional pruning
-            if prune_level is not None: # and (i % 20) == 0 and i > 0:
+            if (i % prune_interval) == 0 and i > 0:
                 value_function.prune(prune_level)
 
             # Change computation
