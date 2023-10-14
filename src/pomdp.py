@@ -1382,6 +1382,37 @@ class PBVI_Solver(Solver):
         return []
 
 
+    def compute_change(self, value_function:ValueFunction, new_value_function:ValueFunction, belief_set:BeliefSet) -> float:
+        '''
+        Function to compute whether the change between two value functions can be considered as having converged based on the eps parameter of the Solver.
+        It check for each belief, the maximum value and take the max change between believe's value functions.
+        If this max change is lower than eps * (gamma / (1 - gamma)).
+
+        Parameters
+        ----------
+        value_function : ValueFunction
+            The first value function to compare.
+        new_value_function : ValueFunction
+            The second value function to compare.
+        belief_set : BeliefSet
+            The set of believes to check the values on to compute the max change on.
+
+        Returns
+        -------
+        max_change : float
+            The maximum change between value functions at belief points.
+        '''
+        # Get numpy corresponding to the arrays
+        xp = np if not gpu_support else cp.get_array_module(value_function.alpha_vector_array)
+
+        # Computing Delta for each beliefs
+        max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
+        new_max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, new_value_function.alpha_vector_array.T), axis=1)
+        max_change = xp.max(xp.abs(new_max_val_per_belief - max_val_per_belief))
+
+        return max_change
+
+
     def solve(self,
               model:Model,
               expansions:int,
@@ -1463,7 +1494,7 @@ class PBVI_Solver(Solver):
         if initial_value_function is None:
             value_function = ValueFunction(model, model.expected_rewards_table.T, model.actions)
         else:
-            value_function = initial_value_function.to_gpu() if use_gpu else initial_value_function 
+            value_function = initial_value_function.to_gpu() if use_gpu else initial_value_function
 
         # Convergence check boundary
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
@@ -1479,7 +1510,8 @@ class PBVI_Solver(Solver):
 
         # Loop
         iteration = 0
-        expand_max_val_per_belief = None
+        expand_value_function = value_function
+        old_value_function = value_function
         for expansion_i in range(expansions) if not print_progress else trange(expansions, desc='Expansions'):
 
             # 1: Expand belief set
@@ -1495,9 +1527,6 @@ class PBVI_Solver(Solver):
             solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
 
             # 2: Backup, update value function (alpha vector set)
-            old_max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
-            expand_max_val_per_belief = xp.copy(old_max_val_per_belief)
-
             for _ in range(horizon) if not print_progress else trange(horizon, desc=f'Backups {expansion_i}'):
                 start_ts = datetime.now()
 
@@ -1515,26 +1544,30 @@ class PBVI_Solver(Solver):
                     prune_time = (datetime.now() - start_ts).total_seconds()
                     alpha_vectors_pruned = len(value_function) - vf_len
                     solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
-
-                # Max change
-                max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
-                max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
                 
+                # Compute the change between value functions
+                max_change = self.compute_change(value_function, old_value_function)
+
                 # History tracking
                 solver_history.add_backup_step(backup_time, max_change, value_function)
 
-                # convergence check
+                # Convergence check
                 if max_change < max_allowed_change:
                     break
-                old_max_val_per_belief = max_val_per_belief
+
+                old_value_function = value_function
 
                 # Update iteration counter
                 iteration += 1
 
-            expand_max_change = xp.max(xp.abs(max_val_per_belief - expand_max_val_per_belief))
+            # Compute change with old expansion value function
+            expand_max_change = self.compute_change(expand_value_function, value_function, belief_set)
+
             if expand_max_change < max_allowed_change:
                 print('Converged!')
                 break
+
+            expand_value_function = value_function
 
         # Final pruning
         start_ts = datetime.now()
@@ -1733,7 +1766,6 @@ class FSVI_Solver(PBVI_Solver):
 
         # Convergence check boundary
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
-        old_max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
 
         # History tracking
         solver_history = SolverHistory(tracking_level=history_tracking_level,
@@ -1745,6 +1777,7 @@ class FSVI_Solver(PBVI_Solver):
                                        initial_belief_set=BeliefSet(model, [b])
                                        )
 
+        old_value_function = value_function
         for i in trange(expansions, desc='Expansions') if print_progress else range(expansions):
 
             # Expand (exploration)
@@ -1774,8 +1807,7 @@ class FSVI_Solver(PBVI_Solver):
                 solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
 
             # Change computation
-            max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
-            max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
+            max_change = self.compute_change(old_value_function, value_function, belief_set)
 
             # History tracking
             solver_history.add_backup_step(backup_time, max_change, value_function)
@@ -1785,7 +1817,7 @@ class FSVI_Solver(PBVI_Solver):
                 print('Converged!')
                 break
             
-            old_max_val_per_belief = max_val_per_belief
+            old_value_function = value_function
 
         # Final pruning
         start_ts = datetime.now()
