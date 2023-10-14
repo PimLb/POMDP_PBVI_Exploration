@@ -741,10 +741,12 @@ class SolverHistory:
         # Time tracking
         self.expansion_times = []
         self.backup_times = []
+        self.pruning_times = []
 
         # Value function and belief set sizes tracking
         self.alpha_vector_counts = []
         self.beliefs_counts = []
+        self.prune_counts = []
 
         if self.tracking_level >= 1:
             self.alpha_vector_counts.append(len(initial_value_function))
@@ -817,7 +819,6 @@ class SolverHistory:
         value_function : ValueFunction
             The value function resulting after a step of the solving process.
         '''
-
         if self.tracking_level >= 1:
             self.backup_times.append(float(backup_time))
             self.alpha_vector_counts.append(len(value_function))
@@ -825,6 +826,25 @@ class SolverHistory:
 
         if self.tracking_level >= 2:
             self.value_functions.append(value_function if not value_function.is_on_gpu else value_function.to_cpu())
+
+
+    def add_prune_step(self,
+                       prune_time:float,
+                       alpha_vectors_pruned:int
+                       ) -> None:
+        '''
+        Function to add a prune step in the simulation history by recording the amount of alpha vectors that were pruned by the pruning function and how long it took.
+
+        Parameters
+        ----------
+        prune_time : float
+            The time it took to run the pruning step.
+        alpha_vectors_pruned : int
+            How many alpha vectors were pruned.
+        '''
+        if self.tracking_level >= 1:
+            self.pruning_times.append(prune_time)
+            self.prune_counts.append(alpha_vectors_pruned)
 
 
     @property
@@ -850,6 +870,9 @@ class SolverHistory:
 
             summary_str += f'\n  - Backup function took on average {sum(self.backup_times) /len(self.backup_times):.4f}s '
             summary_str += f'and yielded on average value functions of size {sum(self.alpha_vector_counts[1:]) / len(self.alpha_vector_counts[1:]):.2f} per iteration.'
+        
+            summary_str += f'\n  - Pruning function took on average {sum(self.pruning_times) /len(self.pruning_times):.4f}s '
+            summary_str += f'and yielded on average prunings of {sum(self.prune_counts) / len(self.prune_counts):.2f} alpha vectors per iteration.'
         
         return summary_str
     
@@ -1478,18 +1501,26 @@ class PBVI_Solver(Solver):
             for _ in range(horizon) if not print_progress else trange(horizon, desc=f'Backups {expansion_i}'):
                 start_ts = datetime.now()
 
+                # Backup step
                 value_function = self.backup(model, belief_set, value_function, belief_dominance_prune=False)
+                backup_time = (datetime.now() - start_ts).total_seconds()
 
                 # Additional pruning
                 if (iteration % prune_interval) == 0 and iteration > 0:
+                    start_ts = datetime.now()
+                    vf_len = len(value_function)
+
                     value_function.prune(prune_level)
+
+                    prune_time = (datetime.now() - start_ts).total_seconds()
+                    alpha_vectors_pruned = len(value_function) - vf_len
+                    solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
 
                 # Max change
                 max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
                 max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
                 
                 # History tracking
-                backup_time = (datetime.now() - start_ts).total_seconds()
                 solver_history.add_backup_step(backup_time, max_change, value_function)
 
                 # convergence check
@@ -1504,6 +1535,16 @@ class PBVI_Solver(Solver):
             if expand_max_change < max_allowed_change:
                 print('Converged!')
                 break
+
+        # Final pruning
+        start_ts = datetime.now()
+        vf_len = len(value_function)
+
+        value_function.prune(prune_level)
+
+        prune_time = (datetime.now() - start_ts).total_seconds()
+        alpha_vectors_pruned = len(value_function) - vf_len
+        solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
 
         return value_function, solver_history
 
@@ -1719,17 +1760,24 @@ class FSVI_Solver(PBVI_Solver):
             start_ts = datetime.now()
 
             value_function = self.backup(model, belief_set, value_function, append=True)
+            backup_time = (datetime.now() - start_ts).total_seconds()
 
             # Additional pruning
             if (i % prune_interval) == 0 and i > 0:
+                start_ts = datetime.now()
+                vf_len = len(value_function)
+
                 value_function.prune(prune_level)
+
+                prune_time = (datetime.now() - start_ts).total_seconds()
+                alpha_vectors_pruned = len(value_function) - vf_len
+                solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
 
             # Change computation
             max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
             max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
 
             # History tracking
-            backup_time = (datetime.now() - start_ts).total_seconds()
             solver_history.add_backup_step(backup_time, max_change, value_function)
             
             # Convergence check
@@ -1740,7 +1788,14 @@ class FSVI_Solver(PBVI_Solver):
             old_max_val_per_belief = max_val_per_belief
 
         # Final pruning
+        start_ts = datetime.now()
+        vf_len = len(value_function)
+
         value_function.prune(prune_level)
+
+        prune_time = (datetime.now() - start_ts).total_seconds()
+        alpha_vectors_pruned = len(value_function) - vf_len
+        solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
         
         return value_function, solver_history
 
