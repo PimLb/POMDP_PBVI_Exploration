@@ -1436,6 +1436,29 @@ class RewardSet(list):
         self.extend(items)
 
 
+    def get_total_discounted_reward(self, gamma:float) -> float:
+        '''
+        Function computing the discounted rewards of the set of rewards in the set.
+        The rewards at discounted by gamma^step. Then the discounted rewards are summed together.
+
+        Parameters
+        ----------
+        gamma : float
+            The discount to use per step.
+
+        Returns
+        -------
+        total_discounted_reward : float
+            The sum of discounted reward.
+        '''
+        steps_count = len(self)
+        rewards = np.array(self)
+        discounts = gamma ** np.arange(steps_count)
+
+        total_discounted_reward = np.dot(rewards, discounts)
+        return total_discounted_reward
+
+
     def plot(self,
              type:str='total',
              size:int=5,
@@ -1612,6 +1635,10 @@ class SimulationHistory:
         self.states.append(next_state)
         self.grid_point_sequence.append([i[0] for i in np.where(self.model.state_grid == next_state)])
     
+
+    def __len__(self):
+        return len(self.states)
+
 
     def plot_simulation_steps(self, size:int=5):
         '''
@@ -1932,7 +1959,7 @@ class Agent:
                           start_state:int=-1,
                           print_progress:bool=True,
                           print_stats:bool=True
-                          ) -> RewardSet:
+                          ) -> Tuple[RewardSet, list[SimulationHistory]]:
         '''
         Function to run a set of simulations in a row.
         This is useful when the simulation has a 'done' condition.
@@ -1957,18 +1984,25 @@ class Agent:
         -------
         all_final_rewards : RewardSet
             A list of the final rewards after each simulation.
+        all_histories : list[SimulationHistory]
+            A list the simulation histories gathered at each simulation.
         '''
         if simulator is None:
             simulator = Simulation(self.model)
 
         sim_start_ts = datetime.now()
 
+        all_histories = []
         all_final_rewards = RewardSet()
+        all_discounted_rewards = []
         all_sim_length = []
         for _ in (trange(n) if print_progress else range(n)):
             sim_history = self.simulate(simulator, max_steps, start_state, False, False)
+
+            all_histories.append(sim_history)
             all_final_rewards.append(sum(sim_history.rewards))
-            all_sim_length.append(len(sim_history.states))
+            all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(0.99)) # TODO: make it variable
+            all_sim_length.append(len(sim_history))
 
         if print_stats:
             sim_end_ts = datetime.now()
@@ -1976,5 +2010,6 @@ class Agent:
             print(f'\t- Average runtime (s): {((sim_end_ts - sim_start_ts).total_seconds() / n)}')
             print(f'\t- Average step count: {(sum(all_sim_length) / n)}')
             print(f'\t- Average total rewards: {(sum(all_final_rewards) / n)}')
+            print(f'\t- Average discounted rewards (ADR): {(sum(all_discounted_rewards) / n)}')
         
-        return all_final_rewards
+        return all_final_rewards, all_histories
