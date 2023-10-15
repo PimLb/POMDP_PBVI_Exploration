@@ -1772,6 +1772,8 @@ class Simulation:
         state : int
             The state the agent will start in.
         '''
+        xp = np if not self.model.is_on_gpu else cp
+
         if start_state is None:
             self.agent_state = int(np.random.choice(a=self.model.states, size=1, p=self.model.start_probabilities)[0])
         else:
@@ -1828,8 +1830,10 @@ class Agent:
 
     Parameters
     ----------
-    model: mdp.Model
+    model : mdp.Model
         The model in which the agent can run.
+    value_function : ValueFunction, optional
+        A value function the agent can use to play a simulation, in the case the model has been solved beforehand.
     
     Attributes
     ----------
@@ -1837,11 +1841,9 @@ class Agent:
     value_function : ValueFunction
         The value function the agent has come up to after training.
     '''
-    def __init__(self, model:Model) -> None:
-        super().__init__()
-
+    def __init__(self, model:Model, value_function:Union[ValueFunction,None]=None) -> None:
         self.model = model
-        self.value_function = None
+        self.value_function = value_function
 
 
     def train(self, solver:Union[Solver,None]=None) -> SolverHistory:
@@ -1882,8 +1884,11 @@ class Agent:
         '''
         assert self.value_function is not None, "No value function, training probably has to be run..."
 
-        best_vector = np.argmax(self.value_function.alpha_vector_array[:,state])
-        best_action = self.value_function.actions[best_vector]
+        # Check if on GPU
+        xp = np if not self.value_function.is_on_gpu else cp
+
+        best_vector = cp.argmax(self.value_function.alpha_vector_array[:,state])
+        best_action = int(self.value_function.actions[best_vector])
 
         return best_action
 
@@ -1916,9 +1921,16 @@ class Agent:
         history : SimulationHistory
             A step by step history of the simulation with additional functionality to plot rewards for example.
         '''
+        assert self.value_function is not None, "No value function, training probably has to be run..."
+
+        # GPU setup
+        self.model = self.model.gpu_model if self.value_function.is_on_gpu else self.model.cpu_model
+
+        # Getting a simulator or generating a default one.
         if simulator is None:
             simulator = Simulation(self.model)
 
+        # Initialization of the simulator
         s = simulator.initialize_simulation(start_state=start_state)
 
         history = SimulationHistory(self.model, s)

@@ -2002,6 +2002,8 @@ class Agent:
     ----------
     model: pomdp.Model
         The model in which the agent can run
+    value_function : ValueFunction, optional
+        A value function the agent can use to play a simulation, in the case the model has been solved beforehand.
     
     Attributes
     ----------
@@ -2009,9 +2011,9 @@ class Agent:
     value_function : ValueFunction
         The value function the agent has come up to after training.
     '''
-    def __init__(self, model:Model) -> None:
+    def __init__(self, model:Model, value_function:Union[ValueFunction,None]=None) -> None:
         self.model = model
-        self.value_function = None
+        self.value_function = value_function
 
 
     def train(self, solver:PBVI_Solver, expansions:int, horizon:int) -> SolverHistory:
@@ -2053,8 +2055,11 @@ class Agent:
         '''
         assert self.value_function is not None, "No value function, training probably has to be run..."
 
-        best_vector = np.argmax(np.dot(self.value_function.alpha_vector_array, belief.values))
-        best_action = self.value_function.actions[best_vector]
+        # GPU
+        xp = np if not self.value_function.is_on_gpu else cp
+
+        best_vector = xp.argmax(xp.dot(self.value_function.alpha_vector_array, belief.values))
+        best_action = int(self.value_function.actions[best_vector])
 
         return best_action
 
@@ -2087,6 +2092,12 @@ class Agent:
         history : SimulationHistory
             A list of rewards with the additional functionality that the can be plot with the plot() function.
         '''
+        assert self.value_function is not None, "No value function, training probably has to be run..."
+
+        # GPU setup
+        self.model = self.model.gpu_model if self.value_function.is_on_gpu else self.model.cpu_model
+
+        # Get or generate a default simulator
         if simulator is None:
             simulator = Simulation(self.model)
 
