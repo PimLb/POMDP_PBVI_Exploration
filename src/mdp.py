@@ -2,10 +2,8 @@ from datetime import datetime
 from inspect import signature
 from matplotlib import animation, colors, patches
 from matplotlib import pyplot as plt
-from scipy.optimize import milp, LinearConstraint
-from scipy.spatial.distance import cdist
 from tqdm.auto import trange
-from typing import Self, Union, Tuple
+from typing import Union, Tuple
 
 import copy
 import json
@@ -20,6 +18,13 @@ try:
     gpu_support = True
 except:
     print('[Warning] Cupy could not be loaded: GPU support is not available.')
+
+ilp_support = False
+try:
+    from scipy.optimize import milp, LinearConstraint
+    ilp_support = True
+except:
+    print('[Warning] milp library not available, LP solvers will be disabled.')
 
 
 COLOR_LIST = [{
@@ -475,7 +480,7 @@ class Model:
 
 
     @classmethod
-    def load_from_json(cls, file:str) -> Self:
+    def load_from_json(cls, file:str) -> 'Model':
         '''
         Function to load a MDP model from a json file. The json structure must contain the same items as in the constructor of this class.
 
@@ -503,7 +508,7 @@ class Model:
 
 
     @property
-    def gpu_model(self) -> Self:
+    def gpu_model(self) -> 'Model':
         '''
         The same model but on the GPU instead of the CPU. If already on the GPU, the current model object is returned.
         '''
@@ -533,7 +538,7 @@ class Model:
 
 
     @property
-    def cpu_model(self) -> Self:
+    def cpu_model(self) -> 'Model':
         '''
         The same model but on the CPU instead of the GPU. If already on the CPU, the current model object is returned.
         '''
@@ -687,7 +692,7 @@ class ValueFunction:
         return len(self._vector_list) if self._vector_list is not None else self._vector_array.shape[0]
     
 
-    def __add__(self, other_value_function:Self) -> Self:
+    def __add__(self, other_value_function:'Model') -> 'Model':
         # combined_dict = {**self._uniqueness_dict, **other_value_function._uniqueness_dict}
         combined_dict = {}
         combined_dict.update(self._uniqueness_dict)
@@ -732,7 +737,7 @@ class ValueFunction:
             self._vector_list.append(alpha_vector)
 
 
-    def extend(self, other_value_function:Self) -> None:
+    def extend(self, other_value_function:'Model') -> None:
         '''
         Function to add another value function is place.
         Effectively, it performs the union of the two sets of alpha vectors.
@@ -751,7 +756,7 @@ class ValueFunction:
         self._pruning_level = 1
 
 
-    def to_gpu(self) -> Self:
+    def to_gpu(self) -> 'Model':
         '''
         Function returning an equivalent value function object with the arrays stored on GPU instead of CPU.
 
@@ -777,7 +782,7 @@ class ValueFunction:
         return gpu_value_function
     
 
-    def to_cpu(self) -> Self:
+    def to_cpu(self) -> 'Model':
         '''
         Function returning an equivalent value function object with the arrays stored on CPU instead of GPU.
 
@@ -839,6 +844,8 @@ class ValueFunction:
 
         # Level 3 pruning: LP to check for more complex domination
         if level >= 3:
+            assert ilp_support, "ILP support not enabled..."
+
             pruned_alpha_set = pruned_alpha_set.to_cpu()
 
             alpha_set = pruned_alpha_set.alpha_vector_array
@@ -912,7 +919,7 @@ class ValueFunction:
 
 
     @classmethod
-    def load_from_file(cls, file:str, model:Model) -> Self:
+    def load_from_file(cls, file:str, model:Model) -> 'Model':
         '''
         Function to load the value function from a csv file.
 
@@ -1463,7 +1470,7 @@ class RewardSet(list):
              type:str='total',
              size:int=5,
              max_reward=None,
-             compare_with:Union[Self, list[Self]]=[],
+             compare_with:Union['RewardSet', list['RewardSet']]=[],
              graph_names:list[str]=[]
              ) -> None:
         '''

@@ -5,7 +5,7 @@ from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 from tqdm.auto import trange
-from typing import Self, Tuple, Union
+from typing import Tuple, Union
 
 import copy
 import math
@@ -342,7 +342,7 @@ class Belief:
         return self._values
     
 
-    def update(self, a:int, o:int) -> Self:
+    def update(self, a:int, o:int) -> 'Belief':
         '''
         Returns a new belief based on this current belief, the most recent action (a) and the most recent observation (o).
 
@@ -493,7 +493,7 @@ class BeliefSet:
         return len(self._belief_list) if self._belief_list is not None else self._belief_array.shape[0]
     
 
-    def to_gpu(self) -> Self:
+    def to_gpu(self) -> 'BeliefSet':
         '''
         Function returning an equivalent belief set object with the array of values stored on GPU instead of CPU.
 
@@ -517,7 +517,7 @@ class BeliefSet:
         return gpu_belief_set
     
 
-    def to_cpu(self) -> Self:
+    def to_cpu(self) -> 'BeliefSet':
         '''
         Function returning an equivalent belief set object with the array of values stored on CPU instead of GPU.
 
@@ -974,7 +974,7 @@ class SolverHistory:
             for i in range(1,len(solver_histories)):
                 graph_names.append(f'Comparison {i}')
 
-        def plot_on_ax(history:Union[ValueFunction,Self], frame_i:int, ax, line_type:str):
+        def plot_on_ax(history:Union[ValueFunction,'SolverHistory'], frame_i:int, ax, line_type:str):
             if isinstance(history, ValueFunction):
                 value_function = history
             else:
