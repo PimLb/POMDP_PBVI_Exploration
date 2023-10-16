@@ -1095,6 +1095,114 @@ class PBVI_Solver(Solver):
         self.expand_function_params = expand_function_params
 
 
+    def test_n_simulations(self, model:Model, value_function:ValueFunction, n:int=1000, horizon:int=300, print_progress:bool=False):
+        '''
+        Function that tests a value function with n simulations. It returns the start states, the amount of steps in which the simulation reached an end state, the rewards received and the discounted rewards received.
+
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model on which to run the simulations.
+        value_function : ValueFunction
+            The value function that will be evaluated.
+        n : int, default=1000
+            The amount of simulations to run.
+        horizon : int, default=300
+            The maximum amount of steps the simulation can run for.
+        print_progress : bool, default=False
+            Whether to display a progress bar of how many simulation steps have been run so far. 
+        '''
+        # GPU support
+        xp = np if not value_function.is_on_gpu else cp
+        model = model.cpu_model if not value_function.is_on_gpu else model.gpu_model
+
+        # Genetion of an array of n beliefs
+        initial_beliefs = xp.repeat(Belief(model).values[None,:], n, axis=0)
+
+        # Generating n initial positions
+        start_states = xp.random.choice(model.states, size=n, p=model.start_probabilities)
+        
+        # Belief and state arrays
+        beliefs = initial_beliefs
+        new_beliefs = None
+        states = start_states
+        next_states = None
+
+        # Tracking what simulations are done
+        sim_is_done = xp.zeros(n, dtype=bool)
+        done_at_step = xp.full(n, -1)
+
+        # Speedup item
+        simulations = xp.arange(n)
+        flatten_offset = (simulations[:,None] * model.state_count)
+        flat_shape = (n, (model.state_count * model.reachable_state_count))
+
+        # Results
+        discount = self.gamma
+        rewards = []
+        discounted_rewards = []
+        
+        iterator = trange(horizon) if print_progress else range(horizon)
+        for i in iterator:
+            # Retrieving the top vectors according to the value function
+            best_vectors = xp.argmax(xp.matmul(beliefs, value_function.alpha_vector_array.T), axis=1)
+
+            # Retrieving the actions associated with the vectors chosen
+            best_actions = value_function.actions[best_vectors]
+
+            # Get each reachable next states for each action
+            reachable_state_per_actions = model.reachable_states[:, best_actions, :]
+
+            # Gathering new states based on the transition function and the chosen actions
+            next_state_potentials = reachable_state_per_actions[states, simulations]
+            if model.reachable_state_count == 1:
+                next_states = next_state_potentials[:,0]
+            else:
+                potential_probabilities = model.reachable_probabilities[states[:,None], best_actions[:,None]][:,0,:]
+                chosen_indices = xp.apply_along_axis(lambda x: xp.random.choice(len(x), size=1, p=x), axis=1, arr=potential_probabilities)
+                next_states = next_state_potentials[chosen_indices][:,0,0]
+
+            # Making observations based on the states landed in and the action that was taken
+            observation_probabilities = model.observation_table[next_states[:,None], best_actions[:,None]][:,0,:]
+            observations = xp.sum(xp.random.random(n)[:,None] > xp.cumsum(observation_probabilities[:,:-1], axis=1), axis=1)
+
+            # Belief set update
+            def bincount2D_vectorized(a, w):    
+                a_offs = a + flatten_offset
+                return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape(-1,model.state_count)
+
+            reachable_probabilities = (model.reachable_transitional_observation_table[:,best_actions,observations,:] * beliefs.T[:,:,None])
+            new_beliefs = bincount2D_vectorized(a=reachable_state_per_actions.swapaxes(0,1).reshape(flat_shape),
+                                                w=reachable_probabilities.swapaxes(0,1).reshape(flat_shape))
+
+            new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
+
+            # Rewards computation
+            step_rewards = xp.array([model.immediate_reward_function(s,a,s_p,o) for s,a,s_p,o in zip(states, best_actions, next_states, observations)])
+            rewards.append(xp.where(~sim_is_done, step_rewards, 0))
+            discounted_rewards.append(xp.where(~sim_is_done, step_rewards * discount, 0))
+
+            # Checking for done condition
+            are_done = xp.isin(next_states, xp.array(model.end_states))
+            done_at_step[sim_is_done ^ are_done] = i+1
+            sim_is_done |= are_done
+
+            # Update iterator postfix
+            if print_progress:
+                iterator.set_postfix({'done': xp.sum(sim_is_done)})
+
+            # Replacing old with new
+            states = next_states
+            beliefs = new_beliefs
+            discount *= self.gamma
+
+            # Early stopping
+            if xp.all(sim_is_done):
+                break
+
+        return start_states, done_at_step, rewards, discounted_rewards
+
+
     def backup(self,
                model:Model,
                belief_set:BeliefSet,
