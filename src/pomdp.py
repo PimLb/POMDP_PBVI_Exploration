@@ -1139,12 +1139,12 @@ class PBVI_Solver(Solver):
         gamma_a_o_t = self.gamma * xp.einsum('saor,vsar->aovs', model.reachable_transitional_observation_table, vectors_array_reachable_states)
 
         # Step 2
-        belief_array = belief_set.belief_array
-        best_alpha_ind = xp.argmax(xp.tensordot(belief_array, gamma_a_o_t, (1,3)), axis=3)
+        belief_array = belief_set.belief_array # bs
+        best_alpha_ind = xp.argmax(xp.tensordot(belief_array, gamma_a_o_t, (1,3)), axis=3) # argmax(bs,aovs->baov) -> bao
 
-        best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]]
+        best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]] # baos
 
-        alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2)
+        alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2) # as + bas
 
         # Step 3
         best_actions = xp.argmax(xp.einsum('bas,bs->ba', alpha_a, belief_array), axis=1)
@@ -1168,6 +1168,33 @@ class PBVI_Solver(Solver):
                 
         return new_value_function
     
+
+    def expand_ra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -> BeliefSet:
+        '''
+        This expansion technique relies only randomness and will generate at most 'max_generation' beliefs.
+
+        Parameters
+        model : pomdp.Model
+            The POMDP model on which to expand the belief set on.
+        belief_set : BeliefSet
+            List of beliefs to expand on.
+        max_generation : int, default=10
+            The max amount of beliefs that can be added to the belief set at once.
+        '''
+        xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
+
+        # How many new beliefs to add
+        generation_count = min(belief_set.belief_array.shape[0], max_generation)
+
+        # Generation of the new beliefs at random
+        new_beliefs = xp.random.random((generation_count, model.state_count))
+        new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
+
+        # Combining with the initial belief set
+        new_belief_set = np.vstack((belief_set.belief_array, new_beliefs))
+
+        return BeliefSet(model, new_belief_set)
+
     
     def expand_ssra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -> BeliefSet:
         '''
@@ -1344,6 +1371,7 @@ class PBVI_Solver(Solver):
     def expand(self, model:Model, belief_set:BeliefSet, max_generation:int, **function_specific_parameters) -> BeliefSet:
         '''
         Central method to call one of the functions for a particular expansion strategy:
+            - Random selction (RA)
             - Stochastic Simulation with Random Action (ssra)
             - Stochastic Simulation with Greedy Action (ssga)
             - Stochastic Simulation with Exploratory Action (ssea)
@@ -1365,6 +1393,9 @@ class PBVI_Solver(Solver):
         belief_set_new : BeliefSet
             The belief set the expansion function returns. 
         '''
+        if self.expand_function in 'expand_ssra':
+            return self.expand_ra(model=model, belief_set=belief_set, max_generation=max_generation)
+
         if self.expand_function in 'expand_ssra':
             return self.expand_ssra(model=model, belief_set=belief_set, max_generation=max_generation)
         
