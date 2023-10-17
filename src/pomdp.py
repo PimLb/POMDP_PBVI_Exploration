@@ -1685,7 +1685,7 @@ class PBVI_Solver(Solver):
                     solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
                 
                 # Compute the change between value functions
-                max_change = self.compute_change(value_function, old_value_function)
+                max_change = self.compute_change(value_function, old_value_function, belief_set)
 
                 # History tracking
                 solver_history.add_backup_step(backup_time, max_change, value_function)
