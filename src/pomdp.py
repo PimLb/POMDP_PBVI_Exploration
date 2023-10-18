@@ -374,6 +374,23 @@ class Belief:
         return new_belief
     
 
+    def generate_successors(self) -> list['Belief']:
+        '''
+        Function to generate a set of belief that can be reached for each actions and observations available in the model.
+
+        Returns
+        -------
+        successor_beliefs : list[Belief]
+            The successor beliefs.
+        '''
+        successor_beliefs = []
+        for a in self.model.actions:
+            for o in self.model.observations:
+                successor_beliefs.append(self.update(a,o))
+
+        return successor_beliefs
+
+
     def random_state(self) -> int:
         '''
         Returns a random state of the model weighted by the belief probabily.
@@ -460,11 +477,18 @@ class BeliefSet:
                 self.is_on_gpu = True
         else:
             assert beliefs.shape[1] == model.state_count, f"Belief array provided doesnt have the right shape (expected (-,{model.state_count}), received {beliefs.shape})"
-            self._belief_array = beliefs
+            
+            self._belief_list = []
+            for belief_values in beliefs:
+                self._belief_list.append(Belief(model, belief_values))
 
             # Check if array is on gpu
             if gpu_support and cp.get_array_module(beliefs) == cp:
                 self.is_on_gpu = True
+
+        # # Deduplication
+        # self._uniqueness_dict = {belief.values.tobytes(): belief for belief in self._belief_list}
+        # self._belief_list = list(self._uniqueness_dict.values())
 
 
     @property
@@ -487,6 +511,21 @@ class BeliefSet:
         if self._belief_list is None:
             self._belief_list = [Belief(self.model, belief_vector) for belief_vector in self._belief_array]
         return self._belief_list
+    
+
+    def generate_all_successors(self) -> 'BeliefSet':
+        '''
+        Function to generate the successors beliefs of all the beliefs in the belief set.
+
+        Returns
+        -------
+        all_successors : BeliefSet
+            All successors of all beliefs in the belief set.
+        '''
+        all_successors = []
+        for belief in self.belief_list:
+            all_successors.extend(belief.generate_successors())
+        return BeliefSet(self.model, all_successors)
     
 
     def __len__(self) -> int:
@@ -1137,6 +1176,11 @@ class PBVI_Solver(Solver):
         flatten_offset = (simulations[:,None] * model.state_count)
         flat_shape = (n, (model.state_count * model.reachable_state_count))
 
+        # 2D bincount for belief set update
+        def bincount2D_vectorized(a, w):    
+            a_offs = a + flatten_offset
+            return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape(-1,model.state_count)
+
         # Results
         discount = self.gamma
         rewards = []
@@ -1167,10 +1211,6 @@ class PBVI_Solver(Solver):
             observations = xp.sum(xp.random.random(n)[:,None] > xp.cumsum(observation_probabilities[:,:-1], axis=1), axis=1)
 
             # Belief set update
-            def bincount2D_vectorized(a, w):    
-                a_offs = a + flatten_offset
-                return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape(-1,model.state_count)
-
             reachable_probabilities = (model.reachable_transitional_observation_table[:,best_actions,observations,:] * beliefs.T[:,:,None])
             new_beliefs = bincount2D_vectorized(a=reachable_state_per_actions.swapaxes(0,1).reshape(flat_shape),
                                                 w=reachable_probabilities.swapaxes(0,1).reshape(flat_shape))
@@ -1333,7 +1373,10 @@ class PBVI_Solver(Solver):
         new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
 
-        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
+        # Random previous beliefs
+        rand_ind = np.random.choice(np.arange(old_shape[0]), to_generate, replace=False)
+
+        for i, belief_vector in enumerate(belief_set.belief_array[rand_ind]):
             b = Belief(model, belief_vector)
             s = b.random_state()
             a = random.choice(model.actions)
@@ -1380,8 +1423,11 @@ class PBVI_Solver(Solver):
 
         new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
-                
-        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
+
+        # Random previous beliefs
+        rand_ind = np.random.choice(np.arange(old_shape[0]), to_generate, replace=False)
+
+        for i, belief_vector in enumerate(belief_set.belief_array[rand_ind]):
             b = Belief(model, belief_vector)
             s = b.random_state()
             
@@ -1473,6 +1519,14 @@ class PBVI_Solver(Solver):
             Union of the belief_set and the expansions of the beliefs in the belief_set
         '''
         print('Not implemented')
+        xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
+
+        old_shape = belief_set.belief_array.shape
+        to_generate = min(max_generation, old_shape[0])
+
+        new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
+        new_belief_array[:old_shape[0]] = belief_set.belief_array
+
         return []
 
 
