@@ -30,10 +30,8 @@
 from inspect import signature
 from matplotlib import animation, colors, patches
 from matplotlib import pyplot as plt
-from scipy.optimize import milp, LinearConstraint
-from scipy.spatial.distance import cdist
 from tqdm.auto import trange
-from typing import Self, Union, Tuple
+from typing import Union, Tuple
 
 import copy
 import json
@@ -48,6 +46,13 @@ try:
     gpu_support = True
 except:
     print(&#39;[Warning] Cupy could not be loaded: GPU support is not available.&#39;)
+
+ilp_support = False
+try:
+    from scipy.optimize import milp, LinearConstraint
+    ilp_support = True
+except:
+    print(&#39;[Warning] milp library not available, LP solvers will be disabled.&#39;)
 
 
 COLOR_LIST = [{
@@ -503,7 +508,7 @@ class Model:
 
 
     @classmethod
-    def load_from_json(cls, file:str) -&gt; Self:
+    def load_from_json(cls, file:str) -&gt; &#39;Model&#39;:
         &#39;&#39;&#39;
         Function to load a MDP model from a json file. The json structure must contain the same items as in the constructor of this class.
 
@@ -531,7 +536,7 @@ class Model:
 
 
     @property
-    def gpu_model(self) -&gt; Self:
+    def gpu_model(self) -&gt; &#39;Model&#39;:
         &#39;&#39;&#39;
         The same model but on the GPU instead of the CPU. If already on the GPU, the current model object is returned.
         &#39;&#39;&#39;
@@ -561,7 +566,7 @@ class Model:
 
 
     @property
-    def cpu_model(self) -&gt; Self:
+    def cpu_model(self) -&gt; &#39;Model&#39;:
         &#39;&#39;&#39;
         The same model but on the CPU instead of the GPU. If already on the CPU, the current model object is returned.
         &#39;&#39;&#39;
@@ -715,7 +720,7 @@ class ValueFunction:
         return len(self._vector_list) if self._vector_list is not None else self._vector_array.shape[0]
     
 
-    def __add__(self, other_value_function:Self) -&gt; Self:
+    def __add__(self, other_value_function:&#39;Model&#39;) -&gt; &#39;Model&#39;:
         # combined_dict = {**self._uniqueness_dict, **other_value_function._uniqueness_dict}
         combined_dict = {}
         combined_dict.update(self._uniqueness_dict)
@@ -760,7 +765,7 @@ class ValueFunction:
             self._vector_list.append(alpha_vector)
 
 
-    def extend(self, other_value_function:Self) -&gt; None:
+    def extend(self, other_value_function:&#39;Model&#39;) -&gt; None:
         &#39;&#39;&#39;
         Function to add another value function is place.
         Effectively, it performs the union of the two sets of alpha vectors.
@@ -779,7 +784,7 @@ class ValueFunction:
         self._pruning_level = 1
 
 
-    def to_gpu(self) -&gt; Self:
+    def to_gpu(self) -&gt; &#39;Model&#39;:
         &#39;&#39;&#39;
         Function returning an equivalent value function object with the arrays stored on GPU instead of CPU.
 
@@ -805,7 +810,7 @@ class ValueFunction:
         return gpu_value_function
     
 
-    def to_cpu(self) -&gt; Self:
+    def to_cpu(self) -&gt; &#39;Model&#39;:
         &#39;&#39;&#39;
         Function returning an equivalent value function object with the arrays stored on CPU instead of GPU.
 
@@ -867,6 +872,8 @@ class ValueFunction:
 
         # Level 3 pruning: LP to check for more complex domination
         if level &gt;= 3:
+            assert ilp_support, &#34;ILP support not enabled...&#34;
+
             pruned_alpha_set = pruned_alpha_set.to_cpu()
 
             alpha_set = pruned_alpha_set.alpha_vector_array
@@ -940,7 +947,7 @@ class ValueFunction:
 
 
     @classmethod
-    def load_from_file(cls, file:str, model:Model) -&gt; Self:
+    def load_from_file(cls, file:str, model:Model) -&gt; &#39;Model&#39;:
         &#39;&#39;&#39;
         Function to load the value function from a csv file.
 
@@ -1019,9 +1026,13 @@ class ValueFunction:
         x = x.reshape((1,x.shape[0])).repeat(m.shape[0],axis=0)
         y = (m*x) + alpha_vects[:,0].reshape(m.shape[0],1)
 
-        ax1 = ax[0] if belief_set is not None else ax
+        ax0 = ax[0] if belief_set is not None else ax
         for i, alpha in enumerate(self.alpha_vector_list):
-            ax1.plot(x[i,:], y[i,:], color=COLOR_LIST[alpha.action][&#39;id&#39;]) # type: ignore
+            ax0.plot(x[i,:], y[i,:], color=COLOR_LIST[alpha.action][&#39;id&#39;]) # type: ignore
+
+        # Set title
+        title = &#39;Value function&#39; + (&#39;&#39; if belief_set is None else &#39; and explored belief points&#39;)
+        ax0.set_title(title)
 
         # X-axis setting
         ticks = [0,0.25,0.5,0.75,1]
@@ -1029,11 +1040,11 @@ class ValueFunction:
         x_ticks[0] = self.model.state_labels[0]
         x_ticks[-1] = self.model.state_labels[1]
 
-        ax1.set_xticks(ticks, x_ticks) # type: ignore
+        ax0.set_xticks(ticks, x_ticks) # type: ignore
 
         # Action legend
         proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[a][&#39;id&#39;]) for a in self.model.actions]
-        ax1.legend(proxy, self.model.action_labels) # type: ignore
+        ax0.legend(proxy, self.model.action_labels, title=&#39;Actions&#39;) # type: ignore
 
         # Belief plotting
         if belief_set is not None:
@@ -1041,6 +1052,12 @@ class ValueFunction:
             ax[1].scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c=&#39;red&#39;)
             ax[1].get_yaxis().set_visible(False)
             ax[1].axhline(0, color=&#39;black&#39;)
+            ax[1].set_xlabel(&#39;Belief space&#39;)
+        else:
+            ax0.set_xlabel(&#39;Belief space&#39;)
+        
+        # Axis labels
+        ax0.set_ylabel(&#39;V(b)&#39;)
 
 
     def _plot_3D(self, size, belief_set=None):
@@ -1095,7 +1112,7 @@ class ValueFunction:
 
         for alpha in self.alpha_vector_list:
 
-            z = get_alpha_vect_z(xx, yy, alpha)
+            z = get_alpha_vect_z(xx, yy, alpha.values)
 
             # Action array update
             new_a_mask = np.argmax(np.array([max_z, z]), axis=0)
@@ -1104,7 +1121,7 @@ class ValueFunction:
             
             plane[new_a_mask == 1] = random.randrange(100)
             
-            alpha_gradient = get_plane_gradient(alpha)
+            alpha_gradient = get_plane_gradient(alpha.values)
             gradients[new_a_mask == 1] = alpha_gradient
 
             # Max z update
@@ -1120,7 +1137,7 @@ class ValueFunction:
 
         belief_points = None
         if belief_set is not None:
-            belief_points = np.array(belief_set)[:,1:]
+            belief_points = belief_set.belief_array[:,1:]
                     
         fig, ((ax1, ax2),(ax3,ax4)) = plt.subplots(2, 2, figsize=(size*4,size*3.5), sharex=True, sharey=True)
 
@@ -1155,7 +1172,7 @@ class ValueFunction:
         ax4.set_title(&#34;Action policy&#34;)
         ax4.contourf(x, y, best_a, 1, colors=[c[&#39;id&#39;] for c in COLOR_LIST])
         proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[int(a)][&#39;id&#39;]) for a in self.model.actions]
-        ax4.legend(proxy, self.model.action_labels)
+        ax4.legend(proxy, self.model.action_labels, title=&#39;Actions&#39;)
 
         if belief_points is not None:
             for ax in [ax1,ax2,ax3,ax4]:
@@ -1184,7 +1201,7 @@ class ValueFunction:
         ax2.set_title(&#39;Action policy&#39;)
         ax2.imshow(best_action_colors)
         p = [ patches.Patch(color=COLOR_LIST[int(i)][&#39;id&#39;], label=str(self.model.action_labels[int(i)])) for i in self.model.actions]
-        ax2.legend(handles=p, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
+        ax2.legend(handles=p, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0., title=&#39;Actions&#39;)
         ax2.set_xticks(x_ticks)
         ax2.set_yticks(y_ticks)
 
@@ -1303,7 +1320,11 @@ class SolverHistory:
         Function to plot the value function changes over the solving process.
         &#39;&#39;&#39;
         assert self.tracking_level &gt;= 1, &#34;To plot the change of the value function over time, use tracking level 1 or higher.&#34;
+
+        plt.title(&#39;Value function change over time&#39;)
         plt.plot(np.arange(len(self.value_function_changes)), self.value_function_changes)
+        plt.xlabel(&#39;Iteration&#39;)
+        plt.ylabel(&#39;Value function change&#39;)
         plt.show()
 
 
@@ -1450,11 +1471,34 @@ class RewardSet(list):
         self.extend(items)
 
 
+    def get_total_discounted_reward(self, gamma:float) -&gt; float:
+        &#39;&#39;&#39;
+        Function computing the discounted rewards of the set of rewards in the set.
+        The rewards at discounted by gamma^step. Then the discounted rewards are summed together.
+
+        Parameters
+        ----------
+        gamma : float
+            The discount to use per step.
+
+        Returns
+        -------
+        total_discounted_reward : float
+            The sum of discounted reward.
+        &#39;&#39;&#39;
+        steps_count = len(self)
+        rewards = np.array(self)
+        discounts = gamma ** np.arange(steps_count)
+
+        total_discounted_reward = np.dot(rewards, discounts)
+        return total_discounted_reward
+
+
     def plot(self,
              type:str=&#39;total&#39;,
              size:int=5,
              max_reward=None,
-             compare_with:Union[Self, list[Self]]=[],
+             compare_with:Union[&#39;RewardSet&#39;, list[&#39;RewardSet&#39;]]=[],
              graph_names:list[str]=[]
              ) -&gt; None:
         &#39;&#39;&#39;
@@ -1517,6 +1561,10 @@ class RewardSet(list):
 
 
     def _plot_total(self, reward_sets, names, max_reward=None):
+        # Plot setup
+        plt.xlabel(&#39;Iteration&#39;)
+        plt.ylabel(&#39;Reward Total&#39;)
+
         x = np.arange(len(reward_sets[0]))
 
         # If given plot upper bound
@@ -1531,6 +1579,10 @@ class RewardSet(list):
     
 
     def _plot_moving_average(self, reward_sets, names, max_reward=None):
+        # Plot setup
+        plt.xlabel(&#39;Iteration&#39;)
+        plt.ylabel(&#39;Reward Average&#39;)
+        
         x = np.arange(len(reward_sets[0]))
 
         # If given plot upper bound
@@ -1545,6 +1597,10 @@ class RewardSet(list):
 
 
     def _plot_histogram(self, reward_sets, names, max_rewards=None):
+        # Plot setup
+        plt.xlabel(&#39;Reward&#39;)
+        plt.ylabel(&#39;Count&#39;)
+
         max_unique = -np.inf
         for rh in reward_sets:
             unique_count = np.unique([r for r in rh]).shape[0]
@@ -1587,7 +1643,6 @@ class SimulationHistory:
     rewards: RewardSet
         The set of rewards received by the agent throughout the simulation process.
     &#39;&#39;&#39;
-
     def __init__(self, model:Model, start_state:int):
         self.model = model
 
@@ -1616,6 +1671,10 @@ class SimulationHistory:
         self.grid_point_sequence.append([i[0] for i in np.where(self.model.state_grid == next_state)])
     
 
+    def __len__(self):
+        return len(self.states)
+
+
     def plot_simulation_steps(self, size:int=5):
         &#39;&#39;&#39;
         Plotting the path that was taken during the simulation.
@@ -1626,12 +1685,17 @@ class SimulationHistory:
             The scale of the plot.
         &#39;&#39;&#39;
         plt.figure(figsize=(size,size))
+        plt.title(&#39;Simulation steps of the agent&#39;)
 
         # Ticks
         dimensions = self.model.state_grid.shape
-        plt.xticks([i for i in range(dimensions[1])])
-        plt.yticks([i for i in range(dimensions[0])])
+        x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] &lt; 10 else int(dimensions[1] / 10)))
+        y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] &lt; 5 else int(dimensions[0] / 5)))
+        
+        plt.xticks(x_ticks)
+        plt.yticks(y_ticks)
 
+        # Inverting y axis
         ax = plt.gca()
         ax.invert_yaxis()
 
@@ -1743,6 +1807,8 @@ class Simulation:
         state : int
             The state the agent will start in.
         &#39;&#39;&#39;
+        xp = np if not self.model.is_on_gpu else cp
+
         if start_state is None:
             self.agent_state = int(np.random.choice(a=self.model.states, size=1, p=self.model.start_probabilities)[0])
         else:
@@ -1799,8 +1865,10 @@ class Agent:
 
     Parameters
     ----------
-    model: mdp.Model
+    model : mdp.Model
         The model in which the agent can run.
+    value_function : ValueFunction, optional
+        A value function the agent can use to play a simulation, in the case the model has been solved beforehand.
     
     Attributes
     ----------
@@ -1808,11 +1876,9 @@ class Agent:
     value_function : ValueFunction
         The value function the agent has come up to after training.
     &#39;&#39;&#39;
-    def __init__(self, model:Model) -&gt; None:
-        super().__init__()
-
+    def __init__(self, model:Model, value_function:Union[ValueFunction,None]=None) -&gt; None:
         self.model = model
-        self.value_function = None
+        self.value_function = value_function
 
 
     def train(self, solver:Union[Solver,None]=None) -&gt; SolverHistory:
@@ -1853,8 +1919,11 @@ class Agent:
         &#39;&#39;&#39;
         assert self.value_function is not None, &#34;No value function, training probably has to be run...&#34;
 
-        best_vector = np.argmax(self.value_function.alpha_vector_array[:,state])
-        best_action = self.value_function.actions[best_vector]
+        # Check if on GPU
+        xp = np if not self.value_function.is_on_gpu else cp
+
+        best_vector = cp.argmax(self.value_function.alpha_vector_array[:,state])
+        best_action = int(self.value_function.actions[best_vector])
 
         return best_action
 
@@ -1887,9 +1956,16 @@ class Agent:
         history : SimulationHistory
             A step by step history of the simulation with additional functionality to plot rewards for example.
         &#39;&#39;&#39;
+        assert self.value_function is not None, &#34;No value function, training probably has to be run...&#34;
+
+        # GPU setup
+        self.model = self.model.gpu_model if self.value_function.is_on_gpu else self.model.cpu_model
+
+        # Getting a simulator or generating a default one.
         if simulator is None:
             simulator = Simulation(self.model)
 
+        # Initialization of the simulator
         s = simulator.initialize_simulation(start_state=start_state)
 
         history = SimulationHistory(self.model, s)
@@ -1930,7 +2006,7 @@ class Agent:
                           start_state:int=-1,
                           print_progress:bool=True,
                           print_stats:bool=True
-                          ) -&gt; RewardSet:
+                          ) -&gt; Tuple[RewardSet, list[SimulationHistory]]:
         &#39;&#39;&#39;
         Function to run a set of simulations in a row.
         This is useful when the simulation has a &#39;done&#39; condition.
@@ -1955,18 +2031,25 @@ class Agent:
         -------
         all_final_rewards : RewardSet
             A list of the final rewards after each simulation.
+        all_histories : list[SimulationHistory]
+            A list the simulation histories gathered at each simulation.
         &#39;&#39;&#39;
         if simulator is None:
             simulator = Simulation(self.model)
 
         sim_start_ts = datetime.now()
 
+        all_histories = []
         all_final_rewards = RewardSet()
+        all_discounted_rewards = []
         all_sim_length = []
         for _ in (trange(n) if print_progress else range(n)):
             sim_history = self.simulate(simulator, max_steps, start_state, False, False)
+
+            all_histories.append(sim_history)
             all_final_rewards.append(sum(sim_history.rewards))
-            all_sim_length.append(len(sim_history.states))
+            all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(0.99)) # TODO: make it variable
+            all_sim_length.append(len(sim_history))
 
         if print_stats:
             sim_end_ts = datetime.now()
@@ -1974,8 +2057,9 @@ class Agent:
             print(f&#39;\t- Average runtime (s): {((sim_end_ts - sim_start_ts).total_seconds() / n)}&#39;)
             print(f&#39;\t- Average step count: {(sum(all_sim_length) / n)}&#39;)
             print(f&#39;\t- Average total rewards: {(sum(all_final_rewards) / n)}&#39;)
+            print(f&#39;\t- Average discounted rewards (ADR): {(sum(all_discounted_rewards) / n)}&#39;)
         
-        return all_final_rewards</code></pre>
+        return all_final_rewards, all_histories</code></pre>
 </details>
 </section>
 <section>
@@ -2018,7 +2102,7 @@ class Agent:
 <dl>
 <dt id="src.mdp.Agent"><code class="flex name class">
 <span>class <span class="ident">Agent</span></span>
-<span>(</span><span>model: <a title="src.mdp.Model" href="#src.mdp.Model">Model</a>)</span>
+<span>(</span><span>model: <a title="src.mdp.Model" href="#src.mdp.Model">Model</a>, value_function: Optional[<a title="src.mdp.ValueFunction" href="#src.mdp.ValueFunction">ValueFunction</a>] = None)</span>
 </code></dt>
 <dd>
 <div class="desc"><p>The class of an Agent running on a MDP model.
@@ -2030,6 +2114,8 @@ either for a given amount of steps or until a single reward is received.</p>
 <dl>
 <dt><strong><code>model</code></strong> :&ensp;<code>mdp.Model</code></dt>
 <dd>The model in which the agent can run.</dd>
+<dt><strong><code>value_function</code></strong> :&ensp;<code><a title="src.mdp.ValueFunction" href="#src.mdp.ValueFunction">ValueFunction</a></code>, optional</dt>
+<dd>A value function the agent can use to play a simulation, in the case the model has been solved beforehand.</dd>
 </dl>
 <h2 id="attributes">Attributes</h2>
 <dl>
@@ -2053,8 +2139,10 @@ either for a given amount of steps or until a single reward is received.</p>
 
     Parameters
     ----------
-    model: mdp.Model
+    model : mdp.Model
         The model in which the agent can run.
+    value_function : ValueFunction, optional
+        A value function the agent can use to play a simulation, in the case the model has been solved beforehand.
     
     Attributes
     ----------
@@ -2062,11 +2150,9 @@ either for a given amount of steps or until a single reward is received.</p>
     value_function : ValueFunction
         The value function the agent has come up to after training.
     &#39;&#39;&#39;
-    def __init__(self, model:Model) -&gt; None:
-        super().__init__()
-
+    def __init__(self, model:Model, value_function:Union[ValueFunction,None]=None) -&gt; None:
         self.model = model
-        self.value_function = None
+        self.value_function = value_function
 
 
     def train(self, solver:Union[Solver,None]=None) -&gt; SolverHistory:
@@ -2107,8 +2193,11 @@ either for a given amount of steps or until a single reward is received.</p>
         &#39;&#39;&#39;
         assert self.value_function is not None, &#34;No value function, training probably has to be run...&#34;
 
-        best_vector = np.argmax(self.value_function.alpha_vector_array[:,state])
-        best_action = self.value_function.actions[best_vector]
+        # Check if on GPU
+        xp = np if not self.value_function.is_on_gpu else cp
+
+        best_vector = cp.argmax(self.value_function.alpha_vector_array[:,state])
+        best_action = int(self.value_function.actions[best_vector])
 
         return best_action
 
@@ -2141,9 +2230,16 @@ either for a given amount of steps or until a single reward is received.</p>
         history : SimulationHistory
             A step by step history of the simulation with additional functionality to plot rewards for example.
         &#39;&#39;&#39;
+        assert self.value_function is not None, &#34;No value function, training probably has to be run...&#34;
+
+        # GPU setup
+        self.model = self.model.gpu_model if self.value_function.is_on_gpu else self.model.cpu_model
+
+        # Getting a simulator or generating a default one.
         if simulator is None:
             simulator = Simulation(self.model)
 
+        # Initialization of the simulator
         s = simulator.initialize_simulation(start_state=start_state)
 
         history = SimulationHistory(self.model, s)
@@ -2184,7 +2280,7 @@ either for a given amount of steps or until a single reward is received.</p>
                           start_state:int=-1,
                           print_progress:bool=True,
                           print_stats:bool=True
-                          ) -&gt; RewardSet:
+                          ) -&gt; Tuple[RewardSet, list[SimulationHistory]]:
         &#39;&#39;&#39;
         Function to run a set of simulations in a row.
         This is useful when the simulation has a &#39;done&#39; condition.
@@ -2209,18 +2305,25 @@ either for a given amount of steps or until a single reward is received.</p>
         -------
         all_final_rewards : RewardSet
             A list of the final rewards after each simulation.
+        all_histories : list[SimulationHistory]
+            A list the simulation histories gathered at each simulation.
         &#39;&#39;&#39;
         if simulator is None:
             simulator = Simulation(self.model)
 
         sim_start_ts = datetime.now()
 
+        all_histories = []
         all_final_rewards = RewardSet()
+        all_discounted_rewards = []
         all_sim_length = []
         for _ in (trange(n) if print_progress else range(n)):
             sim_history = self.simulate(simulator, max_steps, start_state, False, False)
+
+            all_histories.append(sim_history)
             all_final_rewards.append(sum(sim_history.rewards))
-            all_sim_length.append(len(sim_history.states))
+            all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(0.99)) # TODO: make it variable
+            all_sim_length.append(len(sim_history))
 
         if print_stats:
             sim_end_ts = datetime.now()
@@ -2228,8 +2331,9 @@ either for a given amount of steps or until a single reward is received.</p>
             print(f&#39;\t- Average runtime (s): {((sim_end_ts - sim_start_ts).total_seconds() / n)}&#39;)
             print(f&#39;\t- Average step count: {(sum(all_sim_length) / n)}&#39;)
             print(f&#39;\t- Average total rewards: {(sum(all_final_rewards) / n)}&#39;)
+            print(f&#39;\t- Average discounted rewards (ADR): {(sum(all_discounted_rewards) / n)}&#39;)
         
-        return all_final_rewards</code></pre>
+        return all_final_rewards, all_histories</code></pre>
 </details>
 <h3>Methods</h3>
 <dl>
@@ -2268,14 +2372,17 @@ either for a given amount of steps or until a single reward is received.</p>
     &#39;&#39;&#39;
     assert self.value_function is not None, &#34;No value function, training probably has to be run...&#34;
 
-    best_vector = np.argmax(self.value_function.alpha_vector_array[:,state])
-    best_action = self.value_function.actions[best_vector]
+    # Check if on GPU
+    xp = np if not self.value_function.is_on_gpu else cp
+
+    best_vector = cp.argmax(self.value_function.alpha_vector_array[:,state])
+    best_action = int(self.value_function.actions[best_vector])
 
     return best_action</code></pre>
 </details>
 </dd>
 <dt id="src.mdp.Agent.run_n_simulations"><code class="name flex">
-<span>def <span class="ident">run_n_simulations</span></span>(<span>self, simulator: Optional[<a title="src.mdp.Simulation" href="#src.mdp.Simulation">Simulation</a>] = None, n: int = 1000, max_steps: int = 1000, start_state: int = -1, print_progress: bool = True, print_stats: bool = True) ‑> <a title="src.mdp.RewardSet" href="#src.mdp.RewardSet">RewardSet</a></span>
+<span>def <span class="ident">run_n_simulations</span></span>(<span>self, simulator: Optional[<a title="src.mdp.Simulation" href="#src.mdp.Simulation">Simulation</a>] = None, n: int = 1000, max_steps: int = 1000, start_state: int = -1, print_progress: bool = True, print_stats: bool = True) ‑> Tuple[<a title="src.mdp.RewardSet" href="#src.mdp.RewardSet">RewardSet</a>, list[<a title="src.mdp.SimulationHistory" href="#src.mdp.SimulationHistory">SimulationHistory</a>]]</span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function to run a set of simulations in a row.
@@ -2301,6 +2408,8 @@ state the agent should start in, if not provided, will be set at random based on
 <dl>
 <dt><strong><code>all_final_rewards</code></strong> :&ensp;<code><a title="src.mdp.RewardSet" href="#src.mdp.RewardSet">RewardSet</a></code></dt>
 <dd>A list of the final rewards after each simulation.</dd>
+<dt><strong><code>all_histories</code></strong> :&ensp;<code>list[<a title="src.mdp.SimulationHistory" href="#src.mdp.SimulationHistory">SimulationHistory</a>]</code></dt>
+<dd>A list the simulation histories gathered at each simulation.</dd>
 </dl></div>
 <details class="source">
 <summary>
@@ -2313,7 +2422,7 @@ state the agent should start in, if not provided, will be set at random based on
                       start_state:int=-1,
                       print_progress:bool=True,
                       print_stats:bool=True
-                      ) -&gt; RewardSet:
+                      ) -&gt; Tuple[RewardSet, list[SimulationHistory]]:
     &#39;&#39;&#39;
     Function to run a set of simulations in a row.
     This is useful when the simulation has a &#39;done&#39; condition.
@@ -2338,18 +2447,25 @@ state the agent should start in, if not provided, will be set at random based on
     -------
     all_final_rewards : RewardSet
         A list of the final rewards after each simulation.
+    all_histories : list[SimulationHistory]
+        A list the simulation histories gathered at each simulation.
     &#39;&#39;&#39;
     if simulator is None:
         simulator = Simulation(self.model)
 
     sim_start_ts = datetime.now()
 
+    all_histories = []
     all_final_rewards = RewardSet()
+    all_discounted_rewards = []
     all_sim_length = []
     for _ in (trange(n) if print_progress else range(n)):
         sim_history = self.simulate(simulator, max_steps, start_state, False, False)
+
+        all_histories.append(sim_history)
         all_final_rewards.append(sum(sim_history.rewards))
-        all_sim_length.append(len(sim_history.states))
+        all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(0.99)) # TODO: make it variable
+        all_sim_length.append(len(sim_history))
 
     if print_stats:
         sim_end_ts = datetime.now()
@@ -2357,8 +2473,9 @@ state the agent should start in, if not provided, will be set at random based on
         print(f&#39;\t- Average runtime (s): {((sim_end_ts - sim_start_ts).total_seconds() / n)}&#39;)
         print(f&#39;\t- Average step count: {(sum(all_sim_length) / n)}&#39;)
         print(f&#39;\t- Average total rewards: {(sum(all_final_rewards) / n)}&#39;)
+        print(f&#39;\t- Average discounted rewards (ADR): {(sum(all_discounted_rewards) / n)}&#39;)
     
-    return all_final_rewards</code></pre>
+    return all_final_rewards, all_histories</code></pre>
 </details>
 </dd>
 <dt id="src.mdp.Agent.simulate"><code class="name flex">
@@ -2416,9 +2533,16 @@ state the agent should start in, if not provided, will be set at random based on
     history : SimulationHistory
         A step by step history of the simulation with additional functionality to plot rewards for example.
     &#39;&#39;&#39;
+    assert self.value_function is not None, &#34;No value function, training probably has to be run...&#34;
+
+    # GPU setup
+    self.model = self.model.gpu_model if self.value_function.is_on_gpu else self.model.cpu_model
+
+    # Getting a simulator or generating a default one.
     if simulator is None:
         simulator = Simulation(self.model)
 
+    # Initialization of the simulator
     s = simulator.initialize_simulation(start_state=start_state)
 
     history = SimulationHistory(self.model, s)
@@ -3056,7 +3180,7 @@ It is made by taking the weighted average of immediate rewards and the transitio
 
 
     @classmethod
-    def load_from_json(cls, file:str) -&gt; Self:
+    def load_from_json(cls, file:str) -&gt; &#39;Model&#39;:
         &#39;&#39;&#39;
         Function to load a MDP model from a json file. The json structure must contain the same items as in the constructor of this class.
 
@@ -3084,7 +3208,7 @@ It is made by taking the weighted average of immediate rewards and the transitio
 
 
     @property
-    def gpu_model(self) -&gt; Self:
+    def gpu_model(self) -&gt; &#39;Model&#39;:
         &#39;&#39;&#39;
         The same model but on the GPU instead of the CPU. If already on the GPU, the current model object is returned.
         &#39;&#39;&#39;
@@ -3114,7 +3238,7 @@ It is made by taking the weighted average of immediate rewards and the transitio
 
 
     @property
-    def cpu_model(self) -&gt; Self:
+    def cpu_model(self) -&gt; &#39;Model&#39;:
         &#39;&#39;&#39;
         The same model but on the CPU instead of the GPU. If already on the CPU, the current model object is returned.
         &#39;&#39;&#39;
@@ -3149,7 +3273,7 @@ It is made by taking the weighted average of immediate rewards and the transitio
 <h3>Static methods</h3>
 <dl>
 <dt id="src.mdp.Model.load_from_json"><code class="name flex">
-<span>def <span class="ident">load_from_json</span></span>(<span>file: str) ‑> Self</span>
+<span>def <span class="ident">load_from_json</span></span>(<span>file: str) ‑> <a title="src.mdp.Model" href="#src.mdp.Model">Model</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function to load a MDP model from a json file. The json structure must contain the same items as in the constructor of this class.</p>
@@ -3168,7 +3292,7 @@ It is made by taking the weighted average of immediate rewards and the transitio
 <span>Expand source code</span>
 </summary>
 <pre><code class="python">@classmethod
-def load_from_json(cls, file:str) -&gt; Self:
+def load_from_json(cls, file:str) -&gt; &#39;Model&#39;:
     &#39;&#39;&#39;
     Function to load a MDP model from a json file. The json structure must contain the same items as in the constructor of this class.
 
@@ -3198,7 +3322,7 @@ def load_from_json(cls, file:str) -&gt; Self:
 </dl>
 <h3>Instance variables</h3>
 <dl>
-<dt id="src.mdp.Model.cpu_model"><code class="name">var <span class="ident">cpu_model</span> : Self</code></dt>
+<dt id="src.mdp.Model.cpu_model"><code class="name">var <span class="ident">cpu_model</span> : <a title="src.mdp.Model" href="#src.mdp.Model">Model</a></code></dt>
 <dd>
 <div class="desc"><p>The same model but on the CPU instead of the GPU. If already on the CPU, the current model object is returned.</p></div>
 <details class="source">
@@ -3206,7 +3330,7 @@ def load_from_json(cls, file:str) -&gt; Self:
 <span>Expand source code</span>
 </summary>
 <pre><code class="python">@property
-def cpu_model(self) -&gt; Self:
+def cpu_model(self) -&gt; &#39;Model&#39;:
     &#39;&#39;&#39;
     The same model but on the CPU instead of the GPU. If already on the CPU, the current model object is returned.
     &#39;&#39;&#39;
@@ -3235,7 +3359,7 @@ def cpu_model(self) -&gt; Self:
     return self._alt_model</code></pre>
 </details>
 </dd>
-<dt id="src.mdp.Model.gpu_model"><code class="name">var <span class="ident">gpu_model</span> : Self</code></dt>
+<dt id="src.mdp.Model.gpu_model"><code class="name">var <span class="ident">gpu_model</span> : <a title="src.mdp.Model" href="#src.mdp.Model">Model</a></code></dt>
 <dd>
 <div class="desc"><p>The same model but on the GPU instead of the CPU. If already on the GPU, the current model object is returned.</p></div>
 <details class="source">
@@ -3243,7 +3367,7 @@ def cpu_model(self) -&gt; Self:
 <span>Expand source code</span>
 </summary>
 <pre><code class="python">@property
-def gpu_model(self) -&gt; Self:
+def gpu_model(self) -&gt; &#39;Model&#39;:
     &#39;&#39;&#39;
     The same model but on the GPU instead of the CPU. If already on the GPU, the current model object is returned.
     &#39;&#39;&#39;
@@ -3460,11 +3584,34 @@ By default, the model will be saved in 'Models' directory in the current working
         self.extend(items)
 
 
+    def get_total_discounted_reward(self, gamma:float) -&gt; float:
+        &#39;&#39;&#39;
+        Function computing the discounted rewards of the set of rewards in the set.
+        The rewards at discounted by gamma^step. Then the discounted rewards are summed together.
+
+        Parameters
+        ----------
+        gamma : float
+            The discount to use per step.
+
+        Returns
+        -------
+        total_discounted_reward : float
+            The sum of discounted reward.
+        &#39;&#39;&#39;
+        steps_count = len(self)
+        rewards = np.array(self)
+        discounts = gamma ** np.arange(steps_count)
+
+        total_discounted_reward = np.dot(rewards, discounts)
+        return total_discounted_reward
+
+
     def plot(self,
              type:str=&#39;total&#39;,
              size:int=5,
              max_reward=None,
-             compare_with:Union[Self, list[Self]]=[],
+             compare_with:Union[&#39;RewardSet&#39;, list[&#39;RewardSet&#39;]]=[],
              graph_names:list[str]=[]
              ) -&gt; None:
         &#39;&#39;&#39;
@@ -3527,6 +3674,10 @@ By default, the model will be saved in 'Models' directory in the current working
 
 
     def _plot_total(self, reward_sets, names, max_reward=None):
+        # Plot setup
+        plt.xlabel(&#39;Iteration&#39;)
+        plt.ylabel(&#39;Reward Total&#39;)
+
         x = np.arange(len(reward_sets[0]))
 
         # If given plot upper bound
@@ -3541,6 +3692,10 @@ By default, the model will be saved in 'Models' directory in the current working
     
 
     def _plot_moving_average(self, reward_sets, names, max_reward=None):
+        # Plot setup
+        plt.xlabel(&#39;Iteration&#39;)
+        plt.ylabel(&#39;Reward Average&#39;)
+        
         x = np.arange(len(reward_sets[0]))
 
         # If given plot upper bound
@@ -3555,6 +3710,10 @@ By default, the model will be saved in 'Models' directory in the current working
 
 
     def _plot_histogram(self, reward_sets, names, max_rewards=None):
+        # Plot setup
+        plt.xlabel(&#39;Reward&#39;)
+        plt.ylabel(&#39;Count&#39;)
+
         max_unique = -np.inf
         for rh in reward_sets:
             unique_count = np.unique([r for r in rh]).shape[0]
@@ -3573,8 +3732,51 @@ By default, the model will be saved in 'Models' directory in the current working
 </ul>
 <h3>Methods</h3>
 <dl>
+<dt id="src.mdp.RewardSet.get_total_discounted_reward"><code class="name flex">
+<span>def <span class="ident">get_total_discounted_reward</span></span>(<span>self, gamma: float) ‑> float</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Function computing the discounted rewards of the set of rewards in the set.
+The rewards at discounted by gamma^step. Then the discounted rewards are summed together.</p>
+<h2 id="parameters">Parameters</h2>
+<dl>
+<dt><strong><code>gamma</code></strong> :&ensp;<code>float</code></dt>
+<dd>The discount to use per step.</dd>
+</dl>
+<h2 id="returns">Returns</h2>
+<dl>
+<dt><strong><code>total_discounted_reward</code></strong> :&ensp;<code>float</code></dt>
+<dd>The sum of discounted reward.</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def get_total_discounted_reward(self, gamma:float) -&gt; float:
+    &#39;&#39;&#39;
+    Function computing the discounted rewards of the set of rewards in the set.
+    The rewards at discounted by gamma^step. Then the discounted rewards are summed together.
+
+    Parameters
+    ----------
+    gamma : float
+        The discount to use per step.
+
+    Returns
+    -------
+    total_discounted_reward : float
+        The sum of discounted reward.
+    &#39;&#39;&#39;
+    steps_count = len(self)
+    rewards = np.array(self)
+    discounts = gamma ** np.arange(steps_count)
+
+    total_discounted_reward = np.dot(rewards, discounts)
+    return total_discounted_reward</code></pre>
+</details>
+</dd>
 <dt id="src.mdp.RewardSet.plot"><code class="name flex">
-<span>def <span class="ident">plot</span></span>(<span>self, type: str = 'total', size: int = 5, max_reward=None, compare_with: Union[Self, list[Self]] = [], graph_names: list[str] = []) ‑> None</span>
+<span>def <span class="ident">plot</span></span>(<span>self, type: str = 'total', size: int = 5, max_reward=None, compare_with: Union[ForwardRef('<a title="src.mdp.RewardSet" href="#src.mdp.RewardSet">RewardSet</a>'), list['<a title="src.mdp.RewardSet" href="#src.mdp.RewardSet">RewardSet</a>']] = [], graph_names: list[str] = []) ‑> None</span>
 </code></dt>
 <dd>
 <div class="desc"><p>The method to plot summaries of the rewards received over time.
@@ -3603,7 +3805,7 @@ The plots available:
          type:str=&#39;total&#39;,
          size:int=5,
          max_reward=None,
-         compare_with:Union[Self, list[Self]]=[],
+         compare_with:Union[&#39;RewardSet&#39;, list[&#39;RewardSet&#39;]]=[],
          graph_names:list[str]=[]
          ) -&gt; None:
     &#39;&#39;&#39;
@@ -3740,6 +3942,8 @@ Parameters</p>
         state : int
             The state the agent will start in.
         &#39;&#39;&#39;
+        xp = np if not self.model.is_on_gpu else cp
+
         if start_state is None:
             self.agent_state = int(np.random.choice(a=self.model.states, size=1, p=self.model.start_probabilities)[0])
         else:
@@ -3823,6 +4027,8 @@ Parameters</p>
     state : int
         The state the agent will start in.
     &#39;&#39;&#39;
+    xp = np if not self.model.is_on_gpu else cp
+
     if start_state is None:
         self.agent_state = int(np.random.choice(a=self.model.states, size=1, p=self.model.start_probabilities)[0])
     else:
@@ -3955,7 +4161,6 @@ Parameters</p>
     rewards: RewardSet
         The set of rewards received by the agent throughout the simulation process.
     &#39;&#39;&#39;
-
     def __init__(self, model:Model, start_state:int):
         self.model = model
 
@@ -3984,6 +4189,10 @@ Parameters</p>
         self.grid_point_sequence.append([i[0] for i in np.where(self.model.state_grid == next_state)])
     
 
+    def __len__(self):
+        return len(self.states)
+
+
     def plot_simulation_steps(self, size:int=5):
         &#39;&#39;&#39;
         Plotting the path that was taken during the simulation.
@@ -3994,12 +4203,17 @@ Parameters</p>
             The scale of the plot.
         &#39;&#39;&#39;
         plt.figure(figsize=(size,size))
+        plt.title(&#39;Simulation steps of the agent&#39;)
 
         # Ticks
         dimensions = self.model.state_grid.shape
-        plt.xticks([i for i in range(dimensions[1])])
-        plt.yticks([i for i in range(dimensions[0])])
+        x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] &lt; 10 else int(dimensions[1] / 10)))
+        y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] &lt; 5 else int(dimensions[0] / 5)))
+        
+        plt.xticks(x_ticks)
+        plt.yticks(y_ticks)
 
+        # Inverting y axis
         ax = plt.gca()
         ax.invert_yaxis()
 
@@ -4132,12 +4346,17 @@ Parameters</p>
         The scale of the plot.
     &#39;&#39;&#39;
     plt.figure(figsize=(size,size))
+    plt.title(&#39;Simulation steps of the agent&#39;)
 
     # Ticks
     dimensions = self.model.state_grid.shape
-    plt.xticks([i for i in range(dimensions[1])])
-    plt.yticks([i for i in range(dimensions[0])])
+    x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] &lt; 10 else int(dimensions[1] / 10)))
+    y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] &lt; 5 else int(dimensions[0] / 5)))
+    
+    plt.xticks(x_ticks)
+    plt.yticks(y_ticks)
 
+    # Inverting y axis
     ax = plt.gca()
     ax.invert_yaxis()
 
@@ -4405,7 +4624,11 @@ This class is not meant to be instanciated manually, it meant to be used when re
         Function to plot the value function changes over the solving process.
         &#39;&#39;&#39;
         assert self.tracking_level &gt;= 1, &#34;To plot the change of the value function over time, use tracking level 1 or higher.&#34;
+
+        plt.title(&#39;Value function change over time&#39;)
         plt.plot(np.arange(len(self.value_function_changes)), self.value_function_changes)
+        plt.xlabel(&#39;Iteration&#39;)
+        plt.ylabel(&#39;Value function change&#39;)
         plt.show()</code></pre>
 </details>
 <h3>Instance variables</h3>
@@ -4508,7 +4731,11 @@ def summary(self) -&gt; str:
     Function to plot the value function changes over the solving process.
     &#39;&#39;&#39;
     assert self.tracking_level &gt;= 1, &#34;To plot the change of the value function over time, use tracking level 1 or higher.&#34;
+
+    plt.title(&#39;Value function change over time&#39;)
     plt.plot(np.arange(len(self.value_function_changes)), self.value_function_changes)
+    plt.xlabel(&#39;Iteration&#39;)
+    plt.ylabel(&#39;Value function change&#39;)
     plt.show()</code></pre>
 </details>
 </dd>
@@ -4919,7 +5146,7 @@ If an initial value function is not provided, the value function will be initiat
         return len(self._vector_list) if self._vector_list is not None else self._vector_array.shape[0]
     
 
-    def __add__(self, other_value_function:Self) -&gt; Self:
+    def __add__(self, other_value_function:&#39;Model&#39;) -&gt; &#39;Model&#39;:
         # combined_dict = {**self._uniqueness_dict, **other_value_function._uniqueness_dict}
         combined_dict = {}
         combined_dict.update(self._uniqueness_dict)
@@ -4964,7 +5191,7 @@ If an initial value function is not provided, the value function will be initiat
             self._vector_list.append(alpha_vector)
 
 
-    def extend(self, other_value_function:Self) -&gt; None:
+    def extend(self, other_value_function:&#39;Model&#39;) -&gt; None:
         &#39;&#39;&#39;
         Function to add another value function is place.
         Effectively, it performs the union of the two sets of alpha vectors.
@@ -4983,7 +5210,7 @@ If an initial value function is not provided, the value function will be initiat
         self._pruning_level = 1
 
 
-    def to_gpu(self) -&gt; Self:
+    def to_gpu(self) -&gt; &#39;Model&#39;:
         &#39;&#39;&#39;
         Function returning an equivalent value function object with the arrays stored on GPU instead of CPU.
 
@@ -5009,7 +5236,7 @@ If an initial value function is not provided, the value function will be initiat
         return gpu_value_function
     
 
-    def to_cpu(self) -&gt; Self:
+    def to_cpu(self) -&gt; &#39;Model&#39;:
         &#39;&#39;&#39;
         Function returning an equivalent value function object with the arrays stored on CPU instead of GPU.
 
@@ -5071,6 +5298,8 @@ If an initial value function is not provided, the value function will be initiat
 
         # Level 3 pruning: LP to check for more complex domination
         if level &gt;= 3:
+            assert ilp_support, &#34;ILP support not enabled...&#34;
+
             pruned_alpha_set = pruned_alpha_set.to_cpu()
 
             alpha_set = pruned_alpha_set.alpha_vector_array
@@ -5144,7 +5373,7 @@ If an initial value function is not provided, the value function will be initiat
 
 
     @classmethod
-    def load_from_file(cls, file:str, model:Model) -&gt; Self:
+    def load_from_file(cls, file:str, model:Model) -&gt; &#39;Model&#39;:
         &#39;&#39;&#39;
         Function to load the value function from a csv file.
 
@@ -5223,9 +5452,13 @@ If an initial value function is not provided, the value function will be initiat
         x = x.reshape((1,x.shape[0])).repeat(m.shape[0],axis=0)
         y = (m*x) + alpha_vects[:,0].reshape(m.shape[0],1)
 
-        ax1 = ax[0] if belief_set is not None else ax
+        ax0 = ax[0] if belief_set is not None else ax
         for i, alpha in enumerate(self.alpha_vector_list):
-            ax1.plot(x[i,:], y[i,:], color=COLOR_LIST[alpha.action][&#39;id&#39;]) # type: ignore
+            ax0.plot(x[i,:], y[i,:], color=COLOR_LIST[alpha.action][&#39;id&#39;]) # type: ignore
+
+        # Set title
+        title = &#39;Value function&#39; + (&#39;&#39; if belief_set is None else &#39; and explored belief points&#39;)
+        ax0.set_title(title)
 
         # X-axis setting
         ticks = [0,0.25,0.5,0.75,1]
@@ -5233,11 +5466,11 @@ If an initial value function is not provided, the value function will be initiat
         x_ticks[0] = self.model.state_labels[0]
         x_ticks[-1] = self.model.state_labels[1]
 
-        ax1.set_xticks(ticks, x_ticks) # type: ignore
+        ax0.set_xticks(ticks, x_ticks) # type: ignore
 
         # Action legend
         proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[a][&#39;id&#39;]) for a in self.model.actions]
-        ax1.legend(proxy, self.model.action_labels) # type: ignore
+        ax0.legend(proxy, self.model.action_labels, title=&#39;Actions&#39;) # type: ignore
 
         # Belief plotting
         if belief_set is not None:
@@ -5245,6 +5478,12 @@ If an initial value function is not provided, the value function will be initiat
             ax[1].scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c=&#39;red&#39;)
             ax[1].get_yaxis().set_visible(False)
             ax[1].axhline(0, color=&#39;black&#39;)
+            ax[1].set_xlabel(&#39;Belief space&#39;)
+        else:
+            ax0.set_xlabel(&#39;Belief space&#39;)
+        
+        # Axis labels
+        ax0.set_ylabel(&#39;V(b)&#39;)
 
 
     def _plot_3D(self, size, belief_set=None):
@@ -5299,7 +5538,7 @@ If an initial value function is not provided, the value function will be initiat
 
         for alpha in self.alpha_vector_list:
 
-            z = get_alpha_vect_z(xx, yy, alpha)
+            z = get_alpha_vect_z(xx, yy, alpha.values)
 
             # Action array update
             new_a_mask = np.argmax(np.array([max_z, z]), axis=0)
@@ -5308,7 +5547,7 @@ If an initial value function is not provided, the value function will be initiat
             
             plane[new_a_mask == 1] = random.randrange(100)
             
-            alpha_gradient = get_plane_gradient(alpha)
+            alpha_gradient = get_plane_gradient(alpha.values)
             gradients[new_a_mask == 1] = alpha_gradient
 
             # Max z update
@@ -5324,7 +5563,7 @@ If an initial value function is not provided, the value function will be initiat
 
         belief_points = None
         if belief_set is not None:
-            belief_points = np.array(belief_set)[:,1:]
+            belief_points = belief_set.belief_array[:,1:]
                     
         fig, ((ax1, ax2),(ax3,ax4)) = plt.subplots(2, 2, figsize=(size*4,size*3.5), sharex=True, sharey=True)
 
@@ -5359,7 +5598,7 @@ If an initial value function is not provided, the value function will be initiat
         ax4.set_title(&#34;Action policy&#34;)
         ax4.contourf(x, y, best_a, 1, colors=[c[&#39;id&#39;] for c in COLOR_LIST])
         proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[int(a)][&#39;id&#39;]) for a in self.model.actions]
-        ax4.legend(proxy, self.model.action_labels)
+        ax4.legend(proxy, self.model.action_labels, title=&#39;Actions&#39;)
 
         if belief_points is not None:
             for ax in [ax1,ax2,ax3,ax4]:
@@ -5388,14 +5627,14 @@ If an initial value function is not provided, the value function will be initiat
         ax2.set_title(&#39;Action policy&#39;)
         ax2.imshow(best_action_colors)
         p = [ patches.Patch(color=COLOR_LIST[int(i)][&#39;id&#39;], label=str(self.model.action_labels[int(i)])) for i in self.model.actions]
-        ax2.legend(handles=p, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
+        ax2.legend(handles=p, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0., title=&#39;Actions&#39;)
         ax2.set_xticks(x_ticks)
         ax2.set_yticks(y_ticks)</code></pre>
 </details>
 <h3>Static methods</h3>
 <dl>
 <dt id="src.mdp.ValueFunction.load_from_file"><code class="name flex">
-<span>def <span class="ident">load_from_file</span></span>(<span>file: str, model: <a title="src.mdp.Model" href="#src.mdp.Model">Model</a>) ‑> Self</span>
+<span>def <span class="ident">load_from_file</span></span>(<span>file: str, model: <a title="src.mdp.Model" href="#src.mdp.Model">Model</a>) ‑> <a title="src.mdp.Model" href="#src.mdp.Model">Model</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function to load the value function from a csv file.</p>
@@ -5416,7 +5655,7 @@ If an initial value function is not provided, the value function will be initiat
 <span>Expand source code</span>
 </summary>
 <pre><code class="python">@classmethod
-def load_from_file(cls, file:str, model:Model) -&gt; Self:
+def load_from_file(cls, file:str, model:Model) -&gt; &#39;Model&#39;:
     &#39;&#39;&#39;
     Function to load the value function from a csv file.
 
@@ -5546,7 +5785,7 @@ def alpha_vector_list(self) -&gt; list[AlphaVector]:
 </details>
 </dd>
 <dt id="src.mdp.ValueFunction.extend"><code class="name flex">
-<span>def <span class="ident">extend</span></span>(<span>self, other_value_function: Self) ‑> None</span>
+<span>def <span class="ident">extend</span></span>(<span>self, other_value_function: <a title="src.mdp.Model" href="#src.mdp.Model">Model</a>) ‑> None</span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function to add another value function is place.
@@ -5560,7 +5799,7 @@ Effectively, it performs the union of the two sets of alpha vectors.</p>
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def extend(self, other_value_function:Self) -&gt; None:
+<pre><code class="python">def extend(self, other_value_function:&#39;Model&#39;) -&gt; None:
     &#39;&#39;&#39;
     Function to add another value function is place.
     Effectively, it performs the union of the two sets of alpha vectors.
@@ -5693,6 +5932,8 @@ The pruning is as thorough as the level:
 
     # Level 3 pruning: LP to check for more complex domination
     if level &gt;= 3:
+        assert ilp_support, &#34;ILP support not enabled...&#34;
+
         pruned_alpha_set = pruned_alpha_set.to_cpu()
 
         alpha_set = pruned_alpha_set.alpha_vector_array
@@ -5783,7 +6024,7 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
 </details>
 </dd>
 <dt id="src.mdp.ValueFunction.to_cpu"><code class="name flex">
-<span>def <span class="ident">to_cpu</span></span>(<span>self) ‑> Self</span>
+<span>def <span class="ident">to_cpu</span></span>(<span>self) ‑> <a title="src.mdp.Model" href="#src.mdp.Model">Model</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function returning an equivalent value function object with the arrays stored on CPU instead of GPU.</p>
@@ -5796,7 +6037,7 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def to_cpu(self) -&gt; Self:
+<pre><code class="python">def to_cpu(self) -&gt; &#39;Model&#39;:
     &#39;&#39;&#39;
     Function returning an equivalent value function object with the arrays stored on CPU instead of GPU.
 
@@ -5823,7 +6064,7 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
 </details>
 </dd>
 <dt id="src.mdp.ValueFunction.to_gpu"><code class="name flex">
-<span>def <span class="ident">to_gpu</span></span>(<span>self) ‑> Self</span>
+<span>def <span class="ident">to_gpu</span></span>(<span>self) ‑> <a title="src.mdp.Model" href="#src.mdp.Model">Model</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function returning an equivalent value function object with the arrays stored on GPU instead of CPU.</p>
@@ -5836,7 +6077,7 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def to_gpu(self) -&gt; Self:
+<pre><code class="python">def to_gpu(self) -&gt; &#39;Model&#39;:
     &#39;&#39;&#39;
     Function returning an equivalent value function object with the arrays stored on GPU instead of CPU.
 
@@ -5911,6 +6152,7 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
 <li>
 <h4><code><a title="src.mdp.RewardSet" href="#src.mdp.RewardSet">RewardSet</a></code></h4>
 <ul class="">
+<li><code><a title="src.mdp.RewardSet.get_total_discounted_reward" href="#src.mdp.RewardSet.get_total_discounted_reward">get_total_discounted_reward</a></code></li>
 <li><code><a title="src.mdp.RewardSet.plot" href="#src.mdp.RewardSet.plot">plot</a></code></li>
 </ul>
 </li>

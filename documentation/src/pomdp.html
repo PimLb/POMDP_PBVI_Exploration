@@ -28,12 +28,12 @@
 </summary>
 <pre><code class="python">from datetime import datetime
 from inspect import signature
-from matplotlib import animation, cm, colors, ticker
+from matplotlib import animation, cm, colors, ticker, patches
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 from tqdm.auto import trange
-from typing import Self, Tuple, Union
+from typing import Tuple, Union
 
 import copy
 import math
@@ -370,7 +370,7 @@ class Belief:
         return self._values
     
 
-    def update(self, a:int, o:int) -&gt; Self:
+    def update(self, a:int, o:int) -&gt; &#39;Belief&#39;:
         &#39;&#39;&#39;
         Returns a new belief based on this current belief, the most recent action (a) and the most recent observation (o).
 
@@ -401,6 +401,23 @@ class Belief:
 
         return new_belief
     
+
+    def generate_successors(self) -&gt; list[&#39;Belief&#39;]:
+        &#39;&#39;&#39;
+        Function to generate a set of belief that can be reached for each actions and observations available in the model.
+
+        Returns
+        -------
+        successor_beliefs : list[Belief]
+            The successor beliefs.
+        &#39;&#39;&#39;
+        successor_beliefs = []
+        for a in self.model.actions:
+            for o in self.model.observations:
+                successor_beliefs.append(self.update(a,o))
+
+        return successor_beliefs
+
 
     def random_state(self) -&gt; int:
         &#39;&#39;&#39;
@@ -436,6 +453,9 @@ class Belief:
 
         plt.xticks(x_ticks)
         plt.yticks(y_ticks)
+
+        # Title
+        plt.title(f&#39;Belief (probability distribution over states)&#39;)
 
         # Actual plot
         grid_values = self._values[self.model.state_grid]
@@ -485,11 +505,18 @@ class BeliefSet:
                 self.is_on_gpu = True
         else:
             assert beliefs.shape[1] == model.state_count, f&#34;Belief array provided doesnt have the right shape (expected (-,{model.state_count}), received {beliefs.shape})&#34;
-            self._belief_array = beliefs
+            
+            self._belief_list = []
+            for belief_values in beliefs:
+                self._belief_list.append(Belief(model, belief_values))
 
             # Check if array is on gpu
             if gpu_support and cp.get_array_module(beliefs) == cp:
                 self.is_on_gpu = True
+
+        # # Deduplication
+        # self._uniqueness_dict = {belief.values.tobytes(): belief for belief in self._belief_list}
+        # self._belief_list = list(self._uniqueness_dict.values())
 
 
     @property
@@ -514,11 +541,26 @@ class BeliefSet:
         return self._belief_list
     
 
+    def generate_all_successors(self) -&gt; &#39;BeliefSet&#39;:
+        &#39;&#39;&#39;
+        Function to generate the successors beliefs of all the beliefs in the belief set.
+
+        Returns
+        -------
+        all_successors : BeliefSet
+            All successors of all beliefs in the belief set.
+        &#39;&#39;&#39;
+        all_successors = []
+        for belief in self.belief_list:
+            all_successors.extend(belief.generate_successors())
+        return BeliefSet(self.model, all_successors)
+    
+
     def __len__(self) -&gt; int:
         return len(self._belief_list) if self._belief_list is not None else self._belief_array.shape[0]
     
 
-    def to_gpu(self) -&gt; Self:
+    def to_gpu(self) -&gt; &#39;BeliefSet&#39;:
         &#39;&#39;&#39;
         Function returning an equivalent belief set object with the array of values stored on GPU instead of CPU.
 
@@ -542,7 +584,7 @@ class BeliefSet:
         return gpu_belief_set
     
 
-    def to_cpu(self) -&gt; Self:
+    def to_cpu(self) -&gt; &#39;BeliefSet&#39;:
         &#39;&#39;&#39;
         Function returning an equivalent belief set object with the array of values stored on CPU instead of GPU.
 
@@ -599,6 +641,10 @@ class BeliefSet:
         plt.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c=list(range(beliefs_x.shape[0])), cmap=&#39;Blues&#39;)
         ax = plt.gca()
         ax.get_yaxis().set_visible(False)
+
+        # Set title and ax-label
+        ax.set_title(&#39;Set of beliefs&#39;)
+        ax.set_xlabel(&#39;Belief space&#39;)
 
         # X-axis setting
         ticks = [0,0.25,0.5,0.75,1]
@@ -676,6 +722,7 @@ class BeliefSet:
 
         # Actual plot
         fig = plt.figure(figsize=(size,size))
+        plt.title(&#39;Set of Beliefs&#39;)
 
         cmap = cm.get_cmap(&#39;Blues&#39;)
         norm = colors.Normalize(vmin=0, vmax=self.belief_array.shape[0])
@@ -761,10 +808,12 @@ class SolverHistory:
         # Time tracking
         self.expansion_times = []
         self.backup_times = []
+        self.pruning_times = []
 
         # Value function and belief set sizes tracking
         self.alpha_vector_counts = []
         self.beliefs_counts = []
+        self.prune_counts = []
 
         if self.tracking_level &gt;= 1:
             self.alpha_vector_counts.append(len(initial_value_function))
@@ -837,7 +886,6 @@ class SolverHistory:
         value_function : ValueFunction
             The value function resulting after a step of the solving process.
         &#39;&#39;&#39;
-
         if self.tracking_level &gt;= 1:
             self.backup_times.append(float(backup_time))
             self.alpha_vector_counts.append(len(value_function))
@@ -845,6 +893,25 @@ class SolverHistory:
 
         if self.tracking_level &gt;= 2:
             self.value_functions.append(value_function if not value_function.is_on_gpu else value_function.to_cpu())
+
+
+    def add_prune_step(self,
+                       prune_time:float,
+                       alpha_vectors_pruned:int
+                       ) -&gt; None:
+        &#39;&#39;&#39;
+        Function to add a prune step in the simulation history by recording the amount of alpha vectors that were pruned by the pruning function and how long it took.
+
+        Parameters
+        ----------
+        prune_time : float
+            The time it took to run the pruning step.
+        alpha_vectors_pruned : int
+            How many alpha vectors were pruned.
+        &#39;&#39;&#39;
+        if self.tracking_level &gt;= 1:
+            self.pruning_times.append(prune_time)
+            self.prune_counts.append(alpha_vectors_pruned)
 
 
     @property
@@ -870,6 +937,9 @@ class SolverHistory:
 
             summary_str += f&#39;\n  - Backup function took on average {sum(self.backup_times) /len(self.backup_times):.4f}s &#39;
             summary_str += f&#39;and yielded on average value functions of size {sum(self.alpha_vector_counts[1:]) / len(self.alpha_vector_counts[1:]):.2f} per iteration.&#39;
+        
+            summary_str += f&#39;\n  - Pruning function took on average {sum(self.pruning_times) /len(self.pruning_times):.4f}s &#39;
+            summary_str += f&#39;and yielded on average prunings of {sum(self.prune_counts) / len(self.prune_counts):.2f} alpha vectors per iteration.&#39;
         
         return summary_str
     
@@ -971,7 +1041,7 @@ class SolverHistory:
             for i in range(1,len(solver_histories)):
                 graph_names.append(f&#39;Comparison {i}&#39;)
 
-        def plot_on_ax(history:Union[ValueFunction,Self], frame_i:int, ax, line_type:str):
+        def plot_on_ax(history:Union[ValueFunction,&#39;SolverHistory&#39;], frame_i:int, ax, line_type:str):
             if isinstance(history, ValueFunction):
                 value_function = history
             else:
@@ -992,6 +1062,10 @@ class SolverHistory:
         def plt_frame(frame_i):
             ax1.clear()
             ax2.clear()
+
+            # Axes labels
+            ax1.set_ylabel(&#39;V(b)&#39;)
+            ax2.set_xlabel(&#39;Belief space&#39;)
 
             self_frame_i = frame_i if frame_i &lt; len(self.value_functions) else (len(self.value_functions) - 1)
 
@@ -1088,6 +1162,115 @@ class PBVI_Solver(Solver):
         self.expand_function_params = expand_function_params
 
 
+    def test_n_simulations(self, model:Model, value_function:ValueFunction, n:int=1000, horizon:int=300, print_progress:bool=False):
+        &#39;&#39;&#39;
+        Function that tests a value function with n simulations. It returns the start states, the amount of steps in which the simulation reached an end state, the rewards received and the discounted rewards received.
+
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model on which to run the simulations.
+        value_function : ValueFunction
+            The value function that will be evaluated.
+        n : int, default=1000
+            The amount of simulations to run.
+        horizon : int, default=300
+            The maximum amount of steps the simulation can run for.
+        print_progress : bool, default=False
+            Whether to display a progress bar of how many simulation steps have been run so far. 
+        &#39;&#39;&#39;
+        # GPU support
+        xp = np if not value_function.is_on_gpu else cp
+        model = model.cpu_model if not value_function.is_on_gpu else model.gpu_model
+
+        # Genetion of an array of n beliefs
+        initial_beliefs = xp.repeat(Belief(model).values[None,:], n, axis=0)
+
+        # Generating n initial positions
+        start_states = xp.random.choice(model.states, size=n, p=model.start_probabilities)
+        
+        # Belief and state arrays
+        beliefs = initial_beliefs
+        new_beliefs = None
+        states = start_states
+        next_states = None
+
+        # Tracking what simulations are done
+        sim_is_done = xp.zeros(n, dtype=bool)
+        done_at_step = xp.full(n, -1)
+
+        # Speedup item
+        simulations = xp.arange(n)
+        flatten_offset = (simulations[:,None] * model.state_count)
+        flat_shape = (n, (model.state_count * model.reachable_state_count))
+
+        # 2D bincount for belief set update
+        def bincount2D_vectorized(a, w):    
+            a_offs = a + flatten_offset
+            return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape(-1,model.state_count)
+
+        # Results
+        discount = self.gamma
+        rewards = []
+        discounted_rewards = []
+        
+        iterator = trange(horizon) if print_progress else range(horizon)
+        for i in iterator:
+            # Retrieving the top vectors according to the value function
+            best_vectors = xp.argmax(xp.matmul(beliefs, value_function.alpha_vector_array.T), axis=1)
+
+            # Retrieving the actions associated with the vectors chosen
+            best_actions = value_function.actions[best_vectors]
+
+            # Get each reachable next states for each action
+            reachable_state_per_actions = model.reachable_states[:, best_actions, :]
+
+            # Gathering new states based on the transition function and the chosen actions
+            next_state_potentials = reachable_state_per_actions[states, simulations]
+            if model.reachable_state_count == 1:
+                next_states = next_state_potentials[:,0]
+            else:
+                potential_probabilities = model.reachable_probabilities[states[:,None], best_actions[:,None]][:,0,:]
+                chosen_indices = xp.apply_along_axis(lambda x: xp.random.choice(len(x), size=1, p=x), axis=1, arr=potential_probabilities)
+                next_states = next_state_potentials[chosen_indices][:,0,0]
+
+            # Making observations based on the states landed in and the action that was taken
+            observation_probabilities = model.observation_table[next_states[:,None], best_actions[:,None]][:,0,:]
+            observations = xp.sum(xp.random.random(n)[:,None] &gt; xp.cumsum(observation_probabilities[:,:-1], axis=1), axis=1)
+
+            # Belief set update
+            reachable_probabilities = (model.reachable_transitional_observation_table[:,best_actions,observations,:] * beliefs.T[:,:,None])
+            new_beliefs = bincount2D_vectorized(a=reachable_state_per_actions.swapaxes(0,1).reshape(flat_shape),
+                                                w=reachable_probabilities.swapaxes(0,1).reshape(flat_shape))
+
+            new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
+
+            # Rewards computation
+            step_rewards = xp.array([model.immediate_reward_function(s,a,s_p,o) for s,a,s_p,o in zip(states, best_actions, next_states, observations)])
+            rewards.append(xp.where(~sim_is_done, step_rewards, 0))
+            discounted_rewards.append(xp.where(~sim_is_done, step_rewards * discount, 0))
+
+            # Checking for done condition
+            are_done = xp.isin(next_states, xp.array(model.end_states))
+            done_at_step[sim_is_done ^ are_done] = i+1
+            sim_is_done |= are_done
+
+            # Update iterator postfix
+            if print_progress:
+                iterator.set_postfix({&#39;done&#39;: xp.sum(sim_is_done)})
+
+            # Replacing old with new
+            states = next_states
+            beliefs = new_beliefs
+            discount *= self.gamma
+
+            # Early stopping
+            if xp.all(sim_is_done):
+                break
+
+        return start_states, done_at_step, rewards, discounted_rewards
+
+
     def backup(self,
                model:Model,
                belief_set:BeliefSet,
@@ -1132,12 +1315,12 @@ class PBVI_Solver(Solver):
         gamma_a_o_t = self.gamma * xp.einsum(&#39;saor,vsar-&gt;aovs&#39;, model.reachable_transitional_observation_table, vectors_array_reachable_states)
 
         # Step 2
-        belief_array = belief_set.belief_array
-        best_alpha_ind = xp.argmax(xp.tensordot(belief_array, gamma_a_o_t, (1,3)), axis=3)
+        belief_array = belief_set.belief_array # bs
+        best_alpha_ind = xp.argmax(xp.tensordot(belief_array, gamma_a_o_t, (1,3)), axis=3) # argmax(bs,aovs-&gt;baov) -&gt; bao
 
-        best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]]
+        best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]] # baos
 
-        alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2)
+        alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2) # as + bas
 
         # Step 3
         best_actions = xp.argmax(xp.einsum(&#39;bas,bs-&gt;ba&#39;, alpha_a, belief_array), axis=1)
@@ -1161,6 +1344,33 @@ class PBVI_Solver(Solver):
                 
         return new_value_function
     
+
+    def expand_ra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
+        &#39;&#39;&#39;
+        This expansion technique relies only randomness and will generate at most &#39;max_generation&#39; beliefs.
+
+        Parameters
+        model : pomdp.Model
+            The POMDP model on which to expand the belief set on.
+        belief_set : BeliefSet
+            List of beliefs to expand on.
+        max_generation : int, default=10
+            The max amount of beliefs that can be added to the belief set at once.
+        &#39;&#39;&#39;
+        xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
+
+        # How many new beliefs to add
+        generation_count = min(belief_set.belief_array.shape[0], max_generation)
+
+        # Generation of the new beliefs at random
+        new_beliefs = xp.random.random((generation_count, model.state_count))
+        new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
+
+        # Combining with the initial belief set
+        new_belief_set = np.vstack((belief_set.belief_array, new_beliefs))
+
+        return BeliefSet(model, new_belief_set)
+
     
     def expand_ssra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
@@ -1191,7 +1401,10 @@ class PBVI_Solver(Solver):
         new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
 
-        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
+        # Random previous beliefs
+        rand_ind = np.random.choice(np.arange(old_shape[0]), to_generate, replace=False)
+
+        for i, belief_vector in enumerate(belief_set.belief_array[rand_ind]):
             b = Belief(model, belief_vector)
             s = b.random_state()
             a = random.choice(model.actions)
@@ -1238,8 +1451,11 @@ class PBVI_Solver(Solver):
 
         new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
-                
-        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
+
+        # Random previous beliefs
+        rand_ind = np.random.choice(np.arange(old_shape[0]), to_generate, replace=False)
+
+        for i, belief_vector in enumerate(belief_set.belief_array[rand_ind]):
             b = Belief(model, belief_vector)
             s = b.random_state()
             
@@ -1331,12 +1547,21 @@ class PBVI_Solver(Solver):
             Union of the belief_set and the expansions of the beliefs in the belief_set
         &#39;&#39;&#39;
         print(&#39;Not implemented&#39;)
+        xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
+
+        old_shape = belief_set.belief_array.shape
+        to_generate = min(max_generation, old_shape[0])
+
+        new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
+        new_belief_array[:old_shape[0]] = belief_set.belief_array
+
         return []
 
 
     def expand(self, model:Model, belief_set:BeliefSet, max_generation:int, **function_specific_parameters) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Central method to call one of the functions for a particular expansion strategy:
+            - Random selction (RA)
             - Stochastic Simulation with Random Action (ssra)
             - Stochastic Simulation with Greedy Action (ssga)
             - Stochastic Simulation with Exploratory Action (ssea)
@@ -1359,6 +1584,9 @@ class PBVI_Solver(Solver):
             The belief set the expansion function returns. 
         &#39;&#39;&#39;
         if self.expand_function in &#39;expand_ssra&#39;:
+            return self.expand_ra(model=model, belief_set=belief_set, max_generation=max_generation)
+
+        if self.expand_function in &#39;expand_ssra&#39;:
             return self.expand_ssra(model=model, belief_set=belief_set, max_generation=max_generation)
         
         elif self.expand_function in &#39;expand_ssga&#39;:
@@ -1373,6 +1601,37 @@ class PBVI_Solver(Solver):
             return self.expand_ger(model=model, belief_set=belief_set, max_generation=max_generation, **args)
         
         return []
+
+
+    def compute_change(self, value_function:ValueFunction, new_value_function:ValueFunction, belief_set:BeliefSet) -&gt; float:
+        &#39;&#39;&#39;
+        Function to compute whether the change between two value functions can be considered as having converged based on the eps parameter of the Solver.
+        It check for each belief, the maximum value and take the max change between believe&#39;s value functions.
+        If this max change is lower than eps * (gamma / (1 - gamma)).
+
+        Parameters
+        ----------
+        value_function : ValueFunction
+            The first value function to compare.
+        new_value_function : ValueFunction
+            The second value function to compare.
+        belief_set : BeliefSet
+            The set of believes to check the values on to compute the max change on.
+
+        Returns
+        -------
+        max_change : float
+            The maximum change between value functions at belief points.
+        &#39;&#39;&#39;
+        # Get numpy corresponding to the arrays
+        xp = np if not gpu_support else cp.get_array_module(value_function.alpha_vector_array)
+
+        # Computing Delta for each beliefs
+        max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
+        new_max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, new_value_function.alpha_vector_array.T), axis=1)
+        max_change = xp.max(xp.abs(new_max_val_per_belief - max_val_per_belief))
+
+        return max_change
 
 
     def solve(self,
@@ -1456,7 +1715,7 @@ class PBVI_Solver(Solver):
         if initial_value_function is None:
             value_function = ValueFunction(model, model.expected_rewards_table.T, model.actions)
         else:
-            value_function = initial_value_function.to_gpu() if use_gpu else initial_value_function 
+            value_function = initial_value_function.to_gpu() if use_gpu else initial_value_function
 
         # Convergence check boundary
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
@@ -1472,7 +1731,8 @@ class PBVI_Solver(Solver):
 
         # Loop
         iteration = 0
-        expand_max_val_per_belief = None
+        expand_value_function = value_function
+        old_value_function = value_function
         for expansion_i in range(expansions) if not print_progress else trange(expansions, desc=&#39;Expansions&#39;):
 
             # 1: Expand belief set
@@ -1488,38 +1748,57 @@ class PBVI_Solver(Solver):
             solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
 
             # 2: Backup, update value function (alpha vector set)
-            old_max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
-            expand_max_val_per_belief = xp.copy(old_max_val_per_belief)
-
             for _ in range(horizon) if not print_progress else trange(horizon, desc=f&#39;Backups {expansion_i}&#39;):
                 start_ts = datetime.now()
 
-                value_function = self.backup(model, belief_set, value_function)
+                # Backup step
+                value_function = self.backup(model, belief_set, value_function, belief_dominance_prune=False)
+                backup_time = (datetime.now() - start_ts).total_seconds()
 
                 # Additional pruning
                 if (iteration % prune_interval) == 0 and iteration &gt; 0:
+                    start_ts = datetime.now()
+                    vf_len = len(value_function)
+
                     value_function.prune(prune_level)
 
-                # Max change
-                max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
-                max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
+                    prune_time = (datetime.now() - start_ts).total_seconds()
+                    alpha_vectors_pruned = len(value_function) - vf_len
+                    solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
                 
+                # Compute the change between value functions
+                max_change = self.compute_change(value_function, old_value_function, belief_set)
+
                 # History tracking
-                backup_time = (datetime.now() - start_ts).total_seconds()
                 solver_history.add_backup_step(backup_time, max_change, value_function)
 
-                # convergence check
+                # Convergence check
                 if max_change &lt; max_allowed_change:
                     break
-                old_max_val_per_belief = max_val_per_belief
+
+                old_value_function = value_function
 
                 # Update iteration counter
                 iteration += 1
 
-            expand_max_change = xp.max(xp.abs(max_val_per_belief - expand_max_val_per_belief))
+            # Compute change with old expansion value function
+            expand_max_change = self.compute_change(expand_value_function, value_function, belief_set)
+
             if expand_max_change &lt; max_allowed_change:
                 print(&#39;Converged!&#39;)
                 break
+
+            expand_value_function = value_function
+
+        # Final pruning
+        start_ts = datetime.now()
+        vf_len = len(value_function)
+
+        value_function.prune(prune_level)
+
+        prune_time = (datetime.now() - start_ts).total_seconds()
+        alpha_vectors_pruned = len(value_function) - vf_len
+        solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
 
         return value_function, solver_history
 
@@ -1708,7 +1987,6 @@ class FSVI_Solver(PBVI_Solver):
 
         # Convergence check boundary
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
-        old_max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
 
         # History tracking
         solver_history = SolverHistory(tracking_level=history_tracking_level,
@@ -1720,6 +1998,7 @@ class FSVI_Solver(PBVI_Solver):
                                        initial_belief_set=BeliefSet(model, [b])
                                        )
 
+        old_value_function = value_function
         for i in trange(expansions, desc=&#39;Expansions&#39;) if print_progress else range(expansions):
 
             # Expand (exploration)
@@ -1735,17 +2014,23 @@ class FSVI_Solver(PBVI_Solver):
             start_ts = datetime.now()
 
             value_function = self.backup(model, belief_set, value_function, append=True)
+            backup_time = (datetime.now() - start_ts).total_seconds()
 
             # Additional pruning
             if (i % prune_interval) == 0 and i &gt; 0:
+                start_ts = datetime.now()
+                vf_len = len(value_function)
+
                 value_function.prune(prune_level)
 
+                prune_time = (datetime.now() - start_ts).total_seconds()
+                alpha_vectors_pruned = len(value_function) - vf_len
+                solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
+
             # Change computation
-            max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
-            max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
+            max_change = self.compute_change(old_value_function, value_function, belief_set)
 
             # History tracking
-            backup_time = (datetime.now() - start_ts).total_seconds()
             solver_history.add_backup_step(backup_time, max_change, value_function)
             
             # Convergence check
@@ -1753,10 +2038,17 @@ class FSVI_Solver(PBVI_Solver):
                 print(&#39;Converged!&#39;)
                 break
             
-            old_max_val_per_belief = max_val_per_belief
+            old_value_function = value_function
 
         # Final pruning
+        start_ts = datetime.now()
+        vf_len = len(value_function)
+
         value_function.prune(prune_level)
+
+        prune_time = (datetime.now() - start_ts).total_seconds()
+        alpha_vectors_pruned = len(value_function) - vf_len
+        solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
         
         return value_function, solver_history
 
@@ -1831,20 +2123,26 @@ class SimulationHistory(MDP_SimulationHistory):
         # Data
         data = np.array(self.grid_point_sequence)[:(frame_i+1),:]
         belief = self.beliefs[frame_i]
+        observations = self.observations[:(frame_i)]
+        obs_colors = [&#39;#000000&#39;] + [COLOR_LIST[o][&#39;hex&#39;] for o in observations]
 
         # Ticks
         dimensions = self.model.state_grid.shape
-        x_ticks = [i for i in range(dimensions[1])]
-        y_ticks = [i for i in range(dimensions[0])]
+        x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] &lt; 10 else int(dimensions[1] / 10)))
+        y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] &lt; 5 else int(dimensions[0] / 5)))
 
         # Plotting
         ax.clear()
         ax.set_title(f&#39;Simulation (Frame {frame_i})&#39;)
 
+        # Observation labels legend
+        proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[o][&#39;id&#39;]) for o in self.model.observations]
+        ax.legend(proxy, self.model.observation_labels, title=&#39;Observations&#39;) # type: ignore
+
         grid_values = belief.values[self.model.state_grid]
         ax.imshow(grid_values, cmap=&#39;Blues&#39;)
-        ax.plot(data[:,1], data[:,0], color=&#39;red&#39;)
-        ax.scatter(data[:,1], data[:,0], color=&#39;red&#39;)
+        ax.plot(data[:,1], data[:,0], color=&#39;red&#39;, zorder=-1)
+        ax.scatter(data[:,1], data[:,0], c=obs_colors)
 
         ax.set_xticks(x_ticks)
         ax.set_yticks(y_ticks)
@@ -1925,6 +2223,8 @@ class Agent:
     ----------
     model: pomdp.Model
         The model in which the agent can run
+    value_function : ValueFunction, optional
+        A value function the agent can use to play a simulation, in the case the model has been solved beforehand.
     
     Attributes
     ----------
@@ -1932,9 +2232,9 @@ class Agent:
     value_function : ValueFunction
         The value function the agent has come up to after training.
     &#39;&#39;&#39;
-    def __init__(self, model:Model) -&gt; None:
+    def __init__(self, model:Model, value_function:Union[ValueFunction,None]=None) -&gt; None:
         self.model = model
-        self.value_function = None
+        self.value_function = value_function
 
 
     def train(self, solver:PBVI_Solver, expansions:int, horizon:int) -&gt; SolverHistory:
@@ -1976,8 +2276,11 @@ class Agent:
         &#39;&#39;&#39;
         assert self.value_function is not None, &#34;No value function, training probably has to be run...&#34;
 
-        best_vector = np.argmax(np.dot(self.value_function.alpha_vector_array, belief.values))
-        best_action = self.value_function.actions[best_vector]
+        # GPU
+        xp = np if not self.value_function.is_on_gpu else cp
+
+        best_vector = xp.argmax(xp.dot(self.value_function.alpha_vector_array, belief.values))
+        best_action = int(self.value_function.actions[best_vector])
 
         return best_action
 
@@ -2010,6 +2313,12 @@ class Agent:
         history : SimulationHistory
             A list of rewards with the additional functionality that the can be plot with the plot() function.
         &#39;&#39;&#39;
+        assert self.value_function is not None, &#34;No value function, training probably has to be run...&#34;
+
+        # GPU setup
+        self.model = self.model.gpu_model if self.value_function.is_on_gpu else self.model.cpu_model
+
+        # Get or generate a default simulator
         if simulator is None:
             simulator = Simulation(self.model)
 
@@ -2058,7 +2367,7 @@ class Agent:
                           start_state:Union[int,None]=None,
                           print_progress:bool=True,
                           print_stats:bool=True
-                          ) -&gt; RewardSet:
+                          ) -&gt; Tuple[RewardSet, list[SimulationHistory]]:
         &#39;&#39;&#39;
         Function to run a set of simulations in a row.
         This is useful when the simulation has a &#39;done&#39; condition.
@@ -2086,18 +2395,25 @@ class Agent:
         -------
         all_histories : RewardSet
             A list of the final rewards after each simulation.
+        all_histories : list[SimulationHistory]
+            A list the simulation histories gathered at each simulation.
         &#39;&#39;&#39;
         if simulator is None:
             simulator = Simulation(self.model)
 
         sim_start_ts = datetime.now()
 
+        all_histories = []
         all_final_rewards = RewardSet()
+        all_discounted_rewards = []
         all_sim_length = []
         for _ in (trange(n) if print_progress else range(n)):
-            history = self.simulate(simulator, max_steps, start_state, False, False)
-            all_final_rewards.append(np.sum(history.rewards))
-            all_sim_length.append(len(history.states))
+            sim_history = self.simulate(simulator, max_steps, start_state, False, False)
+
+            all_histories.append(sim_history)
+            all_final_rewards.append(np.sum(sim_history.rewards))
+            all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(0.99)) #TODO: Make it variable
+            all_sim_length.append(len(sim_history))
 
         if print_stats:
             sim_end_ts = datetime.now()
@@ -2105,8 +2421,9 @@ class Agent:
             print(f&#39;\t- Average runtime (s): {((sim_end_ts - sim_start_ts).total_seconds() / n)}&#39;)
             print(f&#39;\t- Average step count: {(sum(all_sim_length) / n)}&#39;)
             print(f&#39;\t- Average total rewards: {(sum(all_final_rewards) / n)}&#39;)
+            print(f&#39;\t- Average discounted rewards (ADR): {(sum(all_discounted_rewards) / n)}&#39;)
 
-        return all_final_rewards
+        return all_final_rewards, all_histories
     
 
 def load_POMDP_file(file_name:str) -&gt; Tuple[Model, PBVI_Solver]:
@@ -2860,7 +3177,7 @@ This file format was implemented by Cassandra and the specifications of the form
 <dl>
 <dt id="src.pomdp.Agent"><code class="flex name class">
 <span>class <span class="ident">Agent</span></span>
-<span>(</span><span>model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>)</span>
+<span>(</span><span>model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, value_function: Optional[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>] = None)</span>
 </code></dt>
 <dd>
 <div class="desc"><p>The class of an Agent running on a POMDP model.
@@ -2872,6 +3189,8 @@ either for a given amount of steps or until a single reward is received.</p>
 <dl>
 <dt><strong><code>model</code></strong> :&ensp;<code>pomdp.Model</code></dt>
 <dd>The model in which the agent can run</dd>
+<dt><strong><code>value_function</code></strong> :&ensp;<code>ValueFunction</code>, optional</dt>
+<dd>A value function the agent can use to play a simulation, in the case the model has been solved beforehand.</dd>
 </dl>
 <h2 id="attributes">Attributes</h2>
 <dl>
@@ -2897,6 +3216,8 @@ either for a given amount of steps or until a single reward is received.</p>
     ----------
     model: pomdp.Model
         The model in which the agent can run
+    value_function : ValueFunction, optional
+        A value function the agent can use to play a simulation, in the case the model has been solved beforehand.
     
     Attributes
     ----------
@@ -2904,9 +3225,9 @@ either for a given amount of steps or until a single reward is received.</p>
     value_function : ValueFunction
         The value function the agent has come up to after training.
     &#39;&#39;&#39;
-    def __init__(self, model:Model) -&gt; None:
+    def __init__(self, model:Model, value_function:Union[ValueFunction,None]=None) -&gt; None:
         self.model = model
-        self.value_function = None
+        self.value_function = value_function
 
 
     def train(self, solver:PBVI_Solver, expansions:int, horizon:int) -&gt; SolverHistory:
@@ -2948,8 +3269,11 @@ either for a given amount of steps or until a single reward is received.</p>
         &#39;&#39;&#39;
         assert self.value_function is not None, &#34;No value function, training probably has to be run...&#34;
 
-        best_vector = np.argmax(np.dot(self.value_function.alpha_vector_array, belief.values))
-        best_action = self.value_function.actions[best_vector]
+        # GPU
+        xp = np if not self.value_function.is_on_gpu else cp
+
+        best_vector = xp.argmax(xp.dot(self.value_function.alpha_vector_array, belief.values))
+        best_action = int(self.value_function.actions[best_vector])
 
         return best_action
 
@@ -2982,6 +3306,12 @@ either for a given amount of steps or until a single reward is received.</p>
         history : SimulationHistory
             A list of rewards with the additional functionality that the can be plot with the plot() function.
         &#39;&#39;&#39;
+        assert self.value_function is not None, &#34;No value function, training probably has to be run...&#34;
+
+        # GPU setup
+        self.model = self.model.gpu_model if self.value_function.is_on_gpu else self.model.cpu_model
+
+        # Get or generate a default simulator
         if simulator is None:
             simulator = Simulation(self.model)
 
@@ -3030,7 +3360,7 @@ either for a given amount of steps or until a single reward is received.</p>
                           start_state:Union[int,None]=None,
                           print_progress:bool=True,
                           print_stats:bool=True
-                          ) -&gt; RewardSet:
+                          ) -&gt; Tuple[RewardSet, list[SimulationHistory]]:
         &#39;&#39;&#39;
         Function to run a set of simulations in a row.
         This is useful when the simulation has a &#39;done&#39; condition.
@@ -3058,18 +3388,25 @@ either for a given amount of steps or until a single reward is received.</p>
         -------
         all_histories : RewardSet
             A list of the final rewards after each simulation.
+        all_histories : list[SimulationHistory]
+            A list the simulation histories gathered at each simulation.
         &#39;&#39;&#39;
         if simulator is None:
             simulator = Simulation(self.model)
 
         sim_start_ts = datetime.now()
 
+        all_histories = []
         all_final_rewards = RewardSet()
+        all_discounted_rewards = []
         all_sim_length = []
         for _ in (trange(n) if print_progress else range(n)):
-            history = self.simulate(simulator, max_steps, start_state, False, False)
-            all_final_rewards.append(np.sum(history.rewards))
-            all_sim_length.append(len(history.states))
+            sim_history = self.simulate(simulator, max_steps, start_state, False, False)
+
+            all_histories.append(sim_history)
+            all_final_rewards.append(np.sum(sim_history.rewards))
+            all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(0.99)) #TODO: Make it variable
+            all_sim_length.append(len(sim_history))
 
         if print_stats:
             sim_end_ts = datetime.now()
@@ -3077,8 +3414,9 @@ either for a given amount of steps or until a single reward is received.</p>
             print(f&#39;\t- Average runtime (s): {((sim_end_ts - sim_start_ts).total_seconds() / n)}&#39;)
             print(f&#39;\t- Average step count: {(sum(all_sim_length) / n)}&#39;)
             print(f&#39;\t- Average total rewards: {(sum(all_final_rewards) / n)}&#39;)
+            print(f&#39;\t- Average discounted rewards (ADR): {(sum(all_discounted_rewards) / n)}&#39;)
 
-        return all_final_rewards</code></pre>
+        return all_final_rewards, all_histories</code></pre>
 </details>
 <h3>Methods</h3>
 <dl>
@@ -3117,14 +3455,17 @@ either for a given amount of steps or until a single reward is received.</p>
     &#39;&#39;&#39;
     assert self.value_function is not None, &#34;No value function, training probably has to be run...&#34;
 
-    best_vector = np.argmax(np.dot(self.value_function.alpha_vector_array, belief.values))
-    best_action = self.value_function.actions[best_vector]
+    # GPU
+    xp = np if not self.value_function.is_on_gpu else cp
+
+    best_vector = xp.argmax(xp.dot(self.value_function.alpha_vector_array, belief.values))
+    best_action = int(self.value_function.actions[best_vector])
 
     return best_action</code></pre>
 </details>
 </dd>
 <dt id="src.pomdp.Agent.run_n_simulations"><code class="name flex">
-<span>def <span class="ident">run_n_simulations</span></span>(<span>self, simulator: Optional[<a title="src.pomdp.Simulation" href="#src.pomdp.Simulation">Simulation</a>] = None, n: int = 1000, max_steps: int = 1000, start_state: Optional[int] = None, print_progress: bool = True, print_stats: bool = True) ‑> <a title="src.mdp.RewardSet" href="mdp.html#src.mdp.RewardSet">RewardSet</a></span>
+<span>def <span class="ident">run_n_simulations</span></span>(<span>self, simulator: Optional[<a title="src.pomdp.Simulation" href="#src.pomdp.Simulation">Simulation</a>] = None, n: int = 1000, max_steps: int = 1000, start_state: Optional[int] = None, print_progress: bool = True, print_stats: bool = True) ‑> Tuple[<a title="src.mdp.RewardSet" href="mdp.html#src.mdp.RewardSet">RewardSet</a>, list[<a title="src.pomdp.SimulationHistory" href="#src.pomdp.SimulationHistory">SimulationHistory</a>]]</span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function to run a set of simulations in a row.
@@ -3151,6 +3492,8 @@ In this case, the rewards of individual simulations are summed together under a 
 <dl>
 <dt><strong><code>all_histories</code></strong> :&ensp;<code>RewardSet</code></dt>
 <dd>A list of the final rewards after each simulation.</dd>
+<dt><strong><code>all_histories</code></strong> :&ensp;<code>list[<a title="src.pomdp.SimulationHistory" href="#src.pomdp.SimulationHistory">SimulationHistory</a>]</code></dt>
+<dd>A list the simulation histories gathered at each simulation.</dd>
 </dl></div>
 <details class="source">
 <summary>
@@ -3163,7 +3506,7 @@ In this case, the rewards of individual simulations are summed together under a 
                       start_state:Union[int,None]=None,
                       print_progress:bool=True,
                       print_stats:bool=True
-                      ) -&gt; RewardSet:
+                      ) -&gt; Tuple[RewardSet, list[SimulationHistory]]:
     &#39;&#39;&#39;
     Function to run a set of simulations in a row.
     This is useful when the simulation has a &#39;done&#39; condition.
@@ -3191,18 +3534,25 @@ In this case, the rewards of individual simulations are summed together under a 
     -------
     all_histories : RewardSet
         A list of the final rewards after each simulation.
+    all_histories : list[SimulationHistory]
+        A list the simulation histories gathered at each simulation.
     &#39;&#39;&#39;
     if simulator is None:
         simulator = Simulation(self.model)
 
     sim_start_ts = datetime.now()
 
+    all_histories = []
     all_final_rewards = RewardSet()
+    all_discounted_rewards = []
     all_sim_length = []
     for _ in (trange(n) if print_progress else range(n)):
-        history = self.simulate(simulator, max_steps, start_state, False, False)
-        all_final_rewards.append(np.sum(history.rewards))
-        all_sim_length.append(len(history.states))
+        sim_history = self.simulate(simulator, max_steps, start_state, False, False)
+
+        all_histories.append(sim_history)
+        all_final_rewards.append(np.sum(sim_history.rewards))
+        all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(0.99)) #TODO: Make it variable
+        all_sim_length.append(len(sim_history))
 
     if print_stats:
         sim_end_ts = datetime.now()
@@ -3210,8 +3560,9 @@ In this case, the rewards of individual simulations are summed together under a 
         print(f&#39;\t- Average runtime (s): {((sim_end_ts - sim_start_ts).total_seconds() / n)}&#39;)
         print(f&#39;\t- Average step count: {(sum(all_sim_length) / n)}&#39;)
         print(f&#39;\t- Average total rewards: {(sum(all_final_rewards) / n)}&#39;)
+        print(f&#39;\t- Average discounted rewards (ADR): {(sum(all_discounted_rewards) / n)}&#39;)
 
-    return all_final_rewards</code></pre>
+    return all_final_rewards, all_histories</code></pre>
 </details>
 </dd>
 <dt id="src.pomdp.Agent.simulate"><code class="name flex">
@@ -3269,6 +3620,12 @@ In this case, the rewards of individual simulations are summed together under a 
     history : SimulationHistory
         A list of rewards with the additional functionality that the can be plot with the plot() function.
     &#39;&#39;&#39;
+    assert self.value_function is not None, &#34;No value function, training probably has to be run...&#34;
+
+    # GPU setup
+    self.model = self.model.gpu_model if self.value_function.is_on_gpu else self.model.cpu_model
+
+    # Get or generate a default simulator
     if simulator is None:
         simulator = Simulation(self.model)
 
@@ -3437,7 +3794,7 @@ If not specified, it will be set as the start probabilities of the model.</dd>
         return self._values
     
 
-    def update(self, a:int, o:int) -&gt; Self:
+    def update(self, a:int, o:int) -&gt; &#39;Belief&#39;:
         &#39;&#39;&#39;
         Returns a new belief based on this current belief, the most recent action (a) and the most recent observation (o).
 
@@ -3468,6 +3825,23 @@ If not specified, it will be set as the start probabilities of the model.</dd>
 
         return new_belief
     
+
+    def generate_successors(self) -&gt; list[&#39;Belief&#39;]:
+        &#39;&#39;&#39;
+        Function to generate a set of belief that can be reached for each actions and observations available in the model.
+
+        Returns
+        -------
+        successor_beliefs : list[Belief]
+            The successor beliefs.
+        &#39;&#39;&#39;
+        successor_beliefs = []
+        for a in self.model.actions:
+            for o in self.model.observations:
+                successor_beliefs.append(self.update(a,o))
+
+        return successor_beliefs
+
 
     def random_state(self) -&gt; int:
         &#39;&#39;&#39;
@@ -3504,6 +3878,9 @@ If not specified, it will be set as the start probabilities of the model.</dd>
         plt.xticks(x_ticks)
         plt.yticks(y_ticks)
 
+        # Title
+        plt.title(f&#39;Belief (probability distribution over states)&#39;)
+
         # Actual plot
         grid_values = self._values[self.model.state_grid]
         plt.imshow(grid_values,cmap=&#39;Blues&#39;)
@@ -3530,6 +3907,37 @@ def values(self) -&gt; np.ndarray:
 </dl>
 <h3>Methods</h3>
 <dl>
+<dt id="src.pomdp.Belief.generate_successors"><code class="name flex">
+<span>def <span class="ident">generate_successors</span></span>(<span>self) ‑> list[<a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>]</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Function to generate a set of belief that can be reached for each actions and observations available in the model.</p>
+<h2 id="returns">Returns</h2>
+<dl>
+<dt><strong><code>successor_beliefs</code></strong> :&ensp;<code>list[<a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>]</code></dt>
+<dd>The successor beliefs.</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def generate_successors(self) -&gt; list[&#39;Belief&#39;]:
+    &#39;&#39;&#39;
+    Function to generate a set of belief that can be reached for each actions and observations available in the model.
+
+    Returns
+    -------
+    successor_beliefs : list[Belief]
+        The successor beliefs.
+    &#39;&#39;&#39;
+    successor_beliefs = []
+    for a in self.model.actions:
+        for o in self.model.observations:
+            successor_beliefs.append(self.update(a,o))
+
+    return successor_beliefs</code></pre>
+</details>
+</dd>
 <dt id="src.pomdp.Belief.plot"><code class="name flex">
 <span>def <span class="ident">plot</span></span>(<span>self, size: int = 5) ‑> None</span>
 </code></dt>
@@ -3563,6 +3971,9 @@ def values(self) -&gt; np.ndarray:
 
     plt.xticks(x_ticks)
     plt.yticks(y_ticks)
+
+    # Title
+    plt.title(f&#39;Belief (probability distribution over states)&#39;)
 
     # Actual plot
     grid_values = self._values[self.model.state_grid]
@@ -3601,7 +4012,7 @@ def values(self) -&gt; np.ndarray:
 </details>
 </dd>
 <dt id="src.pomdp.Belief.update"><code class="name flex">
-<span>def <span class="ident">update</span></span>(<span>self, a: int, o: int) ‑> Self</span>
+<span>def <span class="ident">update</span></span>(<span>self, a: int, o: int) ‑> <a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Returns a new belief based on this current belief, the most recent action (a) and the most recent observation (o).</p>
@@ -3621,7 +4032,7 @@ def values(self) -&gt; np.ndarray:
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def update(self, a:int, o:int) -&gt; Self:
+<pre><code class="python">def update(self, a:int, o:int) -&gt; &#39;Belief&#39;:
     &#39;&#39;&#39;
     Returns a new belief based on this current belief, the most recent action (a) and the most recent observation (o).
 
@@ -3725,11 +4136,18 @@ This class also provides the option to display the beliefs when operating on a 2
                 self.is_on_gpu = True
         else:
             assert beliefs.shape[1] == model.state_count, f&#34;Belief array provided doesnt have the right shape (expected (-,{model.state_count}), received {beliefs.shape})&#34;
-            self._belief_array = beliefs
+            
+            self._belief_list = []
+            for belief_values in beliefs:
+                self._belief_list.append(Belief(model, belief_values))
 
             # Check if array is on gpu
             if gpu_support and cp.get_array_module(beliefs) == cp:
                 self.is_on_gpu = True
+
+        # # Deduplication
+        # self._uniqueness_dict = {belief.values.tobytes(): belief for belief in self._belief_list}
+        # self._belief_list = list(self._uniqueness_dict.values())
 
 
     @property
@@ -3754,11 +4172,26 @@ This class also provides the option to display the beliefs when operating on a 2
         return self._belief_list
     
 
+    def generate_all_successors(self) -&gt; &#39;BeliefSet&#39;:
+        &#39;&#39;&#39;
+        Function to generate the successors beliefs of all the beliefs in the belief set.
+
+        Returns
+        -------
+        all_successors : BeliefSet
+            All successors of all beliefs in the belief set.
+        &#39;&#39;&#39;
+        all_successors = []
+        for belief in self.belief_list:
+            all_successors.extend(belief.generate_successors())
+        return BeliefSet(self.model, all_successors)
+    
+
     def __len__(self) -&gt; int:
         return len(self._belief_list) if self._belief_list is not None else self._belief_array.shape[0]
     
 
-    def to_gpu(self) -&gt; Self:
+    def to_gpu(self) -&gt; &#39;BeliefSet&#39;:
         &#39;&#39;&#39;
         Function returning an equivalent belief set object with the array of values stored on GPU instead of CPU.
 
@@ -3782,7 +4215,7 @@ This class also provides the option to display the beliefs when operating on a 2
         return gpu_belief_set
     
 
-    def to_cpu(self) -&gt; Self:
+    def to_cpu(self) -&gt; &#39;BeliefSet&#39;:
         &#39;&#39;&#39;
         Function returning an equivalent belief set object with the array of values stored on CPU instead of GPU.
 
@@ -3839,6 +4272,10 @@ This class also provides the option to display the beliefs when operating on a 2
         plt.scatter(beliefs_x, np.zeros(beliefs_x.shape[0]), c=list(range(beliefs_x.shape[0])), cmap=&#39;Blues&#39;)
         ax = plt.gca()
         ax.get_yaxis().set_visible(False)
+
+        # Set title and ax-label
+        ax.set_title(&#39;Set of beliefs&#39;)
+        ax.set_xlabel(&#39;Belief space&#39;)
 
         # X-axis setting
         ticks = [0,0.25,0.5,0.75,1]
@@ -3916,6 +4353,7 @@ This class also provides the option to display the beliefs when operating on a 2
 
         # Actual plot
         fig = plt.figure(figsize=(size,size))
+        plt.title(&#39;Set of Beliefs&#39;)
 
         cmap = cm.get_cmap(&#39;Blues&#39;)
         norm = colors.Normalize(vmin=0, vmax=self.belief_array.shape[0])
@@ -3966,6 +4404,35 @@ def belief_list(self) -&gt; list[Belief]:
 </dl>
 <h3>Methods</h3>
 <dl>
+<dt id="src.pomdp.BeliefSet.generate_all_successors"><code class="name flex">
+<span>def <span class="ident">generate_all_successors</span></span>(<span>self) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
+</code></dt>
+<dd>
+<div class="desc"><p>Function to generate the successors beliefs of all the beliefs in the belief set.</p>
+<h2 id="returns">Returns</h2>
+<dl>
+<dt><strong><code>all_successors</code></strong> :&ensp;<code><a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></code></dt>
+<dd>All successors of all beliefs in the belief set.</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def generate_all_successors(self) -&gt; &#39;BeliefSet&#39;:
+    &#39;&#39;&#39;
+    Function to generate the successors beliefs of all the beliefs in the belief set.
+
+    Returns
+    -------
+    all_successors : BeliefSet
+        All successors of all beliefs in the belief set.
+    &#39;&#39;&#39;
+    all_successors = []
+    for belief in self.belief_list:
+        all_successors.extend(belief.generate_successors())
+    return BeliefSet(self.model, all_successors)</code></pre>
+</details>
+</dd>
 <dt id="src.pomdp.BeliefSet.plot"><code class="name flex">
 <span>def <span class="ident">plot</span></span>(<span>self, size: int = 15)</span>
 </code></dt>
@@ -4007,7 +4474,7 @@ Note: Only works for 2-state and 3-state believes.</p>
 </details>
 </dd>
 <dt id="src.pomdp.BeliefSet.to_cpu"><code class="name flex">
-<span>def <span class="ident">to_cpu</span></span>(<span>self) ‑> Self</span>
+<span>def <span class="ident">to_cpu</span></span>(<span>self) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function returning an equivalent belief set object with the array of values stored on CPU instead of GPU.</p>
@@ -4020,7 +4487,7 @@ Note: Only works for 2-state and 3-state believes.</p>
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def to_cpu(self) -&gt; Self:
+<pre><code class="python">def to_cpu(self) -&gt; &#39;BeliefSet&#39;:
     &#39;&#39;&#39;
     Function returning an equivalent belief set object with the array of values stored on CPU instead of GPU.
 
@@ -4046,7 +4513,7 @@ Note: Only works for 2-state and 3-state believes.</p>
 </details>
 </dd>
 <dt id="src.pomdp.BeliefSet.to_gpu"><code class="name flex">
-<span>def <span class="ident">to_gpu</span></span>(<span>self) ‑> Self</span>
+<span>def <span class="ident">to_gpu</span></span>(<span>self) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function returning an equivalent belief set object with the array of values stored on GPU instead of CPU.</p>
@@ -4059,7 +4526,7 @@ Note: Only works for 2-state and 3-state believes.</p>
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def to_gpu(self) -&gt; Self:
+<pre><code class="python">def to_gpu(self) -&gt; &#39;BeliefSet&#39;:
     &#39;&#39;&#39;
     Function returning an equivalent belief set object with the array of values stored on GPU instead of CPU.
 
@@ -4298,7 +4765,6 @@ Parameters</p>
 
         # Convergence check boundary
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
-        old_max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
 
         # History tracking
         solver_history = SolverHistory(tracking_level=history_tracking_level,
@@ -4310,6 +4776,7 @@ Parameters</p>
                                        initial_belief_set=BeliefSet(model, [b])
                                        )
 
+        old_value_function = value_function
         for i in trange(expansions, desc=&#39;Expansions&#39;) if print_progress else range(expansions):
 
             # Expand (exploration)
@@ -4325,17 +4792,23 @@ Parameters</p>
             start_ts = datetime.now()
 
             value_function = self.backup(model, belief_set, value_function, append=True)
+            backup_time = (datetime.now() - start_ts).total_seconds()
 
             # Additional pruning
             if (i % prune_interval) == 0 and i &gt; 0:
+                start_ts = datetime.now()
+                vf_len = len(value_function)
+
                 value_function.prune(prune_level)
 
+                prune_time = (datetime.now() - start_ts).total_seconds()
+                alpha_vectors_pruned = len(value_function) - vf_len
+                solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
+
             # Change computation
-            max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
-            max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
+            max_change = self.compute_change(old_value_function, value_function, belief_set)
 
             # History tracking
-            backup_time = (datetime.now() - start_ts).total_seconds()
             solver_history.add_backup_step(backup_time, max_change, value_function)
             
             # Convergence check
@@ -4343,10 +4816,17 @@ Parameters</p>
                 print(&#39;Converged!&#39;)
                 break
             
-            old_max_val_per_belief = max_val_per_belief
+            old_value_function = value_function
 
         # Final pruning
+        start_ts = datetime.now()
+        vf_len = len(value_function)
+
         value_function.prune(prune_level)
+
+        prune_time = (datetime.now() - start_ts).total_seconds()
+        alpha_vectors_pruned = len(value_function) - vf_len
+        solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
         
         return value_function, solver_history</code></pre>
 </details>
@@ -4595,7 +5075,6 @@ It should therefore be set to a bit higher than the maximum amount steps require
 
     # Convergence check boundary
     max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
-    old_max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
 
     # History tracking
     solver_history = SolverHistory(tracking_level=history_tracking_level,
@@ -4607,6 +5086,7 @@ It should therefore be set to a bit higher than the maximum amount steps require
                                    initial_belief_set=BeliefSet(model, [b])
                                    )
 
+    old_value_function = value_function
     for i in trange(expansions, desc=&#39;Expansions&#39;) if print_progress else range(expansions):
 
         # Expand (exploration)
@@ -4622,17 +5102,23 @@ It should therefore be set to a bit higher than the maximum amount steps require
         start_ts = datetime.now()
 
         value_function = self.backup(model, belief_set, value_function, append=True)
+        backup_time = (datetime.now() - start_ts).total_seconds()
 
         # Additional pruning
         if (i % prune_interval) == 0 and i &gt; 0:
+            start_ts = datetime.now()
+            vf_len = len(value_function)
+
             value_function.prune(prune_level)
 
+            prune_time = (datetime.now() - start_ts).total_seconds()
+            alpha_vectors_pruned = len(value_function) - vf_len
+            solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
+
         # Change computation
-        max_val_per_belief = xp.max(xp.matmul(b.values.reshape((1,model.state_count)), value_function.alpha_vector_array.T), axis=1)
-        max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
+        max_change = self.compute_change(old_value_function, value_function, belief_set)
 
         # History tracking
-        backup_time = (datetime.now() - start_ts).total_seconds()
         solver_history.add_backup_step(backup_time, max_change, value_function)
         
         # Convergence check
@@ -4640,10 +5126,17 @@ It should therefore be set to a bit higher than the maximum amount steps require
             print(&#39;Converged!&#39;)
             break
         
-        old_max_val_per_belief = max_val_per_belief
+        old_value_function = value_function
 
     # Final pruning
+    start_ts = datetime.now()
+    vf_len = len(value_function)
+
     value_function.prune(prune_level)
+
+    prune_time = (datetime.now() - start_ts).total_seconds()
+    alpha_vectors_pruned = len(value_function) - vf_len
+    solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
     
     return value_function, solver_history</code></pre>
 </details>
@@ -4654,11 +5147,14 @@ It should therefore be set to a bit higher than the maximum amount steps require
 <li><code><b><a title="src.pomdp.PBVI_Solver" href="#src.pomdp.PBVI_Solver">PBVI_Solver</a></b></code>:
 <ul class="hlist">
 <li><code><a title="src.pomdp.PBVI_Solver.backup" href="#src.pomdp.PBVI_Solver.backup">backup</a></code></li>
+<li><code><a title="src.pomdp.PBVI_Solver.compute_change" href="#src.pomdp.PBVI_Solver.compute_change">compute_change</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand" href="#src.pomdp.PBVI_Solver.expand">expand</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_ger" href="#src.pomdp.PBVI_Solver.expand_ger">expand_ger</a></code></li>
+<li><code><a title="src.pomdp.PBVI_Solver.expand_ra" href="#src.pomdp.PBVI_Solver.expand_ra">expand_ra</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_ssea" href="#src.pomdp.PBVI_Solver.expand_ssea">expand_ssea</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_ssga" href="#src.pomdp.PBVI_Solver.expand_ssga">expand_ssga</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_ssra" href="#src.pomdp.PBVI_Solver.expand_ssra">expand_ssra</a></code></li>
+<li><code><a title="src.pomdp.PBVI_Solver.test_n_simulations" href="#src.pomdp.PBVI_Solver.test_n_simulations">test_n_simulations</a></code></li>
 </ul>
 </li>
 </ul>
@@ -5213,6 +5709,115 @@ Parameters</p>
         self.expand_function_params = expand_function_params
 
 
+    def test_n_simulations(self, model:Model, value_function:ValueFunction, n:int=1000, horizon:int=300, print_progress:bool=False):
+        &#39;&#39;&#39;
+        Function that tests a value function with n simulations. It returns the start states, the amount of steps in which the simulation reached an end state, the rewards received and the discounted rewards received.
+
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model on which to run the simulations.
+        value_function : ValueFunction
+            The value function that will be evaluated.
+        n : int, default=1000
+            The amount of simulations to run.
+        horizon : int, default=300
+            The maximum amount of steps the simulation can run for.
+        print_progress : bool, default=False
+            Whether to display a progress bar of how many simulation steps have been run so far. 
+        &#39;&#39;&#39;
+        # GPU support
+        xp = np if not value_function.is_on_gpu else cp
+        model = model.cpu_model if not value_function.is_on_gpu else model.gpu_model
+
+        # Genetion of an array of n beliefs
+        initial_beliefs = xp.repeat(Belief(model).values[None,:], n, axis=0)
+
+        # Generating n initial positions
+        start_states = xp.random.choice(model.states, size=n, p=model.start_probabilities)
+        
+        # Belief and state arrays
+        beliefs = initial_beliefs
+        new_beliefs = None
+        states = start_states
+        next_states = None
+
+        # Tracking what simulations are done
+        sim_is_done = xp.zeros(n, dtype=bool)
+        done_at_step = xp.full(n, -1)
+
+        # Speedup item
+        simulations = xp.arange(n)
+        flatten_offset = (simulations[:,None] * model.state_count)
+        flat_shape = (n, (model.state_count * model.reachable_state_count))
+
+        # 2D bincount for belief set update
+        def bincount2D_vectorized(a, w):    
+            a_offs = a + flatten_offset
+            return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape(-1,model.state_count)
+
+        # Results
+        discount = self.gamma
+        rewards = []
+        discounted_rewards = []
+        
+        iterator = trange(horizon) if print_progress else range(horizon)
+        for i in iterator:
+            # Retrieving the top vectors according to the value function
+            best_vectors = xp.argmax(xp.matmul(beliefs, value_function.alpha_vector_array.T), axis=1)
+
+            # Retrieving the actions associated with the vectors chosen
+            best_actions = value_function.actions[best_vectors]
+
+            # Get each reachable next states for each action
+            reachable_state_per_actions = model.reachable_states[:, best_actions, :]
+
+            # Gathering new states based on the transition function and the chosen actions
+            next_state_potentials = reachable_state_per_actions[states, simulations]
+            if model.reachable_state_count == 1:
+                next_states = next_state_potentials[:,0]
+            else:
+                potential_probabilities = model.reachable_probabilities[states[:,None], best_actions[:,None]][:,0,:]
+                chosen_indices = xp.apply_along_axis(lambda x: xp.random.choice(len(x), size=1, p=x), axis=1, arr=potential_probabilities)
+                next_states = next_state_potentials[chosen_indices][:,0,0]
+
+            # Making observations based on the states landed in and the action that was taken
+            observation_probabilities = model.observation_table[next_states[:,None], best_actions[:,None]][:,0,:]
+            observations = xp.sum(xp.random.random(n)[:,None] &gt; xp.cumsum(observation_probabilities[:,:-1], axis=1), axis=1)
+
+            # Belief set update
+            reachable_probabilities = (model.reachable_transitional_observation_table[:,best_actions,observations,:] * beliefs.T[:,:,None])
+            new_beliefs = bincount2D_vectorized(a=reachable_state_per_actions.swapaxes(0,1).reshape(flat_shape),
+                                                w=reachable_probabilities.swapaxes(0,1).reshape(flat_shape))
+
+            new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
+
+            # Rewards computation
+            step_rewards = xp.array([model.immediate_reward_function(s,a,s_p,o) for s,a,s_p,o in zip(states, best_actions, next_states, observations)])
+            rewards.append(xp.where(~sim_is_done, step_rewards, 0))
+            discounted_rewards.append(xp.where(~sim_is_done, step_rewards * discount, 0))
+
+            # Checking for done condition
+            are_done = xp.isin(next_states, xp.array(model.end_states))
+            done_at_step[sim_is_done ^ are_done] = i+1
+            sim_is_done |= are_done
+
+            # Update iterator postfix
+            if print_progress:
+                iterator.set_postfix({&#39;done&#39;: xp.sum(sim_is_done)})
+
+            # Replacing old with new
+            states = next_states
+            beliefs = new_beliefs
+            discount *= self.gamma
+
+            # Early stopping
+            if xp.all(sim_is_done):
+                break
+
+        return start_states, done_at_step, rewards, discounted_rewards
+
+
     def backup(self,
                model:Model,
                belief_set:BeliefSet,
@@ -5257,12 +5862,12 @@ Parameters</p>
         gamma_a_o_t = self.gamma * xp.einsum(&#39;saor,vsar-&gt;aovs&#39;, model.reachable_transitional_observation_table, vectors_array_reachable_states)
 
         # Step 2
-        belief_array = belief_set.belief_array
-        best_alpha_ind = xp.argmax(xp.tensordot(belief_array, gamma_a_o_t, (1,3)), axis=3)
+        belief_array = belief_set.belief_array # bs
+        best_alpha_ind = xp.argmax(xp.tensordot(belief_array, gamma_a_o_t, (1,3)), axis=3) # argmax(bs,aovs-&gt;baov) -&gt; bao
 
-        best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]]
+        best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]] # baos
 
-        alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2)
+        alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2) # as + bas
 
         # Step 3
         best_actions = xp.argmax(xp.einsum(&#39;bas,bs-&gt;ba&#39;, alpha_a, belief_array), axis=1)
@@ -5286,6 +5891,33 @@ Parameters</p>
                 
         return new_value_function
     
+
+    def expand_ra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
+        &#39;&#39;&#39;
+        This expansion technique relies only randomness and will generate at most &#39;max_generation&#39; beliefs.
+
+        Parameters
+        model : pomdp.Model
+            The POMDP model on which to expand the belief set on.
+        belief_set : BeliefSet
+            List of beliefs to expand on.
+        max_generation : int, default=10
+            The max amount of beliefs that can be added to the belief set at once.
+        &#39;&#39;&#39;
+        xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
+
+        # How many new beliefs to add
+        generation_count = min(belief_set.belief_array.shape[0], max_generation)
+
+        # Generation of the new beliefs at random
+        new_beliefs = xp.random.random((generation_count, model.state_count))
+        new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
+
+        # Combining with the initial belief set
+        new_belief_set = np.vstack((belief_set.belief_array, new_beliefs))
+
+        return BeliefSet(model, new_belief_set)
+
     
     def expand_ssra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
@@ -5316,7 +5948,10 @@ Parameters</p>
         new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
 
-        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
+        # Random previous beliefs
+        rand_ind = np.random.choice(np.arange(old_shape[0]), to_generate, replace=False)
+
+        for i, belief_vector in enumerate(belief_set.belief_array[rand_ind]):
             b = Belief(model, belief_vector)
             s = b.random_state()
             a = random.choice(model.actions)
@@ -5363,8 +5998,11 @@ Parameters</p>
 
         new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
-                
-        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
+
+        # Random previous beliefs
+        rand_ind = np.random.choice(np.arange(old_shape[0]), to_generate, replace=False)
+
+        for i, belief_vector in enumerate(belief_set.belief_array[rand_ind]):
             b = Belief(model, belief_vector)
             s = b.random_state()
             
@@ -5456,12 +6094,21 @@ Parameters</p>
             Union of the belief_set and the expansions of the beliefs in the belief_set
         &#39;&#39;&#39;
         print(&#39;Not implemented&#39;)
+        xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
+
+        old_shape = belief_set.belief_array.shape
+        to_generate = min(max_generation, old_shape[0])
+
+        new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
+        new_belief_array[:old_shape[0]] = belief_set.belief_array
+
         return []
 
 
     def expand(self, model:Model, belief_set:BeliefSet, max_generation:int, **function_specific_parameters) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Central method to call one of the functions for a particular expansion strategy:
+            - Random selction (RA)
             - Stochastic Simulation with Random Action (ssra)
             - Stochastic Simulation with Greedy Action (ssga)
             - Stochastic Simulation with Exploratory Action (ssea)
@@ -5484,6 +6131,9 @@ Parameters</p>
             The belief set the expansion function returns. 
         &#39;&#39;&#39;
         if self.expand_function in &#39;expand_ssra&#39;:
+            return self.expand_ra(model=model, belief_set=belief_set, max_generation=max_generation)
+
+        if self.expand_function in &#39;expand_ssra&#39;:
             return self.expand_ssra(model=model, belief_set=belief_set, max_generation=max_generation)
         
         elif self.expand_function in &#39;expand_ssga&#39;:
@@ -5498,6 +6148,37 @@ Parameters</p>
             return self.expand_ger(model=model, belief_set=belief_set, max_generation=max_generation, **args)
         
         return []
+
+
+    def compute_change(self, value_function:ValueFunction, new_value_function:ValueFunction, belief_set:BeliefSet) -&gt; float:
+        &#39;&#39;&#39;
+        Function to compute whether the change between two value functions can be considered as having converged based on the eps parameter of the Solver.
+        It check for each belief, the maximum value and take the max change between believe&#39;s value functions.
+        If this max change is lower than eps * (gamma / (1 - gamma)).
+
+        Parameters
+        ----------
+        value_function : ValueFunction
+            The first value function to compare.
+        new_value_function : ValueFunction
+            The second value function to compare.
+        belief_set : BeliefSet
+            The set of believes to check the values on to compute the max change on.
+
+        Returns
+        -------
+        max_change : float
+            The maximum change between value functions at belief points.
+        &#39;&#39;&#39;
+        # Get numpy corresponding to the arrays
+        xp = np if not gpu_support else cp.get_array_module(value_function.alpha_vector_array)
+
+        # Computing Delta for each beliefs
+        max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
+        new_max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, new_value_function.alpha_vector_array.T), axis=1)
+        max_change = xp.max(xp.abs(new_max_val_per_belief - max_val_per_belief))
+
+        return max_change
 
 
     def solve(self,
@@ -5581,7 +6262,7 @@ Parameters</p>
         if initial_value_function is None:
             value_function = ValueFunction(model, model.expected_rewards_table.T, model.actions)
         else:
-            value_function = initial_value_function.to_gpu() if use_gpu else initial_value_function 
+            value_function = initial_value_function.to_gpu() if use_gpu else initial_value_function
 
         # Convergence check boundary
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
@@ -5597,7 +6278,8 @@ Parameters</p>
 
         # Loop
         iteration = 0
-        expand_max_val_per_belief = None
+        expand_value_function = value_function
+        old_value_function = value_function
         for expansion_i in range(expansions) if not print_progress else trange(expansions, desc=&#39;Expansions&#39;):
 
             # 1: Expand belief set
@@ -5613,38 +6295,57 @@ Parameters</p>
             solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
 
             # 2: Backup, update value function (alpha vector set)
-            old_max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
-            expand_max_val_per_belief = xp.copy(old_max_val_per_belief)
-
             for _ in range(horizon) if not print_progress else trange(horizon, desc=f&#39;Backups {expansion_i}&#39;):
                 start_ts = datetime.now()
 
-                value_function = self.backup(model, belief_set, value_function)
+                # Backup step
+                value_function = self.backup(model, belief_set, value_function, belief_dominance_prune=False)
+                backup_time = (datetime.now() - start_ts).total_seconds()
 
                 # Additional pruning
                 if (iteration % prune_interval) == 0 and iteration &gt; 0:
+                    start_ts = datetime.now()
+                    vf_len = len(value_function)
+
                     value_function.prune(prune_level)
 
-                # Max change
-                max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
-                max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
+                    prune_time = (datetime.now() - start_ts).total_seconds()
+                    alpha_vectors_pruned = len(value_function) - vf_len
+                    solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
                 
+                # Compute the change between value functions
+                max_change = self.compute_change(value_function, old_value_function, belief_set)
+
                 # History tracking
-                backup_time = (datetime.now() - start_ts).total_seconds()
                 solver_history.add_backup_step(backup_time, max_change, value_function)
 
-                # convergence check
+                # Convergence check
                 if max_change &lt; max_allowed_change:
                     break
-                old_max_val_per_belief = max_val_per_belief
+
+                old_value_function = value_function
 
                 # Update iteration counter
                 iteration += 1
 
-            expand_max_change = xp.max(xp.abs(max_val_per_belief - expand_max_val_per_belief))
+            # Compute change with old expansion value function
+            expand_max_change = self.compute_change(expand_value_function, value_function, belief_set)
+
             if expand_max_change &lt; max_allowed_change:
                 print(&#39;Converged!&#39;)
                 break
+
+            expand_value_function = value_function
+
+        # Final pruning
+        start_ts = datetime.now()
+        vf_len = len(value_function)
+
+        value_function.prune(prune_level)
+
+        prune_time = (datetime.now() - start_ts).total_seconds()
+        alpha_vectors_pruned = len(value_function) - vf_len
+        solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
 
         return value_function, solver_history</code></pre>
 </details>
@@ -5735,12 +6436,12 @@ In the end we have a set of alpha vectors as large as the amount of beliefs.</p>
     gamma_a_o_t = self.gamma * xp.einsum(&#39;saor,vsar-&gt;aovs&#39;, model.reachable_transitional_observation_table, vectors_array_reachable_states)
 
     # Step 2
-    belief_array = belief_set.belief_array
-    best_alpha_ind = xp.argmax(xp.tensordot(belief_array, gamma_a_o_t, (1,3)), axis=3)
+    belief_array = belief_set.belief_array # bs
+    best_alpha_ind = xp.argmax(xp.tensordot(belief_array, gamma_a_o_t, (1,3)), axis=3) # argmax(bs,aovs-&gt;baov) -&gt; bao
 
-    best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]]
+    best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]] # baos
 
-    alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2)
+    alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2) # as + bas
 
     # Step 3
     best_actions = xp.argmax(xp.einsum(&#39;bas,bs-&gt;ba&#39;, alpha_a, belief_array), axis=1)
@@ -5765,11 +6466,68 @@ In the end we have a set of alpha vectors as large as the amount of beliefs.</p>
     return new_value_function</code></pre>
 </details>
 </dd>
+<dt id="src.pomdp.PBVI_Solver.compute_change"><code class="name flex">
+<span>def <span class="ident">compute_change</span></span>(<span>self, value_function: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, new_value_function: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>) ‑> float</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Function to compute whether the change between two value functions can be considered as having converged based on the eps parameter of the Solver.
+It check for each belief, the maximum value and take the max change between believe's value functions.
+If this max change is lower than eps * (gamma / (1 - gamma)).</p>
+<h2 id="parameters">Parameters</h2>
+<dl>
+<dt><strong><code>value_function</code></strong> :&ensp;<code>ValueFunction</code></dt>
+<dd>The first value function to compare.</dd>
+<dt><strong><code>new_value_function</code></strong> :&ensp;<code>ValueFunction</code></dt>
+<dd>The second value function to compare.</dd>
+<dt><strong><code>belief_set</code></strong> :&ensp;<code><a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></code></dt>
+<dd>The set of believes to check the values on to compute the max change on.</dd>
+</dl>
+<h2 id="returns">Returns</h2>
+<dl>
+<dt><strong><code>max_change</code></strong> :&ensp;<code>float</code></dt>
+<dd>The maximum change between value functions at belief points.</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def compute_change(self, value_function:ValueFunction, new_value_function:ValueFunction, belief_set:BeliefSet) -&gt; float:
+    &#39;&#39;&#39;
+    Function to compute whether the change between two value functions can be considered as having converged based on the eps parameter of the Solver.
+    It check for each belief, the maximum value and take the max change between believe&#39;s value functions.
+    If this max change is lower than eps * (gamma / (1 - gamma)).
+
+    Parameters
+    ----------
+    value_function : ValueFunction
+        The first value function to compare.
+    new_value_function : ValueFunction
+        The second value function to compare.
+    belief_set : BeliefSet
+        The set of believes to check the values on to compute the max change on.
+
+    Returns
+    -------
+    max_change : float
+        The maximum change between value functions at belief points.
+    &#39;&#39;&#39;
+    # Get numpy corresponding to the arrays
+    xp = np if not gpu_support else cp.get_array_module(value_function.alpha_vector_array)
+
+    # Computing Delta for each beliefs
+    max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
+    new_max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, new_value_function.alpha_vector_array.T), axis=1)
+    max_change = xp.max(xp.abs(new_max_val_per_belief - max_val_per_belief))
+
+    return max_change</code></pre>
+</details>
+</dd>
 <dt id="src.pomdp.PBVI_Solver.expand"><code class="name flex">
 <span>def <span class="ident">expand</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, max_generation: int, **function_specific_parameters) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Central method to call one of the functions for a particular expansion strategy:
+- Random selction (RA)
 - Stochastic Simulation with Random Action (ssra)
 - Stochastic Simulation with Greedy Action (ssga)
 - Stochastic Simulation with Exploratory Action (ssea)
@@ -5797,6 +6555,7 @@ In the end we have a set of alpha vectors as large as the amount of beliefs.</p>
 <pre><code class="python">def expand(self, model:Model, belief_set:BeliefSet, max_generation:int, **function_specific_parameters) -&gt; BeliefSet:
     &#39;&#39;&#39;
     Central method to call one of the functions for a particular expansion strategy:
+        - Random selction (RA)
         - Stochastic Simulation with Random Action (ssra)
         - Stochastic Simulation with Greedy Action (ssga)
         - Stochastic Simulation with Exploratory Action (ssea)
@@ -5818,6 +6577,9 @@ In the end we have a set of alpha vectors as large as the amount of beliefs.</p>
     belief_set_new : BeliefSet
         The belief set the expansion function returns. 
     &#39;&#39;&#39;
+    if self.expand_function in &#39;expand_ssra&#39;:
+        return self.expand_ra(model=model, belief_set=belief_set, max_generation=max_generation)
+
     if self.expand_function in &#39;expand_ssra&#39;:
         return self.expand_ssra(model=model, belief_set=belief_set, max_generation=max_generation)
     
@@ -5881,7 +6643,58 @@ Parameters</p>
         Union of the belief_set and the expansions of the beliefs in the belief_set
     &#39;&#39;&#39;
     print(&#39;Not implemented&#39;)
+    xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
+
+    old_shape = belief_set.belief_array.shape
+    to_generate = min(max_generation, old_shape[0])
+
+    new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
+    new_belief_array[:old_shape[0]] = belief_set.belief_array
+
     return []</code></pre>
+</details>
+</dd>
+<dt id="src.pomdp.PBVI_Solver.expand_ra"><code class="name flex">
+<span>def <span class="ident">expand_ra</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, max_generation: int = 10) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
+</code></dt>
+<dd>
+<div class="desc"><p>This expansion technique relies only randomness and will generate at most 'max_generation' beliefs.</p>
+<p>Parameters
+model : pomdp.Model
+The POMDP model on which to expand the belief set on.
+belief_set : BeliefSet
+List of beliefs to expand on.
+max_generation : int, default=10
+The max amount of beliefs that can be added to the belief set at once.</p></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def expand_ra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
+    &#39;&#39;&#39;
+    This expansion technique relies only randomness and will generate at most &#39;max_generation&#39; beliefs.
+
+    Parameters
+    model : pomdp.Model
+        The POMDP model on which to expand the belief set on.
+    belief_set : BeliefSet
+        List of beliefs to expand on.
+    max_generation : int, default=10
+        The max amount of beliefs that can be added to the belief set at once.
+    &#39;&#39;&#39;
+    xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
+
+    # How many new beliefs to add
+    generation_count = min(belief_set.belief_array.shape[0], max_generation)
+
+    # Generation of the new beliefs at random
+    new_beliefs = xp.random.random((generation_count, model.state_count))
+    new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
+
+    # Combining with the initial belief set
+    new_belief_set = np.vstack((belief_set.belief_array, new_beliefs))
+
+    return BeliefSet(model, new_belief_set)</code></pre>
 </details>
 </dd>
 <dt id="src.pomdp.PBVI_Solver.expand_ssea"><code class="name flex">
@@ -6030,8 +6843,11 @@ From this action a and observation o we can update our belief. </p>
 
     new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
     new_belief_array[:old_shape[0]] = belief_set.belief_array
-            
-    for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
+
+    # Random previous beliefs
+    rand_ind = np.random.choice(np.arange(old_shape[0]), to_generate, replace=False)
+
+    for i, belief_vector in enumerate(belief_set.belief_array[rand_ind]):
         b = Belief(model, belief_vector)
         s = b.random_state()
         
@@ -6105,7 +6921,10 @@ From this action a and observation o we can update our belief.</p>
     new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
     new_belief_array[:old_shape[0]] = belief_set.belief_array
 
-    for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
+    # Random previous beliefs
+    rand_ind = np.random.choice(np.arange(old_shape[0]), to_generate, replace=False)
+
+    for i, belief_vector in enumerate(belief_set.belief_array[rand_ind]):
         b = Belief(model, belief_vector)
         s = b.random_state()
         a = random.choice(model.actions)
@@ -6248,7 +7067,7 @@ It consists in 2 steps, Backup and Expand.
     if initial_value_function is None:
         value_function = ValueFunction(model, model.expected_rewards_table.T, model.actions)
     else:
-        value_function = initial_value_function.to_gpu() if use_gpu else initial_value_function 
+        value_function = initial_value_function.to_gpu() if use_gpu else initial_value_function
 
     # Convergence check boundary
     max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
@@ -6264,7 +7083,8 @@ It consists in 2 steps, Backup and Expand.
 
     # Loop
     iteration = 0
-    expand_max_val_per_belief = None
+    expand_value_function = value_function
+    old_value_function = value_function
     for expansion_i in range(expansions) if not print_progress else trange(expansions, desc=&#39;Expansions&#39;):
 
         # 1: Expand belief set
@@ -6280,40 +7100,190 @@ It consists in 2 steps, Backup and Expand.
         solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
 
         # 2: Backup, update value function (alpha vector set)
-        old_max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
-        expand_max_val_per_belief = xp.copy(old_max_val_per_belief)
-
         for _ in range(horizon) if not print_progress else trange(horizon, desc=f&#39;Backups {expansion_i}&#39;):
             start_ts = datetime.now()
 
-            value_function = self.backup(model, belief_set, value_function)
+            # Backup step
+            value_function = self.backup(model, belief_set, value_function, belief_dominance_prune=False)
+            backup_time = (datetime.now() - start_ts).total_seconds()
 
             # Additional pruning
             if (iteration % prune_interval) == 0 and iteration &gt; 0:
+                start_ts = datetime.now()
+                vf_len = len(value_function)
+
                 value_function.prune(prune_level)
 
-            # Max change
-            max_val_per_belief = xp.max(xp.matmul(belief_set.belief_array, value_function.alpha_vector_array.T), axis=1)
-            max_change = xp.max(xp.abs(max_val_per_belief - old_max_val_per_belief))
+                prune_time = (datetime.now() - start_ts).total_seconds()
+                alpha_vectors_pruned = len(value_function) - vf_len
+                solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
             
+            # Compute the change between value functions
+            max_change = self.compute_change(value_function, old_value_function, belief_set)
+
             # History tracking
-            backup_time = (datetime.now() - start_ts).total_seconds()
             solver_history.add_backup_step(backup_time, max_change, value_function)
 
-            # convergence check
+            # Convergence check
             if max_change &lt; max_allowed_change:
                 break
-            old_max_val_per_belief = max_val_per_belief
+
+            old_value_function = value_function
 
             # Update iteration counter
             iteration += 1
 
-        expand_max_change = xp.max(xp.abs(max_val_per_belief - expand_max_val_per_belief))
+        # Compute change with old expansion value function
+        expand_max_change = self.compute_change(expand_value_function, value_function, belief_set)
+
         if expand_max_change &lt; max_allowed_change:
             print(&#39;Converged!&#39;)
             break
 
+        expand_value_function = value_function
+
+    # Final pruning
+    start_ts = datetime.now()
+    vf_len = len(value_function)
+
+    value_function.prune(prune_level)
+
+    prune_time = (datetime.now() - start_ts).total_seconds()
+    alpha_vectors_pruned = len(value_function) - vf_len
+    solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
+
     return value_function, solver_history</code></pre>
+</details>
+</dd>
+<dt id="src.pomdp.PBVI_Solver.test_n_simulations"><code class="name flex">
+<span>def <span class="ident">test_n_simulations</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, value_function: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, n: int = 1000, horizon: int = 300, print_progress: bool = False)</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Function that tests a value function with n simulations. It returns the start states, the amount of steps in which the simulation reached an end state, the rewards received and the discounted rewards received.</p>
+<h2 id="parameters">Parameters</h2>
+<dl>
+<dt><strong><code>model</code></strong> :&ensp;<code>pomdp.Model</code></dt>
+<dd>The model on which to run the simulations.</dd>
+<dt><strong><code>value_function</code></strong> :&ensp;<code>ValueFunction</code></dt>
+<dd>The value function that will be evaluated.</dd>
+<dt><strong><code>n</code></strong> :&ensp;<code>int</code>, default=<code>1000</code></dt>
+<dd>The amount of simulations to run.</dd>
+<dt><strong><code>horizon</code></strong> :&ensp;<code>int</code>, default=<code>300</code></dt>
+<dd>The maximum amount of steps the simulation can run for.</dd>
+<dt><strong><code>print_progress</code></strong> :&ensp;<code>bool</code>, default=<code>False</code></dt>
+<dd>Whether to display a progress bar of how many simulation steps have been run so far.</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def test_n_simulations(self, model:Model, value_function:ValueFunction, n:int=1000, horizon:int=300, print_progress:bool=False):
+    &#39;&#39;&#39;
+    Function that tests a value function with n simulations. It returns the start states, the amount of steps in which the simulation reached an end state, the rewards received and the discounted rewards received.
+
+    Parameters
+    ----------
+    model : pomdp.Model
+        The model on which to run the simulations.
+    value_function : ValueFunction
+        The value function that will be evaluated.
+    n : int, default=1000
+        The amount of simulations to run.
+    horizon : int, default=300
+        The maximum amount of steps the simulation can run for.
+    print_progress : bool, default=False
+        Whether to display a progress bar of how many simulation steps have been run so far. 
+    &#39;&#39;&#39;
+    # GPU support
+    xp = np if not value_function.is_on_gpu else cp
+    model = model.cpu_model if not value_function.is_on_gpu else model.gpu_model
+
+    # Genetion of an array of n beliefs
+    initial_beliefs = xp.repeat(Belief(model).values[None,:], n, axis=0)
+
+    # Generating n initial positions
+    start_states = xp.random.choice(model.states, size=n, p=model.start_probabilities)
+    
+    # Belief and state arrays
+    beliefs = initial_beliefs
+    new_beliefs = None
+    states = start_states
+    next_states = None
+
+    # Tracking what simulations are done
+    sim_is_done = xp.zeros(n, dtype=bool)
+    done_at_step = xp.full(n, -1)
+
+    # Speedup item
+    simulations = xp.arange(n)
+    flatten_offset = (simulations[:,None] * model.state_count)
+    flat_shape = (n, (model.state_count * model.reachable_state_count))
+
+    # 2D bincount for belief set update
+    def bincount2D_vectorized(a, w):    
+        a_offs = a + flatten_offset
+        return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape(-1,model.state_count)
+
+    # Results
+    discount = self.gamma
+    rewards = []
+    discounted_rewards = []
+    
+    iterator = trange(horizon) if print_progress else range(horizon)
+    for i in iterator:
+        # Retrieving the top vectors according to the value function
+        best_vectors = xp.argmax(xp.matmul(beliefs, value_function.alpha_vector_array.T), axis=1)
+
+        # Retrieving the actions associated with the vectors chosen
+        best_actions = value_function.actions[best_vectors]
+
+        # Get each reachable next states for each action
+        reachable_state_per_actions = model.reachable_states[:, best_actions, :]
+
+        # Gathering new states based on the transition function and the chosen actions
+        next_state_potentials = reachable_state_per_actions[states, simulations]
+        if model.reachable_state_count == 1:
+            next_states = next_state_potentials[:,0]
+        else:
+            potential_probabilities = model.reachable_probabilities[states[:,None], best_actions[:,None]][:,0,:]
+            chosen_indices = xp.apply_along_axis(lambda x: xp.random.choice(len(x), size=1, p=x), axis=1, arr=potential_probabilities)
+            next_states = next_state_potentials[chosen_indices][:,0,0]
+
+        # Making observations based on the states landed in and the action that was taken
+        observation_probabilities = model.observation_table[next_states[:,None], best_actions[:,None]][:,0,:]
+        observations = xp.sum(xp.random.random(n)[:,None] &gt; xp.cumsum(observation_probabilities[:,:-1], axis=1), axis=1)
+
+        # Belief set update
+        reachable_probabilities = (model.reachable_transitional_observation_table[:,best_actions,observations,:] * beliefs.T[:,:,None])
+        new_beliefs = bincount2D_vectorized(a=reachable_state_per_actions.swapaxes(0,1).reshape(flat_shape),
+                                            w=reachable_probabilities.swapaxes(0,1).reshape(flat_shape))
+
+        new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
+
+        # Rewards computation
+        step_rewards = xp.array([model.immediate_reward_function(s,a,s_p,o) for s,a,s_p,o in zip(states, best_actions, next_states, observations)])
+        rewards.append(xp.where(~sim_is_done, step_rewards, 0))
+        discounted_rewards.append(xp.where(~sim_is_done, step_rewards * discount, 0))
+
+        # Checking for done condition
+        are_done = xp.isin(next_states, xp.array(model.end_states))
+        done_at_step[sim_is_done ^ are_done] = i+1
+        sim_is_done |= are_done
+
+        # Update iterator postfix
+        if print_progress:
+            iterator.set_postfix({&#39;done&#39;: xp.sum(sim_is_done)})
+
+        # Replacing old with new
+        states = next_states
+        beliefs = new_beliefs
+        discount *= self.gamma
+
+        # Early stopping
+        if xp.all(sim_is_done):
+            break
+
+    return start_states, done_at_step, rewards, discounted_rewards</code></pre>
 </details>
 </dd>
 </dl>
@@ -6591,20 +7561,26 @@ The main purpose of the class is to provide a set of visualization options of th
         # Data
         data = np.array(self.grid_point_sequence)[:(frame_i+1),:]
         belief = self.beliefs[frame_i]
+        observations = self.observations[:(frame_i)]
+        obs_colors = [&#39;#000000&#39;] + [COLOR_LIST[o][&#39;hex&#39;] for o in observations]
 
         # Ticks
         dimensions = self.model.state_grid.shape
-        x_ticks = [i for i in range(dimensions[1])]
-        y_ticks = [i for i in range(dimensions[0])]
+        x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] &lt; 10 else int(dimensions[1] / 10)))
+        y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] &lt; 5 else int(dimensions[0] / 5)))
 
         # Plotting
         ax.clear()
         ax.set_title(f&#39;Simulation (Frame {frame_i})&#39;)
 
+        # Observation labels legend
+        proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[o][&#39;id&#39;]) for o in self.model.observations]
+        ax.legend(proxy, self.model.observation_labels, title=&#39;Observations&#39;) # type: ignore
+
         grid_values = belief.values[self.model.state_grid]
         ax.imshow(grid_values, cmap=&#39;Blues&#39;)
-        ax.plot(data[:,1], data[:,0], color=&#39;red&#39;)
-        ax.scatter(data[:,1], data[:,0], color=&#39;red&#39;)
+        ax.plot(data[:,1], data[:,0], color=&#39;red&#39;, zorder=-1)
+        ax.scatter(data[:,1], data[:,0], c=obs_colors)
 
         ax.set_xticks(x_ticks)
         ax.set_yticks(y_ticks)</code></pre>
@@ -6852,10 +7828,12 @@ The visualizations available are:
         # Time tracking
         self.expansion_times = []
         self.backup_times = []
+        self.pruning_times = []
 
         # Value function and belief set sizes tracking
         self.alpha_vector_counts = []
         self.beliefs_counts = []
+        self.prune_counts = []
 
         if self.tracking_level &gt;= 1:
             self.alpha_vector_counts.append(len(initial_value_function))
@@ -6928,7 +7906,6 @@ The visualizations available are:
         value_function : ValueFunction
             The value function resulting after a step of the solving process.
         &#39;&#39;&#39;
-
         if self.tracking_level &gt;= 1:
             self.backup_times.append(float(backup_time))
             self.alpha_vector_counts.append(len(value_function))
@@ -6936,6 +7913,25 @@ The visualizations available are:
 
         if self.tracking_level &gt;= 2:
             self.value_functions.append(value_function if not value_function.is_on_gpu else value_function.to_cpu())
+
+
+    def add_prune_step(self,
+                       prune_time:float,
+                       alpha_vectors_pruned:int
+                       ) -&gt; None:
+        &#39;&#39;&#39;
+        Function to add a prune step in the simulation history by recording the amount of alpha vectors that were pruned by the pruning function and how long it took.
+
+        Parameters
+        ----------
+        prune_time : float
+            The time it took to run the pruning step.
+        alpha_vectors_pruned : int
+            How many alpha vectors were pruned.
+        &#39;&#39;&#39;
+        if self.tracking_level &gt;= 1:
+            self.pruning_times.append(prune_time)
+            self.prune_counts.append(alpha_vectors_pruned)
 
 
     @property
@@ -6961,6 +7957,9 @@ The visualizations available are:
 
             summary_str += f&#39;\n  - Backup function took on average {sum(self.backup_times) /len(self.backup_times):.4f}s &#39;
             summary_str += f&#39;and yielded on average value functions of size {sum(self.alpha_vector_counts[1:]) / len(self.alpha_vector_counts[1:]):.2f} per iteration.&#39;
+        
+            summary_str += f&#39;\n  - Pruning function took on average {sum(self.pruning_times) /len(self.pruning_times):.4f}s &#39;
+            summary_str += f&#39;and yielded on average prunings of {sum(self.prune_counts) / len(self.prune_counts):.2f} alpha vectors per iteration.&#39;
         
         return summary_str
     
@@ -7062,7 +8061,7 @@ The visualizations available are:
             for i in range(1,len(solver_histories)):
                 graph_names.append(f&#39;Comparison {i}&#39;)
 
-        def plot_on_ax(history:Union[ValueFunction,Self], frame_i:int, ax, line_type:str):
+        def plot_on_ax(history:Union[ValueFunction,&#39;SolverHistory&#39;], frame_i:int, ax, line_type:str):
             if isinstance(history, ValueFunction):
                 value_function = history
             else:
@@ -7083,6 +8082,10 @@ The visualizations available are:
         def plt_frame(frame_i):
             ax1.clear()
             ax2.clear()
+
+            # Axes labels
+            ax1.set_ylabel(&#39;V(b)&#39;)
+            ax2.set_xlabel(&#39;Belief space&#39;)
 
             self_frame_i = frame_i if frame_i &lt; len(self.value_functions) else (len(self.value_functions) - 1)
 
@@ -7203,6 +8206,9 @@ def summary(self) -&gt; str:
         summary_str += f&#39;\n  - Backup function took on average {sum(self.backup_times) /len(self.backup_times):.4f}s &#39;
         summary_str += f&#39;and yielded on average value functions of size {sum(self.alpha_vector_counts[1:]) / len(self.alpha_vector_counts[1:]):.2f} per iteration.&#39;
     
+        summary_str += f&#39;\n  - Pruning function took on average {sum(self.pruning_times) /len(self.pruning_times):.4f}s &#39;
+        summary_str += f&#39;and yielded on average prunings of {sum(self.prune_counts) / len(self.prune_counts):.2f} alpha vectors per iteration.&#39;
+    
     return summary_str</code></pre>
 </details>
 </dd>
@@ -7244,7 +8250,6 @@ def summary(self) -&gt; str:
     value_function : ValueFunction
         The value function resulting after a step of the solving process.
     &#39;&#39;&#39;
-
     if self.tracking_level &gt;= 1:
         self.backup_times.append(float(backup_time))
         self.alpha_vector_counts.append(len(value_function))
@@ -7290,6 +8295,41 @@ def summary(self) -&gt; str:
 
     if self.tracking_level &gt;= 2:
         self.belief_sets.append(belief_set if not belief_set.is_on_gpu else belief_set.to_cpu())</code></pre>
+</details>
+</dd>
+<dt id="src.pomdp.SolverHistory.add_prune_step"><code class="name flex">
+<span>def <span class="ident">add_prune_step</span></span>(<span>self, prune_time: float, alpha_vectors_pruned: int) ‑> None</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Function to add a prune step in the simulation history by recording the amount of alpha vectors that were pruned by the pruning function and how long it took.</p>
+<h2 id="parameters">Parameters</h2>
+<dl>
+<dt><strong><code>prune_time</code></strong> :&ensp;<code>float</code></dt>
+<dd>The time it took to run the pruning step.</dd>
+<dt><strong><code>alpha_vectors_pruned</code></strong> :&ensp;<code>int</code></dt>
+<dd>How many alpha vectors were pruned.</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def add_prune_step(self,
+                   prune_time:float,
+                   alpha_vectors_pruned:int
+                   ) -&gt; None:
+    &#39;&#39;&#39;
+    Function to add a prune step in the simulation history by recording the amount of alpha vectors that were pruned by the pruning function and how long it took.
+
+    Parameters
+    ----------
+    prune_time : float
+        The time it took to run the pruning step.
+    alpha_vectors_pruned : int
+        How many alpha vectors were pruned.
+    &#39;&#39;&#39;
+    if self.tracking_level &gt;= 1:
+        self.pruning_times.append(prune_time)
+        self.prune_counts.append(alpha_vectors_pruned)</code></pre>
 </details>
 </dd>
 <dt id="src.pomdp.SolverHistory.plot_belief_set"><code class="name flex">
@@ -7443,6 +8483,7 @@ Also, a single value function or list of value functions can be sent in but they
 <li>
 <h4><code><a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a></code></h4>
 <ul class="">
+<li><code><a title="src.pomdp.Belief.generate_successors" href="#src.pomdp.Belief.generate_successors">generate_successors</a></code></li>
 <li><code><a title="src.pomdp.Belief.plot" href="#src.pomdp.Belief.plot">plot</a></code></li>
 <li><code><a title="src.pomdp.Belief.random_state" href="#src.pomdp.Belief.random_state">random_state</a></code></li>
 <li><code><a title="src.pomdp.Belief.update" href="#src.pomdp.Belief.update">update</a></code></li>
@@ -7454,6 +8495,7 @@ Also, a single value function or list of value functions can be sent in but they
 <ul class="">
 <li><code><a title="src.pomdp.BeliefSet.belief_array" href="#src.pomdp.BeliefSet.belief_array">belief_array</a></code></li>
 <li><code><a title="src.pomdp.BeliefSet.belief_list" href="#src.pomdp.BeliefSet.belief_list">belief_list</a></code></li>
+<li><code><a title="src.pomdp.BeliefSet.generate_all_successors" href="#src.pomdp.BeliefSet.generate_all_successors">generate_all_successors</a></code></li>
 <li><code><a title="src.pomdp.BeliefSet.plot" href="#src.pomdp.BeliefSet.plot">plot</a></code></li>
 <li><code><a title="src.pomdp.BeliefSet.to_cpu" href="#src.pomdp.BeliefSet.to_cpu">to_cpu</a></code></li>
 <li><code><a title="src.pomdp.BeliefSet.to_gpu" href="#src.pomdp.BeliefSet.to_gpu">to_gpu</a></code></li>
@@ -7477,12 +8519,15 @@ Also, a single value function or list of value functions can be sent in but they
 <h4><code><a title="src.pomdp.PBVI_Solver" href="#src.pomdp.PBVI_Solver">PBVI_Solver</a></code></h4>
 <ul class="two-column">
 <li><code><a title="src.pomdp.PBVI_Solver.backup" href="#src.pomdp.PBVI_Solver.backup">backup</a></code></li>
+<li><code><a title="src.pomdp.PBVI_Solver.compute_change" href="#src.pomdp.PBVI_Solver.compute_change">compute_change</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand" href="#src.pomdp.PBVI_Solver.expand">expand</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_ger" href="#src.pomdp.PBVI_Solver.expand_ger">expand_ger</a></code></li>
+<li><code><a title="src.pomdp.PBVI_Solver.expand_ra" href="#src.pomdp.PBVI_Solver.expand_ra">expand_ra</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_ssea" href="#src.pomdp.PBVI_Solver.expand_ssea">expand_ssea</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_ssga" href="#src.pomdp.PBVI_Solver.expand_ssga">expand_ssga</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_ssra" href="#src.pomdp.PBVI_Solver.expand_ssra">expand_ssra</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.solve" href="#src.pomdp.PBVI_Solver.solve">solve</a></code></li>
+<li><code><a title="src.pomdp.PBVI_Solver.test_n_simulations" href="#src.pomdp.PBVI_Solver.test_n_simulations">test_n_simulations</a></code></li>
 </ul>
 </li>
 <li>
@@ -7508,6 +8553,7 @@ Also, a single value function or list of value functions can be sent in but they
 <ul class="two-column">
 <li><code><a title="src.pomdp.SolverHistory.add_backup_step" href="#src.pomdp.SolverHistory.add_backup_step">add_backup_step</a></code></li>
 <li><code><a title="src.pomdp.SolverHistory.add_expand_step" href="#src.pomdp.SolverHistory.add_expand_step">add_expand_step</a></code></li>
+<li><code><a title="src.pomdp.SolverHistory.add_prune_step" href="#src.pomdp.SolverHistory.add_prune_step">add_prune_step</a></code></li>
 <li><code><a title="src.pomdp.SolverHistory.explored_beliefs" href="#src.pomdp.SolverHistory.explored_beliefs">explored_beliefs</a></code></li>
 <li><code><a title="src.pomdp.SolverHistory.plot_belief_set" href="#src.pomdp.SolverHistory.plot_belief_set">plot_belief_set</a></code></li>
 <li><code><a title="src.pomdp.SolverHistory.plot_solution" href="#src.pomdp.SolverHistory.plot_solution">plot_solution</a></code></li>
