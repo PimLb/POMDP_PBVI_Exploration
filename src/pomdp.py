@@ -731,6 +731,8 @@ class SolverHistory:
         The epsilon parameter used by the solver (covergence bound).
     expand_function : str
         The expand (exploration) function used by the solver.
+    expand_append : bool
+        Whether the expand function appends new belief points to the belief set of reloads it all.
     initial_value_function : ValueFunction
         The initial value function the solver will use to start the solving process.
     initial_belief_set : BeliefSet
@@ -743,6 +745,7 @@ class SolverHistory:
     gamma : float
     eps : float
     expand_function : str
+    expand_append : bool
     run_ts : datetime
         The time at which the SolverHistory object was instantiated which is assumed to be the start of the solving run.
     expansion_times : list[float]
@@ -768,6 +771,7 @@ class SolverHistory:
                  gamma:float,
                  eps:float,
                  expand_function:str,
+                 expand_append:bool,
                  initial_value_function:ValueFunction,
                  initial_belief_set:BeliefSet
                  ):
@@ -779,6 +783,7 @@ class SolverHistory:
         self.run_ts = datetime.now()
         
         self.expand_function = expand_function
+        self.expand_append = expand_append
 
         # Time tracking
         self.expansion_times = []
@@ -902,17 +907,23 @@ class SolverHistory:
         summary_str =  f'Summary of Value Iteration run'
         summary_str += f'\n  - Model: {self.model.state_count} state, {self.model.action_count} action, {self.model.observation_count} observations'
         summary_str += f'\n  - Converged or stopped after {len(self.expansion_times)} expansion steps and {len(self.backup_times)} backup steps.'
-        
+
         if self.tracking_level >= 1:
+            summary_str += f'\n  - Resulting value function has {self.alpha_vector_counts[-1]} alpha vectors.'
             summary_str += f'\n  - Converged in {(sum(self.expansion_times) + sum(self.backup_times)):.4f}s'
             summary_str += f'\n'
 
-            summary_str += f'\n  - Expand function took on average {sum(self.expansion_times) /len(self.expansion_times):.4f}s '
-            summary_str += f'and yielded on average {sum(self.beliefs_counts[1:]) / len(self.beliefs_counts[1:]):.2f} beliefs per iteration.'
-
+            summary_str += f'\n  - Expand function took on average {sum(self.expansion_times) / len(self.expansion_times):.4f}s '
+            if self.expand_append:
+                summary_str += f'and yielded on average {sum(np.diff(self.beliefs_counts)) / len(self.beliefs_counts[1:]):.2f} beliefs per iteration.'
+            else:
+                summary_str += f'and yielded on average {sum(self.beliefs_counts[1:]) / len(self.beliefs_counts[1:]):.2f} beliefs per iteration.'
+            summary_str += f' ({np.sum(np.divide(self.expansion_times, self.beliefs_counts[1:])) / len(self.expansion_times):.4f}s/it/belief)'
+            
             summary_str += f'\n  - Backup function took on average {sum(self.backup_times) /len(self.backup_times):.4f}s '
             summary_str += f'and yielded on average value functions of size {sum(self.alpha_vector_counts[1:]) / len(self.alpha_vector_counts[1:]):.2f} per iteration.'
-        
+            summary_str += f' ({np.sum(np.divide(self.backup_times, self.alpha_vector_counts[1:])) / len(self.backup_times):.4f}s/it/alpha)'
+
             summary_str += f'\n  - Pruning function took on average {sum(self.pruning_times) /len(self.pruning_times):.4f}s '
             summary_str += f'and yielded on average prunings of {sum(self.prune_counts) / len(self.prune_counts):.2f} alpha vectors per iteration.'
         
@@ -1737,9 +1748,10 @@ class PBVI_Solver(Solver):
         # History tracking
         solver_history = SolverHistory(tracking_level=history_tracking_level,
                                        model=model,
-                                       expand_function=self.expand_function,
                                        gamma=self.gamma,
                                        eps=self.eps,
+                                       expand_function=self.expand_function,
+                                       expand_append=True,
                                        initial_value_function=value_function,
                                        initial_belief_set=belief_set)
 
@@ -1764,7 +1776,7 @@ class PBVI_Solver(Solver):
                 solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
 
                 # 2: Backup, update value function (alpha vector set)
-                for _ in range(horizon) if not print_progress else trange(horizon, desc=f'Backups {expansion_i}'):
+                for _ in range(horizon) if (not print_progress or horizon <= 1) else trange(horizon, desc=f'Backups {expansion_i}'):
                     start_ts = datetime.now()
 
                     # Backup step
@@ -2013,6 +2025,7 @@ class FSVI_Solver(PBVI_Solver):
                                        gamma=self.gamma,
                                        eps=self.eps,
                                        expand_function='MDP',
+                                       expand_append=False,
                                        initial_value_function=value_function,
                                        initial_belief_set=BeliefSet(model, [b])
                                        )
