@@ -1476,29 +1476,25 @@ class PBVI_Solver(Solver):
         old_shape = belief_set.belief_array.shape
         to_generate = min(max_generation, old_shape[0])
 
-        new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
-        new_belief_array[:old_shape[0]] = belief_set.belief_array
+        # Generation of successors
+        successor_beliefs = xp.array([[[b.update(a,o).values for o in model.observations] for a in model.actions] for b in belief_set.belief_list])
         
-        for i, belief_vector in enumerate(belief_set.belief_array[-to_generate:]):
-            b = Belief(model, belief_vector)
-            best_b = None
-            max_dist = -math.inf
-            
-            for a in model.actions:
-                s = b.random_state()
-                s_p = model.transition(s, a)
-                o = model.observe(s_p, a)
-                b_a = b.update(a, o)
-                
-                # Check distance with other beliefs
-                min_dist = min(float(xp.linalg.norm(b_p - b_a.values)) for b_p in new_belief_array)
-                if min_dist > max_dist:
-                    max_dist = min_dist
-                    best_b = b_a
-            
-            assert best_b is not None
-            new_belief_array[i+old_shape[0]] = best_b.values
-        
+        # Compute the distances between each pair and of successor are source beliefs
+        diff = (belief_set.belief_array[:, None,None,None, :] - successor_beliefs)
+        dist = xp.sqrt(xp.einsum('bnaos,bnaos->bnao', diff, diff))
+
+        # Taking the min distance for each belief
+        belief_min_dists = xp.min(dist,axis=0)
+
+        # Taking the max distanced successors
+        b_star, a_star, o_star = xp.unravel_index(xp.argsort(belief_min_dists, axis=None)[::-1][:to_generate], successor_beliefs.shape[:-1])
+
+        # Selecting successor beliefs
+        selected_beliefs = successor_beliefs[b_star[:,None], a_star[:,None], o_star[:,None], model.states[None,:]]
+
+        # Unioning with previous beliefs
+        new_belief_array = xp.vstack((belief_set.belief_array, selected_beliefs))
+
         return BeliefSet(model, new_belief_array)
     
 
