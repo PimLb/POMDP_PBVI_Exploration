@@ -237,6 +237,9 @@ class Model(MDP_Model):
             
             reachable_rewards = np.fromfunction(reach_reward_func, (*self.reachable_states.shape, self.observation_count))
 
+        self._min_reward = float(np.min(reachable_rewards))
+        self._max_reward = float(np.max(reachable_rewards))
+
         self.expected_rewards_table = np.einsum('saor,saro->sa', self.reachable_transitional_observation_table, reachable_rewards)
 
         duration = (datetime.now() - start_ts).total_seconds()
@@ -264,7 +267,7 @@ class Model(MDP_Model):
         reward : int or float
             The reward received.
         '''
-        reward = self.immediate_reward_table[s,a,s_p,o] if self.immediate_reward_table is not None else self.immediate_reward_function(s,a,s_p,o)
+        reward = float(self.immediate_reward_table[s,a,s_p,o] if self.immediate_reward_table is not None else self.immediate_reward_function(s,a,s_p,o))
         if self.rewards_are_probabilistic:
             rnd = random.random()
             return 1 if rnd < reward else 0
@@ -1501,7 +1504,10 @@ class PBVI_Solver(Solver):
 
     def expand_ger(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, max_generation:int=10) -> BeliefSet:
         '''
-        Greedy Error Reduction. NOT IMPLEMENTED YET.
+        Greedy Error Reduction.
+        It attempts to choose the believes that will maximize the improvement of the value function by minimizing the error.
+        The error is computed by the sum of the change between two beliefs and their two corresponding alpha vectors.
+
         Parameters
         ----------
         model : pomdp.Model
@@ -1518,7 +1524,6 @@ class PBVI_Solver(Solver):
         belief_set_new : BeliefSet
             Union of the belief_set and the expansions of the beliefs in the belief_set
         '''
-        print('Not implemented')
         xp = np if not gpu_support else cp.get_array_module(belief_set.belief_array)
 
         old_shape = belief_set.belief_array.shape
@@ -1527,7 +1532,48 @@ class PBVI_Solver(Solver):
         new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
         new_belief_array[:old_shape[0]] = belief_set.belief_array
 
-        return []
+        # Finding the min and max rewards for computation of the epsilon
+        r_min = model._min_reward / (1 - self.gamma)
+        r_max = model._max_reward / (1 - self.gamma)
+
+        # Generation of all potential successor beliefs
+        successor_beliefs = xp.array([[[b.update(a,o).values for o in model.observations] for a in model.actions] for b in belief_set.belief_list])
+        
+        # Finding the alphas associated with each previous beliefs
+        best_alpha = xp.argmax(xp.dot(belief_set.belief_array, value_function.alpha_vector_array.T), axis = 1)
+        b_alphas = value_function.alpha_vector_array[best_alpha]
+
+        # Difference between beliefs and their successors
+        b_diffs = successor_beliefs - belief_set.belief_array[:,None,None,:]
+
+        # Computing a 'next' alpha vector made of the max and min
+        alphas_p = xp.where(b_diffs >= 0, r_max, r_min)
+
+        # Difference between alpha vectors and their successors alpha vector
+        alphas_diffs = alphas_p - b_alphas[:,None,None,:]
+
+        # Computing epsilon for all successor beliefs
+        eps = xp.einsum('baos,baos->bao', alphas_diffs, b_diffs)
+
+        # Computing the probability of the b and doing action a and receiving observation o
+        bao_probs = xp.einsum('bs,saor->bao', belief_set.belief_array, model.reachable_transitional_observation_table)
+
+        # Taking the sumproduct of the probs with the epsilons
+        res = xp.einsum('bao,bao->ba', bao_probs, eps)
+
+        # Picking the correct amount of initial beliefs and ideal actions
+        b_stars, a_stars = xp.unravel_index(xp.argsort(res, axis=None)[::-1][:to_generate], res.shape)
+
+        # And picking the ideal observations
+        o_star = xp.argmax(bao_probs[b_stars[:,None], a_stars[:,None], model.observations[None,:]] * eps[b_stars[:,None], a_stars[:,None], model.observations[None,:]], axis=1)
+
+        # Selecting the successor beliefs
+        selected_beliefs = successor_beliefs[b_stars[:,None], a_stars[:,None], o_star[:,None], model.states[None,:]]
+
+        # Unioning with previous beliefs
+        new_belief_array = xp.vstack((belief_set.belief_array, selected_beliefs))
+
+        return BeliefSet(model, new_belief_array)
 
 
     def expand(self, model:Model, belief_set:BeliefSet, max_generation:int, **function_specific_parameters) -> BeliefSet:
@@ -1537,7 +1583,7 @@ class PBVI_Solver(Solver):
             - Stochastic Simulation with Random Action (ssra)
             - Stochastic Simulation with Greedy Action (ssga)
             - Stochastic Simulation with Exploratory Action (ssea)
-            - Greedy Error Reduction (ger) - not implemented
+            - Greedy Error Reduction (ger)
                 
         Parameters
         ----------

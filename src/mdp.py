@@ -371,6 +371,10 @@ class Model:
             exp_shape = (self.state_count, self.action_count, self.state_count)
             assert r_shape == exp_shape, f"Rewards table doesnt have the right shape, it should be SxAxS (expected: {exp_shape}, received {r_shape})"
 
+        # ------------------------- Min and max rewards -------------------------
+        self._min_reward = None
+        self._max_reward = None
+
         # ------------------------- Expected rewards -------------------------
         self.expected_rewards_table = None
         if rewards != -1:
@@ -388,7 +392,10 @@ class Model:
                     return self.immediate_reward_function(s,a,self.reachable_states[s,a,ri])
                 
                 reachable_rewards = np.fromfunction(reach_reward_func, self.reachable_states.shape)
-                
+            
+            self._min_reward = float(np.min(reachable_rewards))
+            self._max_reward = float(np.max(reachable_rewards))
+
             self.expected_rewards_table = np.einsum('sar,sar->sa', self.reachable_probabilities, reachable_rewards)
 
             duration = (datetime.now() - start_ts).total_seconds()
@@ -440,7 +447,7 @@ class Model:
         reward : int or float
             The reward received.
         '''
-        reward = self.immediate_reward_table[s,a,s_p] if self.immediate_reward_table is not None else self.immediate_reward_function(s,a,s_p)
+        reward = float(self.immediate_reward_table[s,a,s_p] if self.immediate_reward_table is not None else self.immediate_reward_function(s,a,s_p))
         if self.rewards_are_probabilistic:
             rnd = random.random()
             return 1 if rnd < reward else 0
