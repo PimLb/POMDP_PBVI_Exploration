@@ -1747,62 +1747,67 @@ class PBVI_Solver(Solver):
         iteration = 0
         expand_value_function = value_function
         old_value_function = value_function
-        for expansion_i in range(expansions) if not print_progress else trange(expansions, desc='Expansions'):
 
-            # 1: Expand belief set
-            start_ts = datetime.now()
+        try:
+            for expansion_i in range(expansions) if not print_progress else trange(expansions, desc='Expansions'):
 
-            belief_set = self.expand(model=model,
-                                     belief_set=belief_set,
-                                     value_function=value_function,
-                                     max_generation=max_belief_growth,
-                                     **self.expand_function_params)
-
-            expand_time = (datetime.now() - start_ts).total_seconds()
-            solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
-
-            # 2: Backup, update value function (alpha vector set)
-            for _ in range(horizon) if not print_progress else trange(horizon, desc=f'Backups {expansion_i}'):
+                # 1: Expand belief set
                 start_ts = datetime.now()
 
-                # Backup step
-                value_function = self.backup(model, belief_set, value_function, belief_dominance_prune=False)
-                backup_time = (datetime.now() - start_ts).total_seconds()
+                belief_set = self.expand(model=model,
+                                        belief_set=belief_set,
+                                        value_function=value_function,
+                                        max_generation=max_belief_growth,
+                                        **self.expand_function_params)
 
-                # Additional pruning
-                if (iteration % prune_interval) == 0 and iteration > 0:
+                expand_time = (datetime.now() - start_ts).total_seconds()
+                solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
+
+                # 2: Backup, update value function (alpha vector set)
+                for _ in range(horizon) if not print_progress else trange(horizon, desc=f'Backups {expansion_i}'):
                     start_ts = datetime.now()
-                    vf_len = len(value_function)
 
-                    value_function.prune(prune_level)
+                    # Backup step
+                    value_function = self.backup(model, belief_set, value_function, belief_dominance_prune=False)
+                    backup_time = (datetime.now() - start_ts).total_seconds()
 
-                    prune_time = (datetime.now() - start_ts).total_seconds()
-                    alpha_vectors_pruned = len(value_function) - vf_len
-                    solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
-                
-                # Compute the change between value functions
-                max_change = self.compute_change(value_function, old_value_function, belief_set)
+                    # Additional pruning
+                    if (iteration % prune_interval) == 0 and iteration > 0:
+                        start_ts = datetime.now()
+                        vf_len = len(value_function)
 
-                # History tracking
-                solver_history.add_backup_step(backup_time, max_change, value_function)
+                        value_function.prune(prune_level)
 
-                # Convergence check
-                if max_change < max_allowed_change:
+                        prune_time = (datetime.now() - start_ts).total_seconds()
+                        alpha_vectors_pruned = len(value_function) - vf_len
+                        solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
+                    
+                    # Compute the change between value functions
+                    max_change = self.compute_change(value_function, old_value_function, belief_set)
+
+                    # History tracking
+                    solver_history.add_backup_step(backup_time, max_change, value_function)
+
+                    # Convergence check
+                    if max_change < max_allowed_change:
+                        break
+
+                    old_value_function = value_function
+
+                    # Update iteration counter
+                    iteration += 1
+
+                # Compute change with old expansion value function
+                expand_max_change = self.compute_change(expand_value_function, value_function, belief_set)
+
+                if expand_max_change < max_allowed_change:
+                    print('Converged!')
                     break
 
-                old_value_function = value_function
-
-                # Update iteration counter
-                iteration += 1
-
-            # Compute change with old expansion value function
-            expand_max_change = self.compute_change(expand_value_function, value_function, belief_set)
-
-            if expand_max_change < max_allowed_change:
-                print('Converged!')
-                break
-
-            expand_value_function = value_function
+                expand_value_function = value_function
+        except MemoryError as e:
+            print(f'Memory full: {e}')
+            print('Returning value function and history as is...')
 
         # Final pruning
         start_ts = datetime.now()
@@ -2013,46 +2018,50 @@ class FSVI_Solver(PBVI_Solver):
                                        )
 
         old_value_function = value_function
-        for i in trange(expansions, desc='Expansions') if print_progress else range(expansions):
+        try:
+            for i in trange(expansions, desc='Expansions') if print_progress else range(expansions):
 
-            # Expand (exploration)
-            start_ts = datetime.now()
-
-            s0 = b.random_state()
-            belief_set = self.MDPExplore(model, b, s0, mdp_policy, 0, horizon, sequence_string='', belief_memory_depth=belief_memory_depth)
-
-            expand_time = (datetime.now() - start_ts).total_seconds()
-            solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
-
-            # Backup (update of value function)
-            start_ts = datetime.now()
-
-            value_function = self.backup(model, belief_set, value_function, append=True)
-            backup_time = (datetime.now() - start_ts).total_seconds()
-
-            # Additional pruning
-            if (i % prune_interval) == 0 and i > 0:
+                # Expand (exploration)
                 start_ts = datetime.now()
-                vf_len = len(value_function)
 
-                value_function.prune(prune_level)
+                s0 = b.random_state()
+                belief_set = self.MDPExplore(model, b, s0, mdp_policy, 0, horizon, sequence_string='', belief_memory_depth=belief_memory_depth)
 
-                prune_time = (datetime.now() - start_ts).total_seconds()
-                alpha_vectors_pruned = len(value_function) - vf_len
-                solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
+                expand_time = (datetime.now() - start_ts).total_seconds()
+                solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
 
-            # Change computation
-            max_change = self.compute_change(old_value_function, value_function, belief_set)
+                # Backup (update of value function)
+                start_ts = datetime.now()
 
-            # History tracking
-            solver_history.add_backup_step(backup_time, max_change, value_function)
-            
-            # Convergence check
-            if max_change < max_allowed_change:
-                print('Converged!')
-                break
-            
-            old_value_function = value_function
+                value_function = self.backup(model, belief_set, value_function, append=True)
+                backup_time = (datetime.now() - start_ts).total_seconds()
+
+                # Additional pruning
+                if (i % prune_interval) == 0 and i > 0:
+                    start_ts = datetime.now()
+                    vf_len = len(value_function)
+
+                    value_function.prune(prune_level)
+
+                    prune_time = (datetime.now() - start_ts).total_seconds()
+                    alpha_vectors_pruned = len(value_function) - vf_len
+                    solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
+
+                # Change computation
+                max_change = self.compute_change(old_value_function, value_function, belief_set)
+
+                # History tracking
+                solver_history.add_backup_step(backup_time, max_change, value_function)
+                
+                # Convergence check
+                if max_change < max_allowed_change:
+                    print('Converged!')
+                    break
+                
+                old_value_function = value_function
+        except MemoryError as e:
+            print(f'Memory full: {e}')
+            print('Returning value function and history as is...')
 
         # Final pruning
         start_ts = datetime.now()
