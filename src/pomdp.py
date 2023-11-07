@@ -27,6 +27,7 @@ from src.mdp import RewardSet
 from src.mdp import SimulationHistory as MDP_SimulationHistory
 from src.mdp import SolverHistory as MDP_SolverHistory
 from src.mdp import Solver as MDP_Solver
+from src.mdp import VI_Solver
 from src.mdp import Simulation as MDP_Simulation
 
 
@@ -318,6 +319,8 @@ class Belief:
     ----------
     model : pomdp.Model
     values : np.ndarray
+    bytes_repr : bytes
+        A representation in bytes of the value of the belief
     '''
     def __init__(self, model:Model, values:Union[np.ndarray,None]=None):
         assert model is not None
@@ -335,6 +338,23 @@ class Belief:
             self._values = values
         else:
             self._values = model.start_probabilities
+
+
+    def __new__(cls, *args, **kwargs):
+        instance = super().__new__(cls)
+        instance._bytes_repr = None
+        return instance
+
+
+    @property
+    def bytes_repr(self) -> bytes:
+        if self._bytes_repr is None:
+            self._bytes_repr = self.values.tobytes()
+        return self._bytes_repr
+
+
+    def __eq__(self, other: object) -> bool:
+        return self.bytes_repr == other.bytes_repr
 
     
     @property
@@ -370,7 +390,7 @@ class Belief:
         new_state_probabilities /= xp.sum(new_state_probabilities)
 
         # Generation of new belief from new state probabilities
-        new_belief = super().__new__(self.__class__)
+        new_belief = self.__new__(self.__class__)
         new_belief.model = self.model
         new_belief._values = new_state_probabilities
 
@@ -718,22 +738,22 @@ class BeliefValueMapping:
 
     Parameters
     ----------
-    model: pomdp.Model
+    model : pomdp.Model
         The model on which the value function applies on
-    corner_belief_values: ValueFunction
+    corner_belief_values : ValueFunction
         A general value function to define the value at corner points in belief space (ie: at certainty beliefs, or when beliefs have a probability of 1 for a given state).
         This is usually the solution of the MDP version of the problem.
 
     Attributes
     ----------
-    model: pomdp.Model
-    corner_belief_values: ValueFunction
-    corner_values: np.ndarray
+    model : pomdp.Model
+    corner_belief_values : ValueFunction
+    corner_values : np.ndarray
         Array of |S| shape, having the max value at each state based on the corner_belief_values.
-    beliefs: list[Belief]
-        List of beliefs points that have been added to the belief value mapping VF.
-    values: list[float]
-        List of values that have been to the value mapping VF.
+    beliefs : Belief
+        Beliefs contained in the belief-value mapping.
+    belief_value_mapping : dict[bytes, float]
+        Mapping of beliefs points with their associated value.
     
     '''
     def __init__(self, model, corner_belief_values:ValueFunction) -> None:
@@ -745,7 +765,7 @@ class BeliefValueMapping:
         self.corner_values = xp.max(corner_belief_values.alpha_vector_array, axis=0)
 
         self.beliefs = []
-        self.values = []
+        self.belief_value_mapping = {}
 
     
     def add(self, b:Belief, v:float) -> None:
@@ -757,8 +777,9 @@ class BeliefValueMapping:
         b: Belief
         v: float
         '''
-        self.beliefs.append(b)
-        self.values.append(v)
+        if b not in self.beliefs:
+            self.beliefs.append(b)
+            self.belief_value_mapping[b.bytes_repr] = v
 
 
     def evaluate(self, belief:Belief) -> float:
@@ -771,18 +792,22 @@ class BeliefValueMapping:
         '''
         xp = np if not gpu_support else cp.get_array_module(belief.values)
 
+        # Shortcut if belief already exists in the mapping
+        if belief in self.beliefs:
+            return self.belief_value_mapping[belief.bytes_repr]
+
         v0 = xp.dot(belief.values, self.corner_values)
 
         if len(self.beliefs) > 0:
             belief_array = xp.array([b.values for b in self.beliefs])
-            value_array = xp.array(self.values)
+            value_array = xp.array(list(self.belief_value_mapping.values()))
 
             with np.errstate(divide='ignore', invalid='ignore'):
                 vb = v0 + ((value_array - xp.dot(belief_array, self.corner_values)) * xp.min(belief.values / belief_array, axis=1))
 
             return min(v0, xp.min(vb))
         
-        return v0
+        return float(v0)
     
 
     def qva(self, belief:Belief, a:int, gamma:float) -> np.ndarray:
@@ -1449,10 +1474,7 @@ class PBVI_Solver(Solver):
         new_beliefs = xp.random.random((generation_count, model.state_count))
         new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
 
-        # Combining with the initial belief set
-        new_belief_set = np.vstack((belief_set.belief_array, new_beliefs))
-
-        return BeliefSet(model, new_belief_set)
+        return BeliefSet(model, new_beliefs)
 
     
     def expand_ssra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -> BeliefSet:
@@ -1481,8 +1503,7 @@ class PBVI_Solver(Solver):
         old_shape = belief_set.belief_array.shape
         to_generate = min(max_generation, old_shape[0])
 
-        new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
-        new_belief_array[:old_shape[0]] = belief_set.belief_array
+        new_belief_array = xp.empty((to_generate, old_shape[1]))
 
         # Random previous beliefs
         rand_ind = np.random.choice(np.arange(old_shape[0]), to_generate, replace=False)
@@ -1495,7 +1516,7 @@ class PBVI_Solver(Solver):
             o = model.observe(s_p, a)
             b_new = b.update(a, o)
             
-            new_belief_array[i+old_shape[0]] = b_new.values
+            new_belief_array[i] = b_new.values
             
         return BeliefSet(model, new_belief_array)
     
@@ -1532,8 +1553,7 @@ class PBVI_Solver(Solver):
         old_shape = belief_set.belief_array.shape
         to_generate = min(max_generation, old_shape[0])
 
-        new_belief_array = xp.empty((old_shape[0] + to_generate, old_shape[1]))
-        new_belief_array[:old_shape[0]] = belief_set.belief_array
+        new_belief_array = xp.empty((to_generate, old_shape[1]))
 
         # Random previous beliefs
         rand_ind = np.random.choice(np.arange(old_shape[0]), to_generate, replace=False)
@@ -1552,7 +1572,7 @@ class PBVI_Solver(Solver):
             o = model.observe(s_p, a)
             b_new = b.update(a, o)
             
-            new_belief_array[i+old_shape[0]] = b_new.values
+            new_belief_array[i] = b_new.values
             
         return BeliefSet(model, new_belief_array)
     
@@ -1598,10 +1618,7 @@ class PBVI_Solver(Solver):
         b_star, a_star, o_star = xp.unravel_index(xp.argsort(belief_min_dists, axis=None)[::-1][:to_generate], successor_beliefs.shape[:-1])
 
         # Selecting successor beliefs
-        selected_beliefs = successor_beliefs[b_star[:,None], a_star[:,None], o_star[:,None], model.states[None,:]]
-
-        # Unioning with previous beliefs
-        new_belief_array = xp.vstack((belief_set.belief_array, selected_beliefs))
+        new_belief_array = successor_beliefs[b_star[:,None], a_star[:,None], o_star[:,None], model.states[None,:]]
 
         return BeliefSet(model, new_belief_array)
     
@@ -1672,10 +1689,7 @@ class PBVI_Solver(Solver):
         o_star = xp.argmax(bao_probs[b_stars[:,None], a_stars[:,None], model.observations[None,:]] * eps[b_stars[:,None], a_stars[:,None], model.observations[None,:]], axis=1)
 
         # Selecting the successor beliefs
-        selected_beliefs = successor_beliefs[b_stars[:,None], a_stars[:,None], o_star[:,None], model.states[None,:]]
-
-        # Unioning with previous beliefs
-        new_belief_array = xp.vstack((belief_set.belief_array, selected_beliefs))
+        new_belief_array = successor_beliefs[b_stars[:,None], a_stars[:,None], o_star[:,None], model.states[None,:]]
 
         return BeliefSet(model, new_belief_array)
 
@@ -1786,11 +1800,13 @@ class PBVI_Solver(Solver):
         
         elif self.expand_function in 'expand_hsvi':
             args = {arg: function_specific_parameters[arg] for arg in ['value_function', 'mdp_policy'] if arg in function_specific_parameters}
-            upper_bound = self._upper_bound if hasattr(self, '_upper_bound') else BeliefValueMapping(model, args['mdp_policy'])
+            if not hasattr(self, '_upper_bound'):
+                self._upper_bound = BeliefValueMapping(model, args['mdp_policy'])
             return self.expand_hsvi(model=model, 
                                     b=Belief(model),
                                     value_function=args['value_function'],
-                                    upper_bound_belief_value_map=upper_bound)
+                                    upper_bound_belief_value_map=self._upper_bound,
+                                    max_generation=max_generation)
         else:
             raise Exception('Not implemented')
 
@@ -1828,24 +1844,11 @@ class PBVI_Solver(Solver):
         return max_change
 
 
-    # def solve(self,
-    #           model:Model,
-    #           expansions:int,
-    #           horizon:int,
-    #           mdp_policy:ValueFunction,
-    #           initial_belief:Union[Belief,None]=None,
-    #           initial_value_function:Union[ValueFunction,None]=None,
-    #           prune_level:int=1,
-    #           prune_interval:int=10,
-    #           belief_memory_depth:int=10,
-    #           use_gpu:bool=False,
-    #           history_tracking_level:int=1,
-    #           print_progress:bool=True
-    #           ) -> tuple[ValueFunction, SolverHistory]:
     def solve(self,
               model:Model,
               expansions:int,
-              horizon:int,
+              full_backup:bool=True,
+              update_passes:int=1,
               max_belief_growth:int=10,
               initial_belief:Union[BeliefSet, Belief, None]=None,
               initial_value_function:Union[ValueFunction,None]=None,
@@ -1874,8 +1877,10 @@ class PBVI_Solver(Solver):
             The model to solve.
         expansions : int
             How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
-        horizon : int
-            How many times the alpha vector set must be updated every time the belief set is expanded.
+        full_backup : bool, default=True
+            Whether the backup function has to be run on the full set beliefs uncovered since the beginning or only on the new points.
+        update_passes : int, default=1
+            How many times the backup function has to be run every time the belief set is expanded.
         max_belief_growth : int, default=10
             How many beliefs can be added at every expansion step to the belief set.
         initial_belief : BeliefSet or Belief, optional
@@ -1935,7 +1940,7 @@ class PBVI_Solver(Solver):
                                        gamma=self.gamma,
                                        eps=self.eps,
                                        expand_function=self.expand_function,
-                                       expand_append=True,
+                                       expand_append=full_backup,
                                        initial_value_function=value_function,
                                        initial_belief_set=belief_set)
 
@@ -1950,21 +1955,31 @@ class PBVI_Solver(Solver):
                 # 1: Expand belief set
                 start_ts = datetime.now()
 
-                belief_set = self.expand(model=model,
-                                        belief_set=belief_set,
-                                        value_function=value_function,
-                                        max_generation=max_belief_growth,
-                                        **self.expand_function_params)
+                new_belief_set = self.expand(model=model,
+                                             belief_set=belief_set,
+                                             value_function=value_function,
+                                             max_generation=max_belief_growth,
+                                             **self.expand_function_params)
+
+                # If full backup append the newly generated set to the old belief_set
+                if full_backup:
+                    belief_set = BeliefSet(model, xp.vstack((belief_set.belief_array, new_belief_set.belief_array)))
+                else:
+                    belief_set = new_belief_set
 
                 expand_time = (datetime.now() - start_ts).total_seconds()
                 solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
 
                 # 2: Backup, update value function (alpha vector set)
-                for _ in range(horizon) if (not print_progress or horizon <= 1) else trange(horizon, desc=f'Backups {expansion_i}'):
+                for _ in range(update_passes) if (not print_progress or update_passes <= 1) else trange(update_passes, desc=f'Backups {expansion_i}'):
                     start_ts = datetime.now()
 
                     # Backup step
-                    value_function = self.backup(model, belief_set, value_function, belief_dominance_prune=False)
+                    value_function = self.backup(model,
+                                                 belief_set,
+                                                 value_function,
+                                                 append=(not full_backup),
+                                                 belief_dominance_prune=False)
                     backup_time = (datetime.now() - start_ts).total_seconds()
 
                     # Additional pruning
@@ -2016,6 +2031,65 @@ class PBVI_Solver(Solver):
         solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
 
         return value_function, solver_history
+
+
+class HSVI_Solver(PBVI_Solver):
+    '''
+    TODO
+    '''
+    def __init__(self,
+                 gamma:float=0.9,
+                 eps:float=0.001,
+                 expand_function:str='hsvi',
+                 mdp_solution:Union[ValueFunction,None]=None):
+
+        super().__init__(gamma,
+                         eps,
+                         expand_function,
+                         mdp_policy=mdp_solution)
+        
+    def solve(self,
+              model:Model,
+              expansions: int,
+              max_belief_growth: int = 10,
+              initial_belief: BeliefSet | Belief | None = None,
+              initial_value_function: ValueFunction | None = None,
+              prune_level: int = 1,
+              prune_interval: int = 10,
+              use_gpu: bool = False,
+              history_tracking_level: int = 1,
+              print_progress: bool = True
+              ) -> tuple[ValueFunction, SolverHistory]:
+        '''
+        TODO
+        '''
+        # If mdp value function not provided run value iteration
+        if self.expand_function_params['mdp_policy'] is None:
+            print('[Warning] MDP solution not provided, running value iteration on the problem to retrieve it...')
+            vi_solver = VI_Solver()
+
+            log('Starting MDP Value Iteration...')
+            mdp_solution, hist = vi_solver.solve(model,
+                                                 use_gpu=use_gpu,
+                                                 print_progress=False)
+            
+            log(f'Value Iteration stopped or converged after {len(hist.iteration_times)} iteration.')
+
+            self._upper_bound = BeliefValueMapping(model, mdp_solution)
+
+        # Launch the actual solving
+        return super().solve(model=model,
+                             expansions=expansions,
+                             full_backup=False,
+                             update_passes=1,
+                             max_belief_growth=max_belief_growth,
+                             initial_belief=initial_belief,
+                             initial_value_function=initial_value_function,
+                             prune_level=prune_level,
+                             prune_interval=prune_interval,
+                             use_gpu=use_gpu,
+                             history_tracking_level=history_tracking_level,
+                             print_progress=print_progress)
 
 
 class FSVI_Solver(PBVI_Solver):
