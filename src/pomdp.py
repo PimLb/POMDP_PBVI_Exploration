@@ -708,6 +708,103 @@ class BeliefSet:
         plt.show()
 
 
+class BeliefValueMapping:
+    '''
+    Alternate representation of a value function, particularly for pomdp models.
+    It works by adding adding belief and associated value to the object.
+    To evaluate this version of the value function the sawtooth algorithm is used (described in Shani G. et al., "A survey of point-based POMDP solvers")
+    
+    We can also compute the Q value for a particular belief b and action using the qva function.
+
+    Parameters
+    ----------
+    model: pomdp.Model
+        The model on which the value function applies on
+    corner_belief_values: ValueFunction
+        A general value function to define the value at corner points in belief space (ie: at certainty beliefs, or when beliefs have a probability of 1 for a given state).
+        This is usually the solution of the MDP version of the problem.
+
+    Attributes
+    ----------
+    model: pomdp.Model
+    corner_belief_values: ValueFunction
+    corner_values: np.ndarray
+        Array of |S| shape, having the max value at each state based on the corner_belief_values.
+    beliefs: list[Belief]
+        List of beliefs points that have been added to the belief value mapping VF.
+    values: list[float]
+        List of values that have been to the value mapping VF.
+    
+    '''
+    def __init__(self, model, corner_belief_values:ValueFunction) -> None:
+        xp = np if not gpu_support else cp.get_array_module(corner_belief_values.alpha_vector_array)
+
+        self.model = model
+        self.corner_belief_values = corner_belief_values
+        
+        self.corner_values = xp.max(corner_belief_values.alpha_vector_array, axis=0)
+
+        self.beliefs = []
+        self.values = []
+
+    
+    def add(self, b:Belief, v:float) -> None:
+        '''
+        Function to a belief point and its associated value to the belief value mappings
+
+        Parameters
+        ----------
+        b: Belief
+        v: float
+        '''
+        self.beliefs.append(b)
+        self.values.append(v)
+
+
+    def evaluate(self, belief:Belief) -> float:
+        '''
+        Runs the sawtooth algorithm to find the value at a given belief point.
+
+        Parameters
+        ----------
+        belief: Belief
+        '''
+        xp = np if not gpu_support else cp.get_array_module(belief.values)
+
+        v0 = xp.dot(belief.values, self.corner_values)
+
+        if len(self.beliefs) > 0:
+            belief_array = xp.array([b.values for b in self.beliefs])
+            value_array = xp.array(self.values)
+
+            with np.errstate(divide='ignore', invalid='ignore'):
+                vb = v0 + ((value_array - xp.dot(belief_array, self.corner_values)) * xp.min(belief.values / belief_array, axis=1))
+
+            return min(v0, xp.min(vb))
+        
+        return v0
+    
+
+    def qva(self, belief:Belief, a:int, gamma:float) -> np.ndarray:
+        '''
+        Evaluate the value function at a given belief point with a given action a and a given gamma.
+
+        Parameters
+        ----------
+        belief: Belief
+        a: int
+        gamma: float
+        '''
+        xp = np if not gpu_support else cp.get_array_module(belief.values)
+
+        b_probs = xp.einsum('sor,s->o', self.model.reachable_transitional_observation_table[:,a,:,:], belief.values)
+        successors_values = xp.array([self.evaluate(belief.update(a,o)) for o in self.model.observations])
+
+        qba = xp.dot(self.model.expected_rewards_table[:,a], belief.values) + gamma * xp.dot(b_probs, successors_values)
+
+        return qba
+
+
 class SolverHistory:
     '''
     Class to represent the history of a solver for a POMDP solver.
@@ -1141,7 +1238,7 @@ class PBVI_Solver(Solver):
                  gamma:float=0.9,
                  eps:float=0.001,
                  expand_function:str='ssea',
-                 expand_function_params:dict={}):
+                 **expand_function_params):
         self.gamma = gamma
         self.eps = eps
         self.expand_function = expand_function
@@ -1403,7 +1500,7 @@ class PBVI_Solver(Solver):
         return BeliefSet(model, new_belief_array)
     
 
-    def expand_ssga(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, eps:float=0.1, max_generation:int=10) -> BeliefSet:
+    def expand_ssga(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, epsilon:float=0.1, max_generation:int=10) -> BeliefSet:
         '''
         Stochastic Simulation with Greedy Action.
         Simulates running a single-step forward from the beliefs in the "belief_set".
@@ -1445,7 +1542,7 @@ class PBVI_Solver(Solver):
             b = Belief(model, belief_vector)
             s = b.random_state()
             
-            if random.random() < eps:
+            if random.random() < epsilon:
                 a = random.choice(model.actions)
             else:
                 best_alpha_index = xp.argmax(xp.dot(value_function.alpha_vector_array, b.values))
@@ -1583,6 +1680,67 @@ class PBVI_Solver(Solver):
         return BeliefSet(model, new_belief_array)
 
 
+    def expand_hsvi(self,
+                    model:Model,
+                    b:Belief,
+                    value_function:ValueFunction,
+                    upper_bound_belief_value_map:BeliefValueMapping,
+                    conv_term:Union[float,None]=None,
+                    max_generation:int=10
+                    ) -> BeliefSet:
+        '''
+        The expand function of the  Heruistic search value iteration technique.
+        It is a redursive function attempting to minimize the bound between the upper and lower estimations of the value function.
+
+        It is developped by Smith T. and Simmons R. and described in the paper "Heuristic Search Value Iteration for POMDPs"
+        '''
+        xp = np if not gpu_support else cp.get_array_module(b.values)
+
+        if conv_term is None:
+            conv_term = self.eps
+
+        # Update convergence term
+        conv_term /= self.gamma
+
+        # Find best a based on upper bound v
+        best_a = int(xp.argmax(xp.array([upper_bound_belief_value_map.qva(b, a, gamma=self.gamma) for a in model.actions])))
+
+        # Choose o that max gap between bounds
+        b_probs = xp.einsum('sor,s->o', model.reachable_transitional_observation_table[:,best_a,:,:], b.values)
+        successors_ba = [b.update(best_a, o) for o in model.observations]
+
+        upper_v_ba = xp.array([upper_bound_belief_value_map.evaluate(bao) for bao in successors_ba])
+        lower_v_ba = xp.max((np.matmul(value_function.alpha_vector_array, xp.array([succ_b.values for succ_b in successors_ba]).T)), axis=0)
+
+        best_o = int(xp.argmax((b_probs * (upper_v_ba - lower_v_ba)) - conv_term))
+
+        # Chosen b
+        next_b = successors_ba[best_o]
+
+        # check the bounds
+        bounds_split = upper_v_ba[best_o] - lower_v_ba[best_o]
+
+        if bounds_split < conv_term or max_generation <= 0:
+            return BeliefSet(model, [next_b])
+        
+        # Go one step deeper in the recursion
+        b_set = self.expand_hsvi(model=model,
+                                 b=next_b,
+                                 value_function=value_function,
+                                 upper_bound_belief_value_map=upper_bound_belief_value_map,
+                                 conv_term=conv_term,
+                                 max_generation=max_generation-1)
+        
+        # Append the nex belief of this iteration to the deeper beliefs
+        new_belief_list = b_set.belief_list
+        new_belief_list.append(next_b)
+
+        # Add the belief point and associated value to the belief-value mapping
+        upper_bound_belief_value_map.add(next_b, max([upper_bound_belief_value_map.qva(next_b, a, gamma=self.gamma) for a in model.actions]))
+
+        return BeliefSet(model, new_belief_list)
+
+
     def expand(self, model:Model, belief_set:BeliefSet, max_generation:int, **function_specific_parameters) -> BeliefSet:
         '''
         Central method to call one of the functions for a particular expansion strategy:
@@ -1591,6 +1749,7 @@ class PBVI_Solver(Solver):
             - Stochastic Simulation with Greedy Action (ssga)
             - Stochastic Simulation with Exploratory Action (ssea)
             - Greedy Error Reduction (ger)
+            - Heuristic Search Value Iteration (hsvi)
                 
         Parameters
         ----------
@@ -1598,10 +1757,10 @@ class PBVI_Solver(Solver):
             The model on which to run the belief expansion on.
         belief_set : BeliefSet
             The set of beliefs to expand.
-        function_specific_parameters
-            Potential additional parameters necessary for the specific expand function.
         max_generation : int
             The max amount of beliefs that can be added to the belief set at once.
+        function_specific_parameters
+            Potential additional parameters necessary for the specific expand function.
 
         Returns
         -------
@@ -1611,11 +1770,11 @@ class PBVI_Solver(Solver):
         if self.expand_function in 'expand_ssra':
             return self.expand_ra(model=model, belief_set=belief_set, max_generation=max_generation)
 
-        if self.expand_function in 'expand_ssra':
+        elif self.expand_function in 'expand_ssra':
             return self.expand_ssra(model=model, belief_set=belief_set, max_generation=max_generation)
         
         elif self.expand_function in 'expand_ssga':
-            args = {arg: function_specific_parameters[arg] for arg in ['value_function', 'eps'] if arg in function_specific_parameters}
+            args = {arg: function_specific_parameters[arg] for arg in ['value_function', 'epsilon'] if arg in function_specific_parameters}
             return self.expand_ssga(model=model, belief_set=belief_set, max_generation=max_generation, **args)
         
         elif self.expand_function in 'expand_ssea':
@@ -1625,6 +1784,16 @@ class PBVI_Solver(Solver):
             args = {arg: function_specific_parameters[arg] for arg in ['value_function'] if arg in function_specific_parameters}
             return self.expand_ger(model=model, belief_set=belief_set, max_generation=max_generation, **args)
         
+        elif self.expand_function in 'expand_hsvi':
+            args = {arg: function_specific_parameters[arg] for arg in ['value_function', 'mdp_policy'] if arg in function_specific_parameters}
+            upper_bound = self._upper_bound if hasattr(self, '_upper_bound') else BeliefValueMapping(model, args['mdp_policy'])
+            return self.expand_hsvi(model=model, 
+                                    b=Belief(model),
+                                    value_function=args['value_function'],
+                                    upper_bound_belief_value_map=upper_bound)
+        else:
+            raise Exception('Not implemented')
+
         return []
 
 
@@ -1659,6 +1828,20 @@ class PBVI_Solver(Solver):
         return max_change
 
 
+    # def solve(self,
+    #           model:Model,
+    #           expansions:int,
+    #           horizon:int,
+    #           mdp_policy:ValueFunction,
+    #           initial_belief:Union[Belief,None]=None,
+    #           initial_value_function:Union[ValueFunction,None]=None,
+    #           prune_level:int=1,
+    #           prune_interval:int=10,
+    #           belief_memory_depth:int=10,
+    #           use_gpu:bool=False,
+    #           history_tracking_level:int=1,
+    #           print_progress:bool=True
+    #           ) -> tuple[ValueFunction, SolverHistory]:
     def solve(self,
               model:Model,
               expansions:int,
@@ -1683,6 +1866,7 @@ class PBVI_Solver(Solver):
             - ssga: Stochastic Simulation with Greedy Action. Extra params: epsilon (float)
             - ssea: Stochastic Simulation with Exploratory Action. Extra params: /
             - ger: Greedy Error Reduction. Extra params: /
+            - hsvi: Heuristic Search Value Iteration. Extra param: mdp_policy (ValueFunction) 
 
         Parameters
         ----------
