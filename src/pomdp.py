@@ -342,7 +342,10 @@ class Belief:
 
     def __new__(cls, *args, **kwargs):
         instance = super().__new__(cls)
+
         instance._bytes_repr = None
+        instance._successors = {}
+        
         return instance
 
 
@@ -383,6 +386,11 @@ class Belief:
         '''
         xp = np if not gpu_support else cp.get_array_module(self._values)
 
+        succ_id = f'{a}_{o}'
+        succ = self._successors.get(succ_id)
+        if succ is not None:
+            return succ
+
         reachable_state_probabilities = self.model.reachable_transitional_observation_table[:,a,o,:] * self.values[:,None]
         new_state_probabilities = xp.bincount(self.model.reachable_states[:,a,:].flatten(), weights=reachable_state_probabilities.flatten(), minlength=self.model.state_count)
         
@@ -393,6 +401,9 @@ class Belief:
         new_belief = self.__new__(self.__class__)
         new_belief.model = self.model
         new_belief._values = new_state_probabilities
+
+        # Remember generated successor
+        self._successors[succ_id] = new_belief
 
         return new_belief
     
@@ -767,6 +778,9 @@ class BeliefValueMapping:
         self.beliefs = []
         self.belief_value_mapping = {}
 
+        self._belief_array = None
+        self._value_array = None
+
     
     def add(self, b:Belief, v:float) -> None:
         '''
@@ -780,6 +794,36 @@ class BeliefValueMapping:
         if b not in self.beliefs:
             self.beliefs.append(b)
             self.belief_value_mapping[b.bytes_repr] = v
+
+
+    @property
+    def belief_array(self) -> np.ndarray:
+        xp = np if not gpu_support else cp.get_array_module(self.beliefs[0].values)
+
+        if self._belief_array is None:
+            self._belief_array = xp.array([b.values for b in self.beliefs])
+
+        return self._belief_array
+    
+
+    @property
+    def value_array(self) -> np.ndarray:
+        xp = np if not gpu_support else cp.get_array_module(self.beliefs[0].values)
+
+        if self._value_array is None:
+            self._value_array = xp.array(list(self.belief_value_mapping.values()))
+
+        return self._value_array
+    
+
+    def update(self) -> None:
+        '''
+        Function to update the belief and value arrays to speed up computation.
+        '''
+        xp = np if not gpu_support else cp.get_array_module(self.beliefs[0].values)
+
+        self._belief_array = xp.array([b.values for b in self.beliefs])
+        self._value_array = xp.array(list(self.belief_value_mapping.values()))
 
 
     def evaluate(self, belief:Belief) -> float:
@@ -798,36 +842,14 @@ class BeliefValueMapping:
 
         v0 = xp.dot(belief.values, self.corner_values)
 
-        if len(self.beliefs) > 0:
-            belief_array = xp.array([b.values for b in self.beliefs])
-            value_array = xp.array(list(self.belief_value_mapping.values()))
+        if len(self.beliefs) == 0:
+            return float(v0)
 
-            with np.errstate(divide='ignore', invalid='ignore'):
-                vb = v0 + ((value_array - xp.dot(belief_array, self.corner_values)) * xp.min(belief.values / belief_array, axis=1))
+        with np.errstate(divide='ignore', invalid='ignore'):
+            vb = v0 + ((self.value_array - xp.dot(self.belief_array, self.corner_values)) * xp.min(belief.values / self.belief_array, axis=1))
 
-            return min(v0, xp.min(vb))
-        
-        return float(v0)
+        return float(xp.min(xp.append(vb, v0)))
     
-
-    def qva(self, belief:Belief, a:int, gamma:float) -> np.ndarray:
-        '''
-        Evaluate the value function at a given belief point with a given action a and a given gamma.
-
-        Parameters
-        ----------
-        belief: Belief
-        a: int
-        gamma: float
-        '''
-        xp = np if not gpu_support else cp.get_array_module(belief.values)
-
-        b_probs = xp.einsum('sor,s->o', self.model.reachable_transitional_observation_table[:,a,:,:], belief.values)
-        successors_values = xp.array([self.evaluate(belief.update(a,o)) for o in self.model.observations])
-
-        qba = xp.dot(self.model.expected_rewards_table[:,a], belief.values) + gamma * xp.dot(b_probs, successors_values)
-
-        return qba
 
 
 class SolverHistory:
@@ -1717,26 +1739,51 @@ class PBVI_Solver(Solver):
         conv_term /= self.gamma
 
         # Find best a based on upper bound v
-        best_a = int(xp.argmax(xp.array([upper_bound_belief_value_map.qva(b, a, gamma=self.gamma) for a in model.actions])))
+        max_qv = -xp.inf
+        best_a = -1
+        for a in model.actions:
+            b_probs = xp.einsum('sor,s->o', model.reachable_transitional_observation_table[:,a,:,:], b.values)
+
+            b_prob_val = 0
+            for o in model.observations:
+                b_prob_val += (b_probs[o] * upper_bound_belief_value_map.evaluate(b.update(a,o)))
+            
+            qva = float(xp.dot(model.expected_rewards_table[:,a], b.values) + (self.gamma * b_prob_val))
+
+            # qva = upper_bound_belief_value_map.qva(b, a, gamma=self.gamma)
+            if qva > max_qv:
+                max_qv = qva
+                best_a = a
 
         # Choose o that max gap between bounds
         b_probs = xp.einsum('sor,s->o', model.reachable_transitional_observation_table[:,best_a,:,:], b.values)
-        successors_ba = [b.update(best_a, o) for o in model.observations]
 
-        upper_v_ba = xp.array([upper_bound_belief_value_map.evaluate(bao) for bao in successors_ba])
-        lower_v_ba = xp.max((np.matmul(value_function.alpha_vector_array, xp.array([succ_b.values for succ_b in successors_ba]).T)), axis=0)
+        max_o_val = -xp.inf
+        best_v_diff = -xp.inf
+        next_b = b
 
-        best_o = int(xp.argmax((b_probs * (upper_v_ba - lower_v_ba)) - conv_term))
+        for o in model.observations:
+            bao = b.update(best_a, o)
 
-        # Chosen b
-        next_b = successors_ba[best_o]
+            upper_v_bao = upper_bound_belief_value_map.evaluate(bao)
+            lower_v_bao = xp.max(xp.dot(value_function.alpha_vector_array, bao.values))
 
-        # check the bounds
-        bounds_split = upper_v_ba[best_o] - lower_v_ba[best_o]
+            v_diff = (upper_v_bao - lower_v_bao)
 
-        if bounds_split < conv_term or max_generation <= 0:
+            o_val = b_probs[o] * v_diff
+            
+            if o_val > max_o_val:
+                max_o_val = o_val
+                best_v_diff = v_diff
+                next_b = bao
+
+        # if bounds_split < conv_term or max_generation <= 0:
+        if best_v_diff < conv_term or max_generation <= 1:
             return BeliefSet(model, [next_b])
         
+        # Add the belief point and associated value to the belief-value mapping
+        upper_bound_belief_value_map.add(b, max_qv)
+
         # Go one step deeper in the recursion
         b_set = self.expand_hsvi(model=model,
                                  b=next_b,
@@ -1748,9 +1795,6 @@ class PBVI_Solver(Solver):
         # Append the nex belief of this iteration to the deeper beliefs
         new_belief_list = b_set.belief_list
         new_belief_list.append(next_b)
-
-        # Add the belief point and associated value to the belief-value mapping
-        upper_bound_belief_value_map.add(next_b, max([upper_bound_belief_value_map.qva(next_b, a, gamma=self.gamma) for a in model.actions]))
 
         return BeliefSet(model, new_belief_list)
 
@@ -1802,11 +1846,14 @@ class PBVI_Solver(Solver):
             args = {arg: function_specific_parameters[arg] for arg in ['value_function', 'mdp_policy'] if arg in function_specific_parameters}
             if not hasattr(self, '_upper_bound'):
                 self._upper_bound = BeliefValueMapping(model, args['mdp_policy'])
+            else:
+                self._upper_bound.update()
             return self.expand_hsvi(model=model, 
                                     b=Belief(model),
                                     value_function=args['value_function'],
                                     upper_bound_belief_value_map=self._upper_bound,
                                     max_generation=max_generation)
+        
         else:
             raise Exception('Not implemented')
 
