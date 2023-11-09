@@ -9,6 +9,7 @@ import copy
 import json
 import os
 import pandas as pd
+import pickle
 import random
 
 import numpy as np
@@ -457,7 +458,7 @@ class Model:
 
     def save(self, file_name:str, path:str='./Models') -> None:
         '''
-        Function to save the current model in a json file.
+        Function to save the current model in a pickle file.
         By default, the model will be saved in 'Models' directory in the current working directory but this can be changed using the 'path' parameter.
 
         Parameters
@@ -471,25 +472,18 @@ class Model:
             print('Folder does not exist yet, creating it...')
             os.makedirs(path)
 
-        if not file_name.endswith('.json'):
-            file_name += '.json'
+        if not file_name.endswith('.pck'):
+            file_name += '.pck'
 
-        # Taking the arguments of the CPU version of the model
-        argument_dict = self.cpu_model.__dict__
-
-        # Converting the numpy array to lists
-        for k,v in argument_dict.items():
-            argument_dict.__setattr__(k, v.tolist() if isinstance(v, np.ndarray) else v)
-
-        json_object = json.dumps(argument_dict, indent=4)
-        with open(path + '/' + file_name, 'w') as outfile:
-            outfile.write(json_object)
+        # Writing the cpu version of the file to a pickle file
+        with open(path + '/' + file_name, 'wb') as f:
+            pickle.dump(self.cpu_model, f)
 
 
     @classmethod
-    def load_from_json(cls, file:str) -> 'Model':
+    def load_from_file(cls, file:str) -> 'Model':
         '''
-        Function to load a MDP model from a json file. The json structure must contain the same items as in the constructor of this class.
+        Function to load a MDP model from a pickle file. The json structure must contain the same items as in the constructor of this class.
 
         Parameters
         ----------
@@ -501,15 +495,8 @@ class Model:
         loaded_model : mdp.Model
             An instance of the loaded model.
         '''
-        with open(file, 'r') as openfile:
-            json_model = json.load(openfile)
-
-        loaded_model = super().__new__(cls)
-        for k,v in json_model.items():
-            loaded_model.__setattr__(k, np.array(v) if isinstance(v, list) else v)
-
-        if 'grid_states' in json_model:
-            loaded_model.convert_to_grid(json_model['grid_states'])
+        with open(file, 'rb') as openfile:
+            loaded_model = pickle.load(openfile)
 
         return loaded_model
 
