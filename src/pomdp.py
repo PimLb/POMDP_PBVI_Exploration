@@ -1799,6 +1799,77 @@ class PBVI_Solver(Solver):
         return BeliefSet(model, new_belief_list)
 
 
+    def expand_fsvi(self,
+                   model:Model,
+                   b:Belief,
+                   mdp_policy:ValueFunction,
+                   s:Union[int, None]=None,
+                   max_generation:int=10,
+                   sequence_string:str=''
+                   ) -> BeliefSet:
+        '''
+        Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs.
+        It is a recursive function that is started by a initial state 's' and using the MDP policy, chooses the best action to take.
+        Following this, a random next state 's_p' is being sampled from the transition probabilities and a random observation 'o' based on the observation probabilities.
+        Then the given belief is updated using the chosen action and the observation received and the updated belief is added to the sequence.
+        Once the state is a goal state, the recursion is done and the belief sequence is returned.
+
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model in which the exploration process will happen.
+        b : Belief
+            A belief to be added to the returned belief sequence and updated for the next step of the recursion.
+        mdp_policy : ValueFunction
+            The mdp policy used to choose the action from with the given state 's'.
+        s : int
+            The state that starts the exploration sequence and based on which an action will be chosen.
+        max_generation : int, default=10
+            The maximum recursion depth that can be reached before the generated belief sequence is returned.
+        sequence_string : str, default=''
+            The sequence of previously explored actions and observations.
+        
+        Returns
+        -------
+        belief_set : BeliefSet
+            A new sequence of beliefs.
+        '''
+        xp = np if not gpu_support else cp.get_array_module(b.values)
+        belief_list = [b]
+
+        if s is None:
+            s = b.random_state()
+
+        if max_generation <= 0:
+            log('Horizon reached before goal...')
+        elif s not in model.end_states:
+            # Choose action based on mdp value function
+            a_star = xp.argmax(mdp_policy.alpha_vector_array[:,s])
+
+            # Pick a random next state (weighted by transition probabilities)
+            s_p = model.transition(s, a_star)
+
+            # Pick a random observation weighted by observation probabilities in state s_p and after having done action a_star
+            o = model.observe(s_p, a_star)
+
+            # Update sequence string
+            sequence_string += ('-' if len(sequence_string) > 0 else '') + f'{a_star},{o}'
+
+            # Generate a new belief based on a_star and o
+            b_p = b.update(a_star, o)
+
+            # Recursive call to go closer to goal
+            b_set = self.expand_fsvi(model=model,
+                                     b=b_p,
+                                     mdp_policy=mdp_policy,
+                                     s=s_p,
+                                     max_generation=max_generation-1,
+                                     sequence_string=sequence_string)
+            belief_list.extend(b_set.belief_list)
+        
+        return BeliefSet(model, belief_list)
+    
+
     def expand(self, model:Model, belief_set:BeliefSet, max_generation:int, **function_specific_parameters) -> BeliefSet:
         '''
         Central method to call one of the functions for a particular expansion strategy:
@@ -1808,6 +1879,7 @@ class PBVI_Solver(Solver):
             - Stochastic Simulation with Exploratory Action (ssea)
             - Greedy Error Reduction (ger)
             - Heuristic Search Value Iteration (hsvi)
+            - Forward Search Value Iteration (fsvi)
                 
         Parameters
         ----------
@@ -1852,6 +1924,13 @@ class PBVI_Solver(Solver):
                                     b=Belief(model),
                                     value_function=args['value_function'],
                                     upper_bound_belief_value_map=self._upper_bound,
+                                    max_generation=max_generation)
+        
+        elif self.expand_function in 'expand_fsvi':
+            args = {arg: function_specific_parameters[arg] for arg in ['mdp_policy'] if arg in function_specific_parameters}
+            return self.expand_fsvi(model=model, 
+                                    b=Belief(model),
+                                    mdp_policy=args['mdp_policy'],
                                     max_generation=max_generation)
         
         else:
@@ -1916,7 +1995,8 @@ class PBVI_Solver(Solver):
             - ssga: Stochastic Simulation with Greedy Action. Extra params: epsilon (float)
             - ssea: Stochastic Simulation with Exploratory Action. Extra params: /
             - ger: Greedy Error Reduction. Extra params: /
-            - hsvi: Heuristic Search Value Iteration. Extra param: mdp_policy (ValueFunction) 
+            - hsvi: Heuristic Search Value Iteration. Extra param: mdp_policy (ValueFunction)
+            - fsvi: Forward Search Value Iteration: Extra param: mdp_policy (ValueFunction)
 
         Parameters
         ----------
