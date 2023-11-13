@@ -1776,7 +1776,7 @@ class Simulation:
         xp = np if not self.model.is_on_gpu else cp
 
         if start_state is None:
-            self.agent_state = int(np.random.choice(a=self.model.states, size=1, p=self.model.start_probabilities)[0])
+            self.agent_state = int(xp.random.choice(a=self.model.states, size=1, p=self.model.start_probabilities)[0])
         else:
             self.agent_state = start_state
         
