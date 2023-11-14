@@ -905,7 +905,7 @@ class ValueFunction:
             vector_array = cp.asnumpy(vector_array)
             actions = cp.asnumpy(actions)
 
-        data = np.concatenate((np.array(self.actions)[:,None], self.alpha_vector_array), axis=1)
+        data = np.concatenate((np.array(actions)[:,None], vector_array), axis=1)
         columns = ['action', *self.model.state_labels]
 
         df = pd.DataFrame(data)
