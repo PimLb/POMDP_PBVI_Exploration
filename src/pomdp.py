@@ -4,6 +4,7 @@ from matplotlib import animation, cm, colors, ticker, patches
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
+import pandas as pd
 from tqdm.auto import trange
 from typing import Tuple, Union
 
@@ -849,7 +850,6 @@ class BeliefValueMapping:
             vb = v0 + ((self.value_array - xp.dot(self.belief_array, self.corner_values)) * xp.min(belief.values / self.belief_array, axis=1))
 
         return float(xp.min(xp.append(vb, v0)))
-    
 
 
 class SolverHistory:
@@ -2538,6 +2538,21 @@ class SimulationHistory(MDP_SimulationHistory):
         self.beliefs.append(next_belief)
         self.observations.append(observation)
 
+
+    # Overwritten
+    def to_dataframe(self) -> pd.DataFrame:
+        '''
+        Returns a pandas dataframe representation of the simulation history.
+
+        Note: Beliefs not saved as the sequence can be recreated from the sequence of action-observation pairs.
+        '''
+        df = super().to_dataframe()
+        df['Observations'] = self.observations + [None]
+
+        print('[Warning] Beliefs not saved with simulation history but the belief sequence can be recreated from the actions and observations.')
+
+        return df
+    
 
     # Overwritten
     def _plot_to_frame_on_ax(self, frame_i, ax):

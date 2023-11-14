@@ -879,7 +879,7 @@ class ValueFunction:
 
     def save(self, path:str='./ValueFunctions', file_name:Union[str,None]=None) -> None:
         '''
-        Function to save the save function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
+        Function to save the value function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
         If no file_name is provided, it be saved as '<current_timestamp>_value_function.csv'.
 
         Parameters
@@ -1613,7 +1613,7 @@ class SimulationHistory:
         self.model = model
 
         self.states = [start_state]
-        self.grid_point_sequence = [[i[0] for i in np.where(self.model.state_grid == start_state)]]
+        self.grid_point_sequence = [[int(i[0]) for i in np.where(self.model.state_grid == start_state)]]
         self.actions = []
         self.rewards = RewardSet()
 
@@ -1634,7 +1634,7 @@ class SimulationHistory:
         self.actions.append(action)
         self.rewards.append(reward)
         self.states.append(next_state)
-        self.grid_point_sequence.append([i[0] for i in np.where(self.model.state_grid == next_state)])
+        self.grid_point_sequence.append([int(i[0]) for i in np.where(self.model.state_grid == next_state)])
     
 
     def __len__(self):
@@ -1726,6 +1726,47 @@ class SimulationHistory:
         ani.save('./Sim Videos/' + video_title, writer=writervideo)
         print(f'Video saved at \'Sim Videos/{video_title}\'...')
         plt.close()
+
+
+    def to_dataframe(self) -> pd.DataFrame:
+        '''
+        Returns a pandas dataframe representation of the simulation history.
+        '''
+        return pd.DataFrame({
+            'States': self.states,
+            'State_grid_x': [point[0] for point in self.grid_point_sequence],
+            'State_grid_y': [point[1] for point in self.grid_point_sequence],
+            'Actions': self.actions + [None],
+            'Rewards': self.rewards + [None]
+        })
+
+
+    def save(self, path:str='./Simulations', file_name:Union[str,None]=None) -> None:
+        '''
+        Function to save the simulation history in a file at a given path. If no path is provided, it will be saved in a subfolder (Simulations) inside the current working directory.
+        If no file_name is provided, it be saved as '<current_timestamp>_simulation.csv'.
+
+        Parameters
+        ----------
+        path : str, default='./Simulations'
+            The path at which the csv will be saved.
+        file_name : str, default='<current_timestamp>_simulation.csv'
+            The file name used to save in.
+        '''
+        if not os.path.exists(path):
+            print('Folder does not exist yet, creating it...')
+            os.makedirs(path)
+            
+        if file_name is None:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            file_name = timestamp + '_simulation.csv'
+
+        if not file_name.endswith('.csv'):
+            file_name += '.csv'
+        
+        df = self.to_dataframe()
+
+        df.to_csv(path + '/' + file_name, index=False)
 
 
 class Simulation:
