@@ -877,7 +877,7 @@ class ValueFunction:
         self._pruning_level = level
     
 
-    def save(self, path:str='./ValueFunctions', file_name:Union[str,None]=None) -> None:
+    def save(self, path:str='./ValueFunctions', file_name:Union[str,None]=None, compress:bool=False) -> None:
         '''
         Function to save the value function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
         If no file_name is provided, it be saved as '<current_timestamp>_value_function.csv'.
@@ -888,6 +888,8 @@ class ValueFunction:
             The path at which the csv will be saved.
         file_name : str, default='<current_timestamp>_value_function.csv'
             The file name used to save in.
+        compress : bool, default=False
+            Whether to compress the resulting file to a gzip file or not.
         '''
         if not os.path.exists(path):
             print('Folder does not exist yet, creating it...')
@@ -896,6 +898,12 @@ class ValueFunction:
         if file_name is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             file_name = timestamp + '_value_function.csv'
+
+        # Compression check
+        compression_type = None
+        if compress:
+            file_name += '.gzip'
+            compression_type = 'gzip'
 
         vector_array = self.alpha_vector_array
         actions = self.actions
@@ -909,7 +917,7 @@ class ValueFunction:
         columns = ['action', *self.model.state_labels]
 
         df = pd.DataFrame(data)
-        df.to_csv(path + '/' + file_name, index=False, header=columns)
+        df.to_csv(path + '/' + file_name, index=False, header=columns, compression=compression_type)
 
 
     @classmethod
@@ -929,7 +937,11 @@ class ValueFunction:
         loaded_value_function : ValueFunction
             The loaded value function.
         '''
-        df = pd.read_csv(file, header=0, index_col=False)
+        compression_type = None
+        if '.gzip' in file:
+            compression_type = 'gzip'
+        
+        df = pd.read_csv(file, header=0, index_col=False, compression=compression_type)
         alpha_vectors = df.to_numpy()
 
         return ValueFunction(model, alpha_vectors[:,1:], alpha_vectors[:,0].astype(int))
