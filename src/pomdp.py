@@ -2556,6 +2556,8 @@ class SimulationHistory(MDP_SimulationHistory):
 
     # Overwritten
     def _plot_to_frame_on_ax(self, frame_i, ax):
+        model = self.model.cpu_model
+
         # Data
         data = np.array(self.grid_point_sequence)[:(frame_i+1),:]
         belief = self.beliefs[frame_i]
@@ -2563,7 +2565,7 @@ class SimulationHistory(MDP_SimulationHistory):
         obs_colors = ['#000000'] + [COLOR_LIST[o]['hex'] for o in observations]
 
         # Ticks
-        dimensions = self.model.state_grid.shape
+        dimensions = model.state_grid.shape
         x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] < 10 else int(dimensions[1] / 10)))
         y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] < 5 else int(dimensions[0] / 5)))
 
@@ -2572,10 +2574,10 @@ class SimulationHistory(MDP_SimulationHistory):
         ax.set_title(f'Simulation (Frame {frame_i})')
 
         # Observation labels legend
-        proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[o]['id']) for o in self.model.observations]
-        ax.legend(proxy, self.model.observation_labels, title='Observations') # type: ignore
+        proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[o]['id']) for o in model.observations]
+        ax.legend(proxy, model.observation_labels, title='Observations') # type: ignore
 
-        grid_values = belief.values[self.model.state_grid]
+        grid_values = belief.values[model.state_grid]
         ax.imshow(grid_values, cmap='Blues')
         ax.plot(data[:,1], data[:,0], color='red', zorder=-1)
         ax.scatter(data[:,1], data[:,0], c=obs_colors)
