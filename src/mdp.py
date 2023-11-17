@@ -210,14 +210,14 @@ class Model:
         if transitions is None:
             if reachable_states is None:
                 # If no transitiong matrix and no reachable states given, generate random one
-                print('[Warning] No transition matrix and no reachable states have provided so a random transition matrix is generated...')
+                log('    > [Warning] No transition matrix and no reachable states have provided so a random transition matrix is generated...')
                 random_probs = np.random.rand(self.state_count, self.action_count, self.state_count)
 
                 # Normalization to have s_p probabilies summing to 1
                 self.transition_table = random_probs / np.sum(random_probs, axis=2, keepdims=True)
             else:
                 # Make uniform transition probabilities over reachable states
-                print(f'[Warning] No transition matrix or function provided but reachable states are, so probability to reach any reachable states will "1 / reachable state count" so here: {1/self.reachable_state_count:.3f}.')
+                log(f'    > [Warning] No transition matrix or function provided but reachable states are, so probability to reach any reachable states will "1 / reachable state count" so here: {1/self.reachable_state_count:.3f}.')
 
         elif callable(transitions): # Transition function
             self.transition_function = transitions
@@ -226,7 +226,7 @@ class Model:
             try:
                 t_arr = np.fromfunction(self.transition_function, (self.state_count, self.action_count, self.state_count))
             except MemoryError:
-                print('[Warning] Not enough memory to store transition table, using transition function provided...')
+                log('    > [Warning] Not enough memory to store transition table, using transition function provided...')
             else:
                 self.transition_table = t_arr
 
@@ -239,7 +239,7 @@ class Model:
         duration = (datetime.now() - start_ts).total_seconds()
         log(f'    > Done in {duration:.3f}s')
         if duration > 1:
-            log(f'    > /!\\ Transition table generation took long, if not done already, try to use the reachable_states parameter to speedup the process.')
+            log(f'    > [Warning] Transition table generation took long, if not done already, try to use the reachable_states parameter to speedup the process.')
 
         # ------------------------- Rewards are probabilistic toggle -------------------------
         self.rewards_are_probabilistic = rewards_are_probabilistic
@@ -265,7 +265,7 @@ class Model:
                     self.state_grid = state_grid
 
             else:
-                log('    > Warning: looping through all grid states provided to find the corresponding states, can take a while...')
+                log('    > [Warning] Looping through all grid states provided to find the corresponding states, can take a while...')
                 
                 np_state_grid = np.zeros(grid_shape, dtype=int)
                 states_covered = 0
@@ -300,7 +300,7 @@ class Model:
             log('- Starting computation of reachable states from transition data')
             
             if self.state_count > 1000:
-                log('-    > Warning: For models with large amounts of states, this operation can take time. Try generating it advance and use the parameter \'reachable_states\'...')
+                log('-    > [Warning] For models with large amounts of states, this operation can take time. Try generating it advance and use the parameter \'reachable_states\'...')
             
             start_ts = datetime.now()
 
@@ -877,7 +877,7 @@ class ValueFunction:
         self._pruning_level = level
     
 
-    def save(self, path:str='./ValueFunctions', file_name:Union[str,None]=None) -> None:
+    def save(self, path:str='./ValueFunctions', file_name:Union[str,None]=None, compress:bool=False) -> None:
         '''
         Function to save the value function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
         If no file_name is provided, it be saved as '<current_timestamp>_value_function.csv'.
@@ -888,6 +888,8 @@ class ValueFunction:
             The path at which the csv will be saved.
         file_name : str, default='<current_timestamp>_value_function.csv'
             The file name used to save in.
+        compress : bool, default=False
+            Whether to compress the resulting file to a gzip file or not.
         '''
         if not os.path.exists(path):
             print('Folder does not exist yet, creating it...')
@@ -896,6 +898,12 @@ class ValueFunction:
         if file_name is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             file_name = timestamp + '_value_function.csv'
+
+        # Compression check
+        compression_type = None
+        if compress:
+            file_name += '.gzip'
+            compression_type = 'gzip'
 
         vector_array = self.alpha_vector_array
         actions = self.actions
@@ -909,7 +917,7 @@ class ValueFunction:
         columns = ['action', *self.model.state_labels]
 
         df = pd.DataFrame(data)
-        df.to_csv(path + '/' + file_name, index=False, header=columns)
+        df.to_csv(path + '/' + file_name, index=False, header=columns, compression=compression_type)
 
 
     @classmethod
@@ -929,7 +937,11 @@ class ValueFunction:
         loaded_value_function : ValueFunction
             The loaded value function.
         '''
-        df = pd.read_csv(file, header=0, index_col=False)
+        compression_type = None
+        if '.gzip' in file:
+            compression_type = 'gzip'
+        
+        df = pd.read_csv(file, header=0, index_col=False, compression=compression_type)
         alpha_vectors = df.to_numpy()
 
         return ValueFunction(model, alpha_vectors[:,1:], alpha_vectors[:,0].astype(int))

@@ -171,6 +171,7 @@ class Model(MDP_Model):
                          end_states=end_states,
                          end_actions=end_actions)
 
+        print()
         log('POMDP particular parameters:')
 
         # ------------------------- Observations -------------------------
@@ -1265,7 +1266,7 @@ class PBVI_Solver(Solver):
     ...
     Parameters
     ----------
-    gamma : float, default=0.9
+    gamma : float, default=0.99
         The learning rate, used to control how fast the value function will change after the each iterations.
     eps : float, default=0.001
         The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.
@@ -1282,7 +1283,7 @@ class PBVI_Solver(Solver):
     expand_function_params : dict
     '''
     def __init__(self,
-                 gamma:float=0.9,
+                 gamma:float=0.99,
                  eps:float=0.001,
                  expand_function:str='ssea',
                  **expand_function_params):
@@ -1428,7 +1429,7 @@ class PBVI_Solver(Solver):
         append : bool, default=False
             Whether to append the new alpha vectors generated to the old alpha vectors before pruning.
         belief_dominance_prune : bool, default=True
-            Whether, before returning the new value function, checks what alpha vectors have a supperior 
+            Whether, before returning the new value function, checks what alpha vectors have a supperior value, if so it adds it.
             
         Returns
         -------
@@ -1471,7 +1472,7 @@ class PBVI_Solver(Solver):
         # Union with previous value function
         if append:
             new_value_function.extend(value_function)
-                
+        
         return new_value_function
     
 
@@ -1837,12 +1838,12 @@ class PBVI_Solver(Solver):
         xp = np if not gpu_support else cp.get_array_module(b.values)
         belief_list = [b]
 
+        # If state not provided pick a random one
         if s is None:
             s = b.random_state()
 
-        if max_generation <= 0:
-            log('Horizon reached before goal...')
-        elif s not in model.end_states:
+        # If end is not reached
+        if (s not in model.end_states) and (max_generation > 0):
             # Choose action based on mdp value function
             a_star = xp.argmax(mdp_policy.alpha_vector_array[:,s])
 
@@ -2058,6 +2059,20 @@ class PBVI_Solver(Solver):
         else:
             value_function = initial_value_function.to_gpu() if use_gpu else initial_value_function
 
+        # For hsvi of fsvi, mdp policy is required as upper bound, so if it is not required, generate it
+        if self.expand_function_params['mdp_policy'] is None:
+            log('[Warning] MDP solution not provided, running value iteration on the problem to retrieve it...')
+            vi_solver = VI_Solver(gamma=self.gamma, eps=self.eps)
+
+            log('    > Starting MDP Value Iteration...')
+            mdp_solution, hist = vi_solver.solve(model,
+                                                 use_gpu=use_gpu,
+                                                 print_progress=False)
+            
+            log(f'    > Value Iteration stopped or converged in {sum(hist.iteration_times):.3f}s, and after {len(hist.iteration_times)} iteration.\n')
+
+            self.expand_function_params['mdp_policy'] = mdp_solution
+
         # Convergence check boundary
         max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
 
@@ -2145,7 +2160,7 @@ class PBVI_Solver(Solver):
                 expand_value_function = value_function
         except MemoryError as e:
             print(f'Memory full: {e}')
-            print('Returning value function and history as is...')
+            print('Returning value function and history as is...\n')
 
         # Final pruning
         start_ts = datetime.now()
@@ -2165,46 +2180,27 @@ class HSVI_Solver(PBVI_Solver):
     TODO
     '''
     def __init__(self,
-                 gamma:float=0.9,
+                 gamma:float=0.99,
                  eps:float=0.001,
-                 expand_function:str='hsvi',
                  mdp_solution:Union[ValueFunction,None]=None):
 
-        super().__init__(gamma,
-                         eps,
-                         expand_function,
+        super().__init__(gamma=gamma,
+                         eps=eps,
+                         expand_function='hsvi',
                          mdp_policy=mdp_solution)
         
     def solve(self,
               model:Model,
-              expansions: int,
-              max_belief_growth: int = 10,
-              initial_belief: BeliefSet | Belief | None = None,
-              initial_value_function: ValueFunction | None = None,
-              prune_level: int = 1,
-              prune_interval: int = 10,
-              use_gpu: bool = False,
-              history_tracking_level: int = 1,
-              print_progress: bool = True
+              expansions:int,
+              max_belief_growth:int=10,
+              initial_belief:Union[BeliefSet,Belief,None]=None,
+              initial_value_function:Union[ValueFunction,None]=None,
+              prune_level:int=1,
+              prune_interval:int=10,
+              use_gpu:bool=False,
+              history_tracking_level:int=1,
+              print_progress:bool=True
               ) -> tuple[ValueFunction, SolverHistory]:
-        '''
-        TODO
-        '''
-        # If mdp value function not provided run value iteration
-        if self.expand_function_params['mdp_policy'] is None:
-            print('[Warning] MDP solution not provided, running value iteration on the problem to retrieve it...')
-            vi_solver = VI_Solver()
-
-            log('Starting MDP Value Iteration...')
-            mdp_solution, hist = vi_solver.solve(model,
-                                                 use_gpu=use_gpu,
-                                                 print_progress=False)
-            
-            log(f'Value Iteration stopped or converged after {len(hist.iteration_times)} iteration.')
-
-            self._upper_bound = BeliefValueMapping(model, mdp_solution)
-
-        # Launch the actual solving
         return super().solve(model=model,
                              expansions=expansions,
                              full_backup=False,
@@ -2225,6 +2221,12 @@ class FSVI_Solver(PBVI_Solver):
     It has been built based on the paper of G. Shani, R. I. Brafman, and S. I. Shimony: 'Forward Search Value Iteration for POMDPS'.
     It works by utilizing the optimal MDP policy to generate paths to explore that lead to series of Beliefs
     that can then be used by the Backup function to update the value function.
+
+    The solve function is the same as the pomdp.PBVI_Solver class with some parameters prefilled.
+
+    Note:
+    - The backup mode is set to new points only
+    - Only one update/backup is run for each iteration.
     
     ...
     Parameters
@@ -2233,245 +2235,48 @@ class FSVI_Solver(PBVI_Solver):
         The learning rate, used to control how fast the value function will change after the each iterations.
     eps : float, default=0.001
         The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.
+    mdp_policy : ValueFunction, optional
+        The value that will be used to decide actions during the MDP explore procedure. If not provided, it will be computed at solve time.
 
     Attributes
     ----------
     gamma : float
     eps : float
     '''
-    def __init__(self, gamma:float=0.9, eps:float=0.001):
-        self.gamma = gamma
-        self.eps = eps
-
-        self._belief_memory = {}
-
-
-    def MDPExplore(self,
-                   model:Model,
-                   b:Belief,
-                   s:int,
-                   mdp_policy:ValueFunction,
-                   depth:int,
-                   horizon:int,
-                   sequence_string:str='',
-                   belief_memory_depth:int=10
-                   ) -> BeliefSet:
-        '''
-        Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs.
-        It is a recursive function that is started by a initial state 's' and using the MDP policy, chooses the best action to take.
-        Following this, a random next state 's_p' is being sampled from the transition probabilities and a random observation 'o' based on the observation probabilities.
-        Then the given belief is updated using the chosen action and the observation received and the updated belief is added to the sequence.
-        Once the state is a goal state, the recursion is done and the belief sequence is returned.
-
-        Parameters
-        ----------
-        model : pomdp.Model
-            The model in which the exploration process will happen.
-        b : Belief
-            A belief to be added to the returned belief sequence and updated for the next step of the recursion.
-        s : int
-            The state that starts the exploration sequence and based on which an action will be chosen.
-        mdp_policy : ValueFunction
-            The mdp policy used to choose the action from with the given state 's'.
-        depth : int
-            The current recursion depth.
-        horizon : int
-            The maximum recursion depth that can be reached before the generated belief sequence is returned.
-        sequence_string : str, default=''
-            The sequence of previously explored actions and observations.
-        belief_memory_depth : int, default=10
-            How deep the belief memory should be. It is used to speedup the MDP expansion process by caching previously explored beliefs based on the sequence that led it there.
-
-        Returns
-        -------
-        belief_set : BeliefSet
-            A new sequence of beliefs.
-        '''
-        xp = np if not gpu_support else cp.get_array_module(b.values)
-        belief_list = [b]
-
-        if depth >= horizon:
-            log('Horizon reached before goal...')
-        elif s not in model.end_states:
-            # Choose action based on mdp value function
-            a_star = xp.argmax(mdp_policy.alpha_vector_array[:,s])
-
-            # Pick a random next state (weighted by transition probabilities)
-            s_p = model.transition(s, a_star)
-
-            # Pick a random observation weighted by observation probabilities in state s_p and after having done action a_star
-            o = model.observe(s_p, a_star)
-
-            # Update sequence string
-            sequence_string += ('-' if depth > 0 else '') + f'{a_star},{o}'
-
-            # If we are within the memory limits and the sequence is already in the memory, we retrieve it
-            if depth < belief_memory_depth and sequence_string in self._belief_memory:
-                b_p = self._belief_memory[sequence_string]
-            
-            else:
-                # Generate a new belief based on a_star and o
-                b_p = b.update(a_star, o)
-                
-                # Add it to the memory if we are in the depth
-                if depth < belief_memory_depth:
-                    self._belief_memory[sequence_string] = b_p
-
-            # Recursive call to go closer to goal
-            b_set = self.MDPExplore(model, b_p, s_p, mdp_policy, depth+1, horizon, sequence_string, belief_memory_depth)
-            belief_list.extend(b_set.belief_list)
+    def __init__(self,
+                 gamma:float=0.9,
+                 eps:float=0.001,
+                 mdp_policy:Union[ValueFunction,None]=None):
+        super().__init__(gamma=gamma,
+                         eps=eps,
+                         expand_function='fsvi',
+                         mdp_policy=mdp_policy)
         
-        return BeliefSet(model, belief_list)
-
 
     def solve(self,
               model:Model,
               expansions:int,
-              horizon:int,
-              mdp_policy:ValueFunction,
-              initial_belief:Union[Belief,None]=None,
-              initial_value_function:Union[ValueFunction,None]=None,
+              max_belief_growth:int=10,
+              initial_belief:Union[BeliefSet, Belief, None]=None,
+              initial_value_function:Union[ValueFunction, None]=None,
               prune_level:int=1,
               prune_interval:int=10,
-              belief_memory_depth:int=10,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
               ) -> tuple[ValueFunction, SolverHistory]:
-        '''
-        The main loop for the forward search value iteration process. The amount of 'expansions' will determine how many the exploration process will run (generating every time a sequence of beliefs).
-        Then the 'horizon' parameter determines how deep the MDP exploration can run for. For example, is it set at 10 but it takes 15 steps to reach the end goal, the MDP exploration process will exit early.
-        It should therefore be set to a bit higher than the maximum amount steps required to reach a goal state from any other state. It is mainly used as a safeguard to avoid infinite looping.
-
-        Parameters
-        ----------
-        model : pomdp.Model
-            The model to solve.
-        expansions : int
-            How many times the MDP exploration process will run.
-        horizon : int
-            How many deep the MDP exploration process can run for.
-        mdp_policy : ValueFunction
-            The policy that will be used to choose actions from states during the exploration process.
-        initial_belief : Belief, optional
-            An initial belief that will replace the default initial belief generated from the start probabilities of the model.
-        initial_value_function : ValueFunction, optional
-            An initial value function to start the solving process with. (Can for example be the MDP value function)
-        prune_level : int, default=1
-            Parameter to prune the value function further before the expand function.
-        prune_interval : int, default=10
-            How often to prune the value function. It is counted in number of iterations.
-        belief_memory_depth : int, default=10
-            How deep the belief memory should be. It is used to speedup the MDP expansion process by caching previously explored beliefs based on the sequence that led it there.
-        use_gpu : bool, default=False
-            Whether to use the GPU with cupy array to accelerate solving.
-        history_tracking_level : int, default=1
-            How thorough the tracking of the solving process should be. (0: Nothing; 1: Times and sizes of belief sets and value function; 2: The actual value functions and beliefs sets)
-        print_progress : bool, default=True
-            Whether or not to print out the progress of the value iteration process.
-
-        Returns
-        -------
-        value_function : ValueFunction
-            The alpha vectors approximating the value function.
-        '''
-        # numpy or cupy module
-        xp = np
-
-        # If GPU usage
-        if use_gpu:
-            assert gpu_support, "GPU support is not enabled, Cupy might need to be installed..."
-            model = model.gpu_model
-
-            # Replace numpy module by cupy for computations
-            xp = cp
-
-            # Make sure MDP solution is on gpu as well
-            mdp_policy = mdp_policy.to_gpu()
-
-        # Initial belief
-        if initial_belief is None:
-            b = Belief(model)
-        else:
-            b = Belief(model, xp.array(initial_belief.values))
-
-        # Initial value function
-        if initial_value_function is None:
-            value_function = ValueFunction(model, model.expected_rewards_table.T, model.actions)
-        else:
-            value_function = initial_value_function.to_gpu() if use_gpu else initial_value_function
-
-        # Convergence check boundary
-        max_allowed_change = self.eps * (self.gamma / (1-self.gamma))
-
-        # History tracking
-        solver_history = SolverHistory(tracking_level=history_tracking_level,
-                                       model=model,
-                                       gamma=self.gamma,
-                                       eps=self.eps,
-                                       expand_function='MDP',
-                                       expand_append=False,
-                                       initial_value_function=value_function,
-                                       initial_belief_set=BeliefSet(model, [b])
-                                       )
-
-        old_value_function = value_function
-        try:
-            for i in trange(expansions, desc='Expansions') if print_progress else range(expansions):
-
-                # Expand (exploration)
-                start_ts = datetime.now()
-
-                s0 = b.random_state()
-                belief_set = self.MDPExplore(model, b, s0, mdp_policy, 0, horizon, sequence_string='', belief_memory_depth=belief_memory_depth)
-
-                expand_time = (datetime.now() - start_ts).total_seconds()
-                solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
-
-                # Backup (update of value function)
-                start_ts = datetime.now()
-
-                value_function = self.backup(model, belief_set, value_function, append=True)
-                backup_time = (datetime.now() - start_ts).total_seconds()
-
-                # Additional pruning
-                if (i % prune_interval) == 0 and i > 0:
-                    start_ts = datetime.now()
-                    vf_len = len(value_function)
-
-                    value_function.prune(prune_level)
-
-                    prune_time = (datetime.now() - start_ts).total_seconds()
-                    alpha_vectors_pruned = len(value_function) - vf_len
-                    solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
-
-                # Change computation
-                max_change = self.compute_change(old_value_function, value_function, belief_set)
-
-                # History tracking
-                solver_history.add_backup_step(backup_time, max_change, value_function)
-                
-                # Convergence check
-                if max_change < max_allowed_change:
-                    print('Converged!')
-                    break
-                
-                old_value_function = value_function
-        except MemoryError as e:
-            print(f'Memory full: {e}')
-            print('Returning value function and history as is...')
-
-        # Final pruning
-        start_ts = datetime.now()
-        vf_len = len(value_function)
-
-        value_function.prune(prune_level)
-
-        prune_time = (datetime.now() - start_ts).total_seconds()
-        alpha_vectors_pruned = len(value_function) - vf_len
-        solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
-        
-        return value_function, solver_history
+        return super().solve(model=model,
+                             expansions=expansions,
+                             full_backup=False,
+                             update_passes=1,
+                             max_belief_growth=max_belief_growth,
+                             initial_belief=initial_belief,
+                             initial_value_function=initial_value_function,
+                             prune_level=prune_level,
+                             prune_interval=prune_interval,
+                             use_gpu=use_gpu,
+                             history_tracking_level=history_tracking_level,
+                             print_progress=print_progress)
 
 
 class SimulationHistory(MDP_SimulationHistory):
@@ -2803,6 +2608,7 @@ class Agent:
                           n:int=1000,
                           max_steps:int=1000,
                           start_state:Union[int,None]=None,
+                          reward_discount:float=0.99,
                           print_progress:bool=True,
                           print_stats:bool=True
                           ) -> Tuple[RewardSet, list[SimulationHistory]]:
@@ -2810,9 +2616,6 @@ class Agent:
         Function to run a set of simulations in a row.
         This is useful when the simulation has a 'done' condition.
         In this case, the rewards of individual simulations are summed together under a single number.
-
-        Not implemented:
-            - Overal simulation stats
 
         Parameters
         ----------
@@ -2824,6 +2627,8 @@ class Agent:
             The max_steps to run per simulation.
         start_state : int, optional
             The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
+        reward_discount : float, default=0.99
+            The reward discount to compute the Average Discounted Reward (ADR).
         print_progress : bool, default=True
             Whether or not to print out the progress of the simulation.
         print_stats : bool, default=True
@@ -2850,7 +2655,7 @@ class Agent:
 
             all_histories.append(sim_history)
             all_final_rewards.append(np.sum(sim_history.rewards))
-            all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(0.99)) #TODO: Make it variable
+            all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(reward_discount))
             all_sim_length.append(len(sim_history))
 
         if print_stats:
@@ -2862,6 +2667,142 @@ class Agent:
             print(f'\t- Average discounted rewards (ADR): {(sum(all_discounted_rewards) / n)}')
 
         return all_final_rewards, all_histories
+
+
+    def run_n_simulations_parallel(self,
+                                   n:int=1000,
+                                   max_steps:int=1000,
+                                   start_state:Union[int,None]=None,
+                                   reward_discount:float=0.99,
+                                   print_progress:bool=False
+                                   ) -> Tuple[RewardSet, list[SimulationHistory]]:
+        '''
+        Function that tests a value function with n simulations. It returns the start states, the amount of steps in which the simulation reached an end state, the rewards received and the discounted rewards received.
+
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model on which to run the simulations.
+        value_function : ValueFunction
+            The value function that will be evaluated.
+        n : int, default=1000
+            The amount of simulations to run.
+        horizon : int, default=300
+            The maximum amount of steps the simulation can run for.
+        print_progress : bool, default=False
+            Whether to display a progress bar of how many simulation steps have been run so far. 
+        '''
+        # GPU support
+        xp = np if not self.value_function.is_on_gpu else cp
+        model = self.model.cpu_model if not self.value_function.is_on_gpu else self.model.gpu_model
+
+        # Genetion of an array of n beliefs
+        initial_beliefs = xp.repeat(Belief(model).values[None,:], n, axis=0)
+
+        # Generating n initial positions
+        start_state_array = xp.empty(n)
+        if isinstance(start_state, int):
+            start_state_array = start_state
+        elif isinstance(start_state, list):
+            repeated_list = xp.repeat(xp.array(start_state), xp.ceil(n / len(start_state)))
+            start_state_array = xp.resize(repeated_list, n)
+        else:
+            start_state_array = xp.random.choice(model.states, size=n, p=model.start_probabilities)
+        
+        # Belief and state arrays
+        beliefs = initial_beliefs
+        new_beliefs = None
+        states = start_state_array
+        next_states = None
+
+        # Tracking what simulations are done
+        sim_is_done = xp.zeros(n, dtype=bool)
+        done_at_step = xp.full(n, -1)
+
+        # Speedup item
+        simulations = xp.arange(n)
+        flatten_offset = (simulations[:,None] * model.state_count)
+        flat_shape = (n, (model.state_count * model.reachable_state_count))
+
+        # 2D bincount for belief set update
+        def bincount2D_vectorized(a, w):    
+            a_offs = a + flatten_offset
+            return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape(-1,model.state_count)
+
+        # Results
+        discount = self.gamma
+        rewards = []
+        discounted_rewards = []
+        
+        iterator = trange(max_steps) if print_progress else range(max_steps)
+        for i in iterator:
+            # Retrieving the top vectors according to the value function
+            best_vectors = xp.argmax(xp.matmul(beliefs, self.value_function.alpha_vector_array.T), axis=1)
+
+            # Retrieving the actions associated with the vectors chosen
+            best_actions = self.value_function.actions[best_vectors]
+
+            # Get each reachable next states for each action
+            reachable_state_per_actions = model.reachable_states[:, best_actions, :]
+
+            # Gathering new states based on the transition function and the chosen actions
+            next_state_potentials = reachable_state_per_actions[states, simulations]
+            if model.reachable_state_count == 1:
+                next_states = next_state_potentials[:,0]
+            else:
+                potential_probabilities = model.reachable_probabilities[states[:,None], best_actions[:,None]][:,0,:]
+                chosen_indices = xp.apply_along_axis(lambda x: xp.random.choice(len(x), size=1, p=x), axis=1, arr=potential_probabilities)
+                next_states = next_state_potentials[chosen_indices][:,0,0]
+
+            # Making observations based on the states landed in and the action that was taken
+            observation_probabilities = model.observation_table[next_states[:,None], best_actions[:,None]][:,0,:]
+            observations = xp.sum(xp.random.random(n)[:,None] > xp.cumsum(observation_probabilities[:,:-1], axis=1), axis=1)
+
+            # Belief set update
+            reachable_probabilities = (model.reachable_transitional_observation_table[:,best_actions,observations,:] * beliefs.T[:,:,None])
+            new_beliefs = bincount2D_vectorized(a=reachable_state_per_actions.swapaxes(0,1).reshape(flat_shape),
+                                                w=reachable_probabilities.swapaxes(0,1).reshape(flat_shape))
+
+            new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
+
+            # Rewards computation
+            step_rewards = xp.array([model.immediate_reward_function(s,a,s_p,o) for s,a,s_p,o in zip(states, best_actions, next_states, observations)])
+            rewards.append(xp.where(~sim_is_done, step_rewards, 0))
+            discounted_rewards.append(xp.where(~sim_is_done, step_rewards * discount, 0))
+
+            # Checking for done condition
+            are_done = xp.isin(next_states, xp.array(model.end_states))
+            done_at_step[sim_is_done ^ are_done] = i+1
+            sim_is_done |= are_done
+
+            # Update iterator postfix
+            if print_progress:
+                iterator.set_postfix({'done': xp.sum(sim_is_done)})
+
+            # Replacing old with new
+            states = next_states
+            beliefs = new_beliefs
+            discount *= self.gamma
+
+            # Early stopping
+            if xp.all(sim_is_done):
+                break
+
+        # Wrap up
+        sim_hist_list = []
+        b0 = Belief(model)
+        for i, s0 in enumerate(start_state_array):
+            sim_hist = SimulationHistory(self.model, int(s0), b0)
+            
+            sim_hist.states = []
+            sim_hist.actions = []
+            sim_hist.observations = []
+            sim_hist.beliefs = []
+            sim_hist.rewards = []
+
+            sim_hist_list.append(sim_hist_list)
+
+        return RewardSet(rewards), sim_hist_list
     
 
 def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
