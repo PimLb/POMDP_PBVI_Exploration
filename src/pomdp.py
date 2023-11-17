@@ -2201,9 +2201,6 @@ class HSVI_Solver(PBVI_Solver):
               history_tracking_level:int=1,
               print_progress:bool=True
               ) -> tuple[ValueFunction, SolverHistory]:
-        '''
-        TODO
-        '''
         return super().solve(model=model,
                              expansions=expansions,
                              full_backup=False,
@@ -2609,6 +2606,7 @@ class Agent:
                           n:int=1000,
                           max_steps:int=1000,
                           start_state:Union[int,None]=None,
+                          reward_discount:float=0.99,
                           print_progress:bool=True,
                           print_stats:bool=True
                           ) -> Tuple[RewardSet, list[SimulationHistory]]:
@@ -2616,9 +2614,6 @@ class Agent:
         Function to run a set of simulations in a row.
         This is useful when the simulation has a 'done' condition.
         In this case, the rewards of individual simulations are summed together under a single number.
-
-        Not implemented:
-            - Overal simulation stats
 
         Parameters
         ----------
@@ -2630,6 +2625,8 @@ class Agent:
             The max_steps to run per simulation.
         start_state : int, optional
             The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
+        reward_discount : float, default=0.99
+            The reward discount to compute the Average Discounted Reward (ADR).
         print_progress : bool, default=True
             Whether or not to print out the progress of the simulation.
         print_stats : bool, default=True
@@ -2656,7 +2653,7 @@ class Agent:
 
             all_histories.append(sim_history)
             all_final_rewards.append(np.sum(sim_history.rewards))
-            all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(0.99)) #TODO: Make it variable
+            all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(reward_discount))
             all_sim_length.append(len(sim_history))
 
         if print_stats:
@@ -2668,6 +2665,142 @@ class Agent:
             print(f'\t- Average discounted rewards (ADR): {(sum(all_discounted_rewards) / n)}')
 
         return all_final_rewards, all_histories
+
+
+    def run_n_simulations_parallel(self,
+                                   n:int=1000,
+                                   max_steps:int=1000,
+                                   start_state:Union[int,None]=None,
+                                   reward_discount:float=0.99,
+                                   print_progress:bool=False
+                                   ) -> Tuple[RewardSet, list[SimulationHistory]]:
+        '''
+        Function that tests a value function with n simulations. It returns the start states, the amount of steps in which the simulation reached an end state, the rewards received and the discounted rewards received.
+
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model on which to run the simulations.
+        value_function : ValueFunction
+            The value function that will be evaluated.
+        n : int, default=1000
+            The amount of simulations to run.
+        horizon : int, default=300
+            The maximum amount of steps the simulation can run for.
+        print_progress : bool, default=False
+            Whether to display a progress bar of how many simulation steps have been run so far. 
+        '''
+        # GPU support
+        xp = np if not self.value_function.is_on_gpu else cp
+        model = self.model.cpu_model if not self.value_function.is_on_gpu else self.model.gpu_model
+
+        # Genetion of an array of n beliefs
+        initial_beliefs = xp.repeat(Belief(model).values[None,:], n, axis=0)
+
+        # Generating n initial positions
+        start_state_array = xp.empty(n)
+        if isinstance(start_state, int):
+            start_state_array = start_state
+        elif isinstance(start_state, list):
+            repeated_list = xp.repeat(xp.array(start_state), xp.ceil(n / len(start_state)))
+            start_state_array = xp.resize(repeated_list, n)
+        else:
+            start_state_array = xp.random.choice(model.states, size=n, p=model.start_probabilities)
+        
+        # Belief and state arrays
+        beliefs = initial_beliefs
+        new_beliefs = None
+        states = start_state_array
+        next_states = None
+
+        # Tracking what simulations are done
+        sim_is_done = xp.zeros(n, dtype=bool)
+        done_at_step = xp.full(n, -1)
+
+        # Speedup item
+        simulations = xp.arange(n)
+        flatten_offset = (simulations[:,None] * model.state_count)
+        flat_shape = (n, (model.state_count * model.reachable_state_count))
+
+        # 2D bincount for belief set update
+        def bincount2D_vectorized(a, w):    
+            a_offs = a + flatten_offset
+            return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape(-1,model.state_count)
+
+        # Results
+        discount = self.gamma
+        rewards = []
+        discounted_rewards = []
+        
+        iterator = trange(max_steps) if print_progress else range(max_steps)
+        for i in iterator:
+            # Retrieving the top vectors according to the value function
+            best_vectors = xp.argmax(xp.matmul(beliefs, self.value_function.alpha_vector_array.T), axis=1)
+
+            # Retrieving the actions associated with the vectors chosen
+            best_actions = self.value_function.actions[best_vectors]
+
+            # Get each reachable next states for each action
+            reachable_state_per_actions = model.reachable_states[:, best_actions, :]
+
+            # Gathering new states based on the transition function and the chosen actions
+            next_state_potentials = reachable_state_per_actions[states, simulations]
+            if model.reachable_state_count == 1:
+                next_states = next_state_potentials[:,0]
+            else:
+                potential_probabilities = model.reachable_probabilities[states[:,None], best_actions[:,None]][:,0,:]
+                chosen_indices = xp.apply_along_axis(lambda x: xp.random.choice(len(x), size=1, p=x), axis=1, arr=potential_probabilities)
+                next_states = next_state_potentials[chosen_indices][:,0,0]
+
+            # Making observations based on the states landed in and the action that was taken
+            observation_probabilities = model.observation_table[next_states[:,None], best_actions[:,None]][:,0,:]
+            observations = xp.sum(xp.random.random(n)[:,None] > xp.cumsum(observation_probabilities[:,:-1], axis=1), axis=1)
+
+            # Belief set update
+            reachable_probabilities = (model.reachable_transitional_observation_table[:,best_actions,observations,:] * beliefs.T[:,:,None])
+            new_beliefs = bincount2D_vectorized(a=reachable_state_per_actions.swapaxes(0,1).reshape(flat_shape),
+                                                w=reachable_probabilities.swapaxes(0,1).reshape(flat_shape))
+
+            new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
+
+            # Rewards computation
+            step_rewards = xp.array([model.immediate_reward_function(s,a,s_p,o) for s,a,s_p,o in zip(states, best_actions, next_states, observations)])
+            rewards.append(xp.where(~sim_is_done, step_rewards, 0))
+            discounted_rewards.append(xp.where(~sim_is_done, step_rewards * discount, 0))
+
+            # Checking for done condition
+            are_done = xp.isin(next_states, xp.array(model.end_states))
+            done_at_step[sim_is_done ^ are_done] = i+1
+            sim_is_done |= are_done
+
+            # Update iterator postfix
+            if print_progress:
+                iterator.set_postfix({'done': xp.sum(sim_is_done)})
+
+            # Replacing old with new
+            states = next_states
+            beliefs = new_beliefs
+            discount *= self.gamma
+
+            # Early stopping
+            if xp.all(sim_is_done):
+                break
+
+        # Wrap up
+        sim_hist_list = []
+        b0 = Belief(model)
+        for i, s0 in enumerate(start_state_array):
+            sim_hist = SimulationHistory(self.model, int(s0), b0)
+            
+            sim_hist.states = []
+            sim_hist.actions = []
+            sim_hist.observations = []
+            sim_hist.beliefs = []
+            sim_hist.rewards = []
+
+            sim_hist_list.append(sim_hist_list)
+
+        return RewardSet(rewards), sim_hist_list
     
 
 def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
