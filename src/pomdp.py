@@ -171,6 +171,7 @@ class Model(MDP_Model):
                          end_states=end_states,
                          end_actions=end_actions)
 
+        print()
         log('POMDP particular parameters:')
 
         # ------------------------- Observations -------------------------
@@ -1428,7 +1429,7 @@ class PBVI_Solver(Solver):
         append : bool, default=False
             Whether to append the new alpha vectors generated to the old alpha vectors before pruning.
         belief_dominance_prune : bool, default=True
-            Whether, before returning the new value function, checks what alpha vectors have a supperior 
+            Whether, before returning the new value function, checks what alpha vectors have a supperior value, if so it adds it.
             
         Returns
         -------
@@ -1471,7 +1472,7 @@ class PBVI_Solver(Solver):
         # Union with previous value function
         if append:
             new_value_function.extend(value_function)
-                
+        
         return new_value_function
     
 
@@ -2060,15 +2061,15 @@ class PBVI_Solver(Solver):
 
         # For hsvi of fsvi, mdp policy is required as upper bound, so if it is not required, generate it
         if self.expand_function_params['mdp_policy'] is None:
-            print('[Warning] MDP solution not provided, running value iteration on the problem to retrieve it...')
+            log('[Warning] MDP solution not provided, running value iteration on the problem to retrieve it...')
             vi_solver = VI_Solver(gamma=self.gamma, eps=self.eps)
 
-            log('Starting MDP Value Iteration...')
+            log('    > Starting MDP Value Iteration...')
             mdp_solution, hist = vi_solver.solve(model,
                                                  use_gpu=use_gpu,
                                                  print_progress=False)
             
-            log(f'Value Iteration stopped or converged after {len(hist.iteration_times)} iteration.')
+            log(f'    > Value Iteration stopped or converged in {sum(hist.iteration_times):.3f}s, and after {len(hist.iteration_times)} iteration.\n')
 
             self.expand_function_params['mdp_policy'] = mdp_solution
 
@@ -2159,7 +2160,7 @@ class PBVI_Solver(Solver):
                 expand_value_function = value_function
         except MemoryError as e:
             print(f'Memory full: {e}')
-            print('Returning value function and history as is...')
+            print('Returning value function and history as is...\n')
 
         # Final pruning
         start_ts = datetime.now()

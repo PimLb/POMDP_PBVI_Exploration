@@ -210,14 +210,14 @@ class Model:
         if transitions is None:
             if reachable_states is None:
                 # If no transitiong matrix and no reachable states given, generate random one
-                print('[Warning] No transition matrix and no reachable states have provided so a random transition matrix is generated...')
+                log('    > [Warning] No transition matrix and no reachable states have provided so a random transition matrix is generated...')
                 random_probs = np.random.rand(self.state_count, self.action_count, self.state_count)
 
                 # Normalization to have s_p probabilies summing to 1
                 self.transition_table = random_probs / np.sum(random_probs, axis=2, keepdims=True)
             else:
                 # Make uniform transition probabilities over reachable states
-                print(f'[Warning] No transition matrix or function provided but reachable states are, so probability to reach any reachable states will "1 / reachable state count" so here: {1/self.reachable_state_count:.3f}.')
+                log(f'    > [Warning] No transition matrix or function provided but reachable states are, so probability to reach any reachable states will "1 / reachable state count" so here: {1/self.reachable_state_count:.3f}.')
 
         elif callable(transitions): # Transition function
             self.transition_function = transitions
@@ -226,7 +226,7 @@ class Model:
             try:
                 t_arr = np.fromfunction(self.transition_function, (self.state_count, self.action_count, self.state_count))
             except MemoryError:
-                print('[Warning] Not enough memory to store transition table, using transition function provided...')
+                log('    > [Warning] Not enough memory to store transition table, using transition function provided...')
             else:
                 self.transition_table = t_arr
 
@@ -239,7 +239,7 @@ class Model:
         duration = (datetime.now() - start_ts).total_seconds()
         log(f'    > Done in {duration:.3f}s')
         if duration > 1:
-            log(f'    > /!\\ Transition table generation took long, if not done already, try to use the reachable_states parameter to speedup the process.')
+            log(f'    > [Warning] Transition table generation took long, if not done already, try to use the reachable_states parameter to speedup the process.')
 
         # ------------------------- Rewards are probabilistic toggle -------------------------
         self.rewards_are_probabilistic = rewards_are_probabilistic
@@ -265,7 +265,7 @@ class Model:
                     self.state_grid = state_grid
 
             else:
-                log('    > Warning: looping through all grid states provided to find the corresponding states, can take a while...')
+                log('    > [Warning] Looping through all grid states provided to find the corresponding states, can take a while...')
                 
                 np_state_grid = np.zeros(grid_shape, dtype=int)
                 states_covered = 0
@@ -300,7 +300,7 @@ class Model:
             log('- Starting computation of reachable states from transition data')
             
             if self.state_count > 1000:
-                log('-    > Warning: For models with large amounts of states, this operation can take time. Try generating it advance and use the parameter \'reachable_states\'...')
+                log('-    > [Warning] For models with large amounts of states, this operation can take time. Try generating it advance and use the parameter \'reachable_states\'...')
             
             start_ts = datetime.now()
 
