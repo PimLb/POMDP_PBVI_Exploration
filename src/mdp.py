@@ -1677,18 +1677,20 @@ class SimulationHistory:
         dimensions = self.model.state_grid.shape
         x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] < 10 else int(dimensions[1] / 10)))
         y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] < 5 else int(dimensions[0] / 5)))
-        
-        plt.xticks(x_ticks)
-        plt.yticks(y_ticks)
-
-        # Inverting y axis
-        ax = plt.gca()
-        ax.invert_yaxis()
 
         # Actual plotting
         data = np.array(self.grid_point_sequence)
         plt.plot(data[:,1], data[:,0], color='red')
         plt.scatter(data[:,1], data[:,0], color='red')
+
+        # Inverting y axis
+        ax = plt.gca()
+        ax.set_xticks(x_ticks)
+        ax.set_xlim((0, dimensions[1]))
+        ax.set_yticks(y_ticks)
+        ax.set_ylim((0,dimensions[0]))
+        ax.invert_yaxis()
+
         plt.show()
 
 
@@ -1698,8 +1700,8 @@ class SimulationHistory:
 
         # Ticks
         dimensions = self.model.state_grid.shape
-        x_ticks = [i for i in range(dimensions[1])]
-        y_ticks = [i for i in range(dimensions[0])]
+        x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] < 10 else int(dimensions[1] / 10)))
+        y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] < 5 else int(dimensions[0] / 5)))
 
         # Plotting
         ax.clear()

@@ -454,8 +454,10 @@ class Belief:
         # Plot setup
         plt.figure(figsize=(size*1.2,size))
 
+        model = self.model.cpu_model
+
         # Ticks
-        dimensions = self.model.state_grid.shape
+        dimensions = model.state_grid.shape
         x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] < 10 else int(dimensions[1] / 10)))
         y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] < 5 else int(dimensions[0] / 5)))
 
@@ -466,7 +468,8 @@ class Belief:
         plt.title(f'Belief (probability distribution over states)')
 
         # Actual plot
-        grid_values = self._values[self.model.state_grid]
+        belief_values = self._values if (not gpu_support) or (cp.get_array_module(self._values) == np) else cp.asnumpy(self._values)
+        grid_values = belief_values[model.state_grid]
         plt.imshow(grid_values,cmap='Blues')
         plt.colorbar()
         plt.show()
@@ -2865,6 +2868,7 @@ class Agent:
         actions_history = xp.array(actions_history).T
         observations_history = xp.array(observations_history).T
         rewards = xp.array(rewards).T
+        discounted_rewards = xp.array(discounted_rewards).T
 
         for i, s0 in enumerate(start_state_array):
             sim_hist = SimulationHistory(self.model, int(s0), b0)
@@ -2879,6 +2883,13 @@ class Agent:
 
             # Adding the sim history to the list of histories
             sim_hist_list.append(sim_hist)
+
+        if print_stats:
+            sim_end_ts = datetime.now()
+            print(f'All {n} simulations done:')
+            print(f'\t- Average step count: {(sum(done_at_step) / n)}')
+            print(f'\t- Average total rewards: {(xp.sum(rewards) / n)}')
+            print(f'\t- Average discounted rewards (ADR): {(xp.sum(discounted_rewards) / n)}')
 
         return RewardSet(xp.sum(rewards, axis=1).tolist()), sim_hist_list
     
