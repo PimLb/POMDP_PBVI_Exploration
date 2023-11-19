@@ -1625,9 +1625,17 @@ class SimulationHistory:
         self.model = model
 
         self.states = [start_state]
-        self.grid_point_sequence = [[int(i[0]) for i in np.where(self.model.state_grid == start_state)]]
+        self._grid_point_sequence = [[int(i[0]) for i in np.where(self.model.state_grid == start_state)]]
         self.actions = []
         self.rewards = RewardSet()
+
+
+    @property
+    def grid_point_sequence(self) -> list[list[int]]:
+        if len(self._grid_point_sequence) < len(self):
+            self._grid_point_sequence = [[int(i[0]) for i in np.where(self.model.state_grid == s)] for s in self.states] 
+
+        return self._grid_point_sequence
 
 
     def add(self, action:int, reward, next_state:int) -> None:
@@ -1646,7 +1654,7 @@ class SimulationHistory:
         self.actions.append(action)
         self.rewards.append(reward)
         self.states.append(next_state)
-        self.grid_point_sequence.append([int(i[0]) for i in np.where(self.model.state_grid == next_state)])
+        self._grid_point_sequence.append([int(i[0]) for i in np.where(self.model.state_grid == next_state)])
     
 
     def __len__(self):

@@ -2318,8 +2318,25 @@ class SimulationHistory(MDP_SimulationHistory):
     '''
     def __init__(self, model:Model, start_state:int, start_belief:Belief):
         super().__init__(model, start_state)
-        self.beliefs = [start_belief]
+        self._beliefs = [start_belief]
         self.observations = []
+
+
+    @property
+    def beliefs(self) -> list[Belief]:
+        if len(self._beliefs) < len(self):
+            init_belief = self._beliefs[0]
+
+            self._beliefs = [init_belief]
+
+            # Generation of belief sequence based on actions and observations
+            belief = init_belief
+            for a, o in zip(self.actions, self.observations):
+                new_belief = belief.update(a,o)
+                self._beliefs.append(new_belief)
+                belief = new_belief
+
+        return self._beliefs
 
 
     def add(self, action:int, reward, next_state:int, next_belief:Belief, observation:int) -> None:
@@ -2336,27 +2353,68 @@ class SimulationHistory(MDP_SimulationHistory):
             The state that was reached by the agent after having taken action.
         next_belief : Belief
             The new belief of the agent after having taken an action and received an observation.
-        observation:int
+        observation : int
             The observation the agent received after having made an action.
         '''
         super().add(action, reward, next_state)
-        self.beliefs.append(next_belief)
+        self._beliefs.append(next_belief)
         self.observations.append(observation)
 
 
     # Overwritten
-    def to_dataframe(self) -> pd.DataFrame:
+    def to_dataframe(self, include_beliefs:bool=False) -> pd.DataFrame:
         '''
         Returns a pandas dataframe representation of the simulation history.
 
         Note: Beliefs not saved as the sequence can be recreated from the sequence of action-observation pairs.
+
+        Parameters
+        ----------
+        include_beliefs : bool, default=False # TODO: implement option
+            Whether or not to include the beliefs in the dataframe or not. Doing so requires potential a large amount of memory.
         '''
         df = super().to_dataframe()
         df['Observations'] = self.observations + [None]
 
-        print('[Warning] Beliefs not saved with simulation history but the belief sequence can be recreated from the actions and observations.')
+        if include_beliefs:
+            belief_array = np.array([b.values.tolist() for b in self.beliefs])
+            belief_df = pd.DataFrame(belief_array, columns=[f'B_{sl}' for sl in self.model.state_labels])
+
+            df = pd.concat([df, belief_df], axis=1)
 
         return df
+    
+
+    # Overwritten
+    def save(self, path:str='./Simulations', file_name:Union[str,None]=None, include_beliefs:bool=False) -> None:
+        '''
+        Function to save the simulation history in a file at a given path. If no path is provided, it will be saved in a subfolder (Simulations) inside the current working directory.
+        If no file_name is provided, it be saved as '<current_timestamp>_simulation.csv'.
+
+        Parameters
+        ----------
+        path : str, default='./Simulations'
+            The path at which the csv will be saved.
+        file_name : str, default='<current_timestamp>_simulation.csv'
+            The file name used to save in.
+        '''
+        if not os.path.exists(path):
+            print('Folder does not exist yet, creating it...')
+            os.makedirs(path)
+            
+        if file_name is None:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            file_name = timestamp + '_simulation.csv'
+
+        if not file_name.endswith('.csv'):
+            file_name += '.csv'
+        
+        if not include_beliefs:
+            print('[Warning] Beliefs not saved with simulation history but the belief sequence can be recreated from the actions and observations.')
+
+        df = self.to_dataframe(include_beliefs=include_beliefs)
+
+        df.to_csv(path + '/' + file_name, index=False)
     
 
     # Overwritten
@@ -2674,7 +2732,8 @@ class Agent:
                                    max_steps:int=1000,
                                    start_state:Union[int,None]=None,
                                    reward_discount:float=0.99,
-                                   print_progress:bool=False
+                                   print_progress:bool=True,
+                                   print_stats:bool=True
                                    ) -> Tuple[RewardSet, list[SimulationHistory]]:
         '''
         Function that tests a value function with n simulations. It returns the start states, the amount of steps in which the simulation reached an end state, the rewards received and the discounted rewards received.
@@ -2704,7 +2763,7 @@ class Agent:
         if isinstance(start_state, int):
             start_state_array = start_state
         elif isinstance(start_state, list):
-            repeated_list = xp.repeat(xp.array(start_state), xp.ceil(n / len(start_state)))
+            repeated_list = xp.repeat(xp.array(start_state), int(np.ceil(n / len(start_state))))
             start_state_array = xp.resize(repeated_list, n)
         else:
             start_state_array = xp.random.choice(model.states, size=n, p=model.start_probabilities)
@@ -2730,9 +2789,14 @@ class Agent:
             return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape(-1,model.state_count)
 
         # Results
-        discount = self.gamma
+        discount = reward_discount
         rewards = []
         discounted_rewards = []
+
+        # History items
+        states_history = [states]
+        actions_history = []
+        observations_history = []
         
         iterator = trange(max_steps) if print_progress else range(max_steps)
         for i in iterator:
@@ -2782,7 +2846,12 @@ class Agent:
             # Replacing old with new
             states = next_states
             beliefs = new_beliefs
-            discount *= self.gamma
+            discount *= reward_discount
+
+            # History tracking
+            states_history.append(states)
+            actions_history.append(best_actions)
+            observations_history.append(observations)
 
             # Early stopping
             if xp.all(sim_is_done):
@@ -2791,18 +2860,27 @@ class Agent:
         # Wrap up
         sim_hist_list = []
         b0 = Belief(model)
+
+        states_history = xp.array(states_history).T
+        actions_history = xp.array(actions_history).T
+        observations_history = xp.array(observations_history).T
+        rewards = xp.array(rewards).T
+
         for i, s0 in enumerate(start_state_array):
             sim_hist = SimulationHistory(self.model, int(s0), b0)
             
-            sim_hist.states = []
-            sim_hist.actions = []
-            sim_hist.observations = []
-            sim_hist.beliefs = []
-            sim_hist.rewards = []
+            last_step = done_at_step[i]
 
-            sim_hist_list.append(sim_hist_list)
+            # Setting the elements
+            sim_hist.states = states_history[i,:last_step+1].tolist()
+            sim_hist.actions = actions_history[i,:last_step].tolist()
+            sim_hist.observations = observations_history[i,:last_step].tolist()
+            sim_hist.rewards = rewards[i,:last_step].tolist()
 
-        return RewardSet(rewards), sim_hist_list
+            # Adding the sim history to the list of histories
+            sim_hist_list.append(sim_hist)
+
+        return RewardSet(xp.sum(rewards, axis=1).tolist()), sim_hist_list
     
 
 def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
