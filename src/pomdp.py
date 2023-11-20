@@ -2733,8 +2733,12 @@ class Agent:
         all_final_rewards = RewardSet()
         all_discounted_rewards = []
         all_sim_length = []
+        done_sim_count = 0
         for _ in (trange(n) if print_progress else range(n)):
             sim_history = self.simulate(simulator, max_steps, start_state, False, False)
+
+            if simulator.is_done:
+                done_sim_count += 1
 
             all_histories.append(sim_history)
             all_final_rewards.append(np.sum(sim_history.rewards))
@@ -2745,6 +2749,7 @@ class Agent:
             sim_end_ts = datetime.now()
             print(f'All {n} simulations done:')
             print(f'\t- Average runtime (s): {((sim_end_ts - sim_start_ts).total_seconds() / n)}')
+            print(f'\t- Simulations reached goal: {done_sim_count}/{n} ({n-done_sim_count} failures)')
             print(f'\t- Average step count: {(sum(all_sim_length) / n)}')
             print(f'\t- Average total rewards: {(sum(all_final_rewards) / n)}')
             print(f'\t- Average discounted rewards (ADR): {(sum(all_discounted_rewards) / n)}')
@@ -2822,6 +2827,8 @@ class Agent:
         states_history = [states]
         actions_history = []
         observations_history = []
+
+        sim_start_ts = datetime.now()
         
         iterator = trange(max_steps) if print_progress else range(max_steps)
         for i in iterator:
@@ -2892,10 +2899,13 @@ class Agent:
         rewards = xp.array(rewards).T
         discounted_rewards = xp.array(discounted_rewards).T
 
+        done_at_step_sum = 0
+
         for i, s0 in enumerate(start_state_array):
             sim_hist = SimulationHistory(self.model, int(s0), b0)
             
-            last_step = done_at_step[i]
+            last_step = int(done_at_step[i]) if bool(sim_is_done[i]) else max_steps
+            done_at_step_sum += last_step
 
             # Setting the elements
             sim_hist.states = states_history[i,:last_step+1].tolist()
@@ -2906,10 +2916,13 @@ class Agent:
             # Adding the sim history to the list of histories
             sim_hist_list.append(sim_hist)
 
+        done_sim_count = sum([1 if done else 0 for done in sim_is_done])
+
         if print_stats:
             sim_end_ts = datetime.now()
-            print(f'All {n} simulations done:')
-            print(f'\t- Average step count: {(sum(done_at_step) / n)}')
+            print(f'All {n} simulations done in {(sim_end_ts - sim_start_ts).total_seconds():.3f}s:')
+            print(f'\t- Simulations reached goal: {done_sim_count}/{n} ({n-done_sim_count} failures)')
+            print(f'\t- Average step count: {(done_at_step_sum / n)}')
             print(f'\t- Average total rewards: {(xp.sum(rewards) / n)}')
             print(f'\t- Average discounted rewards (ADR): {(xp.sum(discounted_rewards) / n)}')
 
