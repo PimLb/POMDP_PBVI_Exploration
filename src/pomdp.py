@@ -1729,10 +1729,30 @@ class PBVI_Solver(Solver):
                     max_generation:int=10
                     ) -> BeliefSet:
         '''
-        The expand function of the  Heruistic search value iteration technique.
+        The expand function of the  Heruistic Search Value Iteration (HSVI) technique.
         It is a redursive function attempting to minimize the bound between the upper and lower estimations of the value function.
 
-        It is developped by Smith T. and Simmons R. and described in the paper "Heuristic Search Value Iteration for POMDPs"
+        It is developped by Smith T. and Simmons R. and described in the paper "Heuristic Search Value Iteration for POMDPs".
+        
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model in which the exploration process will happen.
+        b : Belief
+            A belief to be added to the returned belief sequence and updated for the next step of the recursion.
+        value_function : ValueFunction
+            The lower bound of the value function.
+        upper_bound_belief_value_map : BeliefValueMapping
+            The upper bound of the value function.
+            Initially it is define with the mdp policy of the model (run: "BeliefValueMapping(model, mdp_policy)").
+            It is then refined through the expansion process by adding newly found belief and value pairs.
+        max_generation : int, default=10
+            The maximum recursion depth that can be reached before the generated belief sequence is returned.
+        
+        Returns
+        -------
+        belief_set : BeliefSet
+            A new sequence of beliefs.
         '''
         xp = np if not gpu_support else cp.get_array_module(b.values)
 
