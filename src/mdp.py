@@ -1622,7 +1622,7 @@ class SimulationHistory:
         The set of rewards received by the agent throughout the simulation process.
     '''
     def __init__(self, model:Model, start_state:int):
-        self.model = model
+        self.model = model.cpu_model
 
         self.states = [start_state]
         self._grid_point_sequence = [[int(i[0]) for i in np.where(self.model.state_grid == start_state)]]
@@ -1741,12 +1741,12 @@ class SimulationHistory:
 
         # Video saving
         if not os.path.exists('./Sim Videos'):
-            print('Folder does not exist yet, creating it...')
+            print(f'Folder "./Sim Videos" does not exist yet, creating it...')
             os.makedirs('./Sim Videos')
 
         writervideo = animation.FFMpegWriter(fps=fps)
         ani.save('./Sim Videos/' + video_title, writer=writervideo)
-        print(f'Video saved at \'Sim Videos/{video_title}\'...')
+        print(f'Video saved at \'./Sim Videos/{video_title}\'...')
         plt.close()
 
 

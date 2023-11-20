@@ -2402,7 +2402,7 @@ class SimulationHistory(MDP_SimulationHistory):
             The file name used to save in.
         '''
         if not os.path.exists(path):
-            print('Folder does not exist yet, creating it...')
+            print('Path "{path}" does not exist yet, creating it...')
             os.makedirs(path)
             
         if file_name is None:
@@ -2418,6 +2418,7 @@ class SimulationHistory(MDP_SimulationHistory):
         df = self.to_dataframe(include_beliefs=include_beliefs)
 
         df.to_csv(path + '/' + file_name, index=False)
+        print(f'Saved to: {path}/{file_name}')
     
 
     # Overwritten
@@ -2427,6 +2428,7 @@ class SimulationHistory(MDP_SimulationHistory):
         # Data
         data = np.array(self.grid_point_sequence)[:(frame_i+1),:]
         belief = self.beliefs[frame_i]
+        belief_values = belief.values if (not gpu_support) or (cp.get_array_module(belief.values) == np) else cp.asnumpy(belief.values)
         observations = self.observations[:(frame_i)]
         obs_colors = ['#000000'] + [COLOR_LIST[o]['hex'] for o in observations]
 
@@ -2443,7 +2445,7 @@ class SimulationHistory(MDP_SimulationHistory):
         proxy = [patches.Rectangle((0,0),1,1,fc = COLOR_LIST[o]['id']) for o in model.observations]
         ax.legend(proxy, model.observation_labels, title='Observations') # type: ignore
 
-        grid_values = belief.values[model.state_grid]
+        grid_values = belief_values[model.state_grid]
         ax.imshow(grid_values, cmap='Blues')
         ax.plot(data[:,1], data[:,0], color='red', zorder=-1)
         ax.scatter(data[:,1], data[:,0], c=obs_colors)
