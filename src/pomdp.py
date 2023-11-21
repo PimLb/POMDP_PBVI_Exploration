@@ -4,12 +4,11 @@ from matplotlib import animation, cm, colors, ticker, patches
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
-import pandas as pd
 from tqdm.auto import trange
 from typing import Tuple, Union
 
 import copy
-import math
+import pandas as pd
 import os
 import random
 

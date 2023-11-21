@@ -6,7 +6,6 @@ from tqdm.auto import trange
 from typing import Union, Tuple
 
 import copy
-import json
 import os
 import pandas as pd
 import pickle
@@ -455,6 +454,26 @@ class Model:
         else:
             return reward
     
+
+    def get_coords(self, item:Union[int,list]) -> list[list[int]] | list[int]:
+        '''
+        Function to get the coordinate (on the state_grid) for the provided state index or indices.
+
+        Parameters
+        ----------
+        items : int | list[int]
+            The states ids or id get convert to a 2D coordinate.
+
+        Returns
+        -------
+        item_coords : list[int] | list[list[int]]
+            The 2D positions of the provided item ids.
+        '''
+        item_list = [item] if isinstance(item, int) else item
+        item_coords = [np.argwhere(self.cpu_model.state_grid == s)[0] for s in item_list]
+
+        return item_coords[0] if isinstance(item, int) else item_coords
+
 
     def save(self, file_name:str, path:str='./Models') -> None:
         '''
