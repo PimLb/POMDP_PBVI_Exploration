@@ -1831,7 +1831,7 @@ class PBVI_Solver(Solver):
                    sequence_string:str=''
                    ) -> BeliefSet:
         '''
-        Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs.
+        Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs following the the Forward Search Value Iteration principles.
         It is a recursive function that is started by a initial state 's' and using the MDP policy, chooses the best action to take.
         Following this, a random next state 's_p' is being sampled from the transition probabilities and a random observation 'o' based on the observation probabilities.
         Then the given belief is updated using the chosen action and the observation received and the updated belief is added to the sequence.
@@ -1893,6 +1893,55 @@ class PBVI_Solver(Solver):
         return BeliefSet(model, belief_list)
     
 
+    def expand_perseus(self,
+                       model:Model,
+                       b:Belief,
+                       max_generation:int=10
+                       ) -> BeliefSet:
+        '''
+        Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs.
+        It is a recursive function that is started by a initial state 's' and using the MDP policy, chooses the best action to take.
+        Following this, a random next state 's_p' is being sampled from the transition probabilities and a random observation 'o' based on the observation probabilities.
+        Then the given belief is updated using the chosen action and the observation received and the updated belief is added to the sequence.
+        Once the state is a goal state, the recursion is done and the belief sequence is returned.
+
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model in which the exploration process will happen.
+        b : Belief
+            A belief to be added to the returned belief sequence and updated for the next step of the recursion.
+        max_generation : int, default=10
+            The maximum recursion depth that can be reached before the generated belief sequence is returned.
+        
+        Returns
+        -------
+        belief_set : BeliefSet
+            A new sequence of beliefs.
+        '''
+        xp = np if not gpu_support else cp.get_array_module(b.values)
+
+        initial_belief = b
+        belief_sequence = []
+
+        for i in range(max_generation):
+            # Choose random action
+            a = int(xp.random.choice(model.actions))
+
+            # Choose random observation based on prob: P(o|b,a)
+            obs_prob = xp.ainsum('sor,s->o', model.reachable_transitional_observation_table[:,a,:,:], b.values)
+            o = xp.random.choice(model.observations, p=obs_prob)
+
+            # Update belief
+            bao = b.update(a,o)
+
+            # Finalization
+            belief_sequence.append(bao)
+            b = bao
+
+        return BeliefSet(model, belief_sequence)
+    
+
     def expand(self, model:Model, belief_set:BeliefSet, max_generation:int, **function_specific_parameters) -> BeliefSet:
         '''
         Central method to call one of the functions for a particular expansion strategy:
@@ -1944,7 +1993,7 @@ class PBVI_Solver(Solver):
             else:
                 self._upper_bound.update()
             return self.expand_hsvi(model=model, 
-                                    b=Belief(model),
+                                    b=belief_set.belief_list[0],
                                     value_function=args['value_function'],
                                     upper_bound_belief_value_map=self._upper_bound,
                                     max_generation=max_generation)
@@ -1952,9 +2001,12 @@ class PBVI_Solver(Solver):
         elif self.expand_function in 'expand_fsvi':
             args = {arg: function_specific_parameters[arg] for arg in ['mdp_policy'] if arg in function_specific_parameters}
             return self.expand_fsvi(model=model, 
-                                    b=Belief(model),
+                                    b=belief_set.belief_list[0],
                                     mdp_policy=args['mdp_policy'],
                                     max_generation=max_generation)
+        
+        elif self.expand_function in 'expand_perseus':
+            return self.expand_erseus(model=model, b=belief_set.belief_list[0], max_generation=max_generation)
         
         else:
             raise Exception('Not implemented')
