@@ -918,6 +918,10 @@ class ValueFunction:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             file_name = timestamp + '_value_function.csv'
 
+        # Make sure that .csv is in the file name
+        if '.csv' not in file_name:
+            file_name += '.csv'
+
         # Compression check
         compression_type = None
         if compress:
