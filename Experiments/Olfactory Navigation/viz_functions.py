@@ -127,16 +127,15 @@ def plot_extra_steps_from_pandas(df:pd.DataFrame, ax=None) -> None:
         df['IDs'] = [f'Run-{i}' for i in df.index]
 
     # Processing the extra steps values
-    extra_steps_array = df.to_numpy().T
+    extra_steps_array = df.drop(columns='IDs').to_numpy().T
     extra_steps_df = pd.DataFrame(extra_steps_array, columns=df['IDs'].to_list())
 
     # Actual plot
     if ax is None:
         _, ax = plt.subplots()
 
-    extra_steps_df.plot(kind='box', ax=ax)
+    extra_steps_df.plot(kind='box', ax=ax, rot=45)
     ax.set_ylabel('Additional steps to target')
-    ax.set_xticks(rotation=45, ha='right')
 
 
 def plot_extra_steps_from_file(file:str, ax=None) -> None:
