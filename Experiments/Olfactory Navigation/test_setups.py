@@ -1,6 +1,17 @@
 import sys
 sys.path.append('../..')
 from src.pomdp import *
+from util_functions import compute_extra_steps
+
+import pandas as pd
+import numpy as np
+import cupy as cp
+import json
+import os
+
+from cupy.cuda import runtime as cuda_runtime
+from csv import writer as csv_writer
+from datetime import datetime
 
 
 
@@ -92,3 +103,107 @@ def grid_test(value_function:ValueFunction, cell_size:int=10, points_per_cell:in
     # Return results
     return points_df
 
+
+def run_solve_test(
+        model_file:str,
+        expand_function:str,
+        gamma:float=0.99,
+        eps:float=1e-6,
+        expansions:int=300,
+        belief_growth:int=100,
+        runs:int=20,
+        simulations:int=300,
+        sim_starts:Union[int,list[int],None]=None,
+        sim_horizon:int=1000,
+        name:Union[str,None]=None
+):
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    # Test folder creation
+    test_name = name if name is not None else model_file.replace('.pck','').split('/')[-1]
+    test_folder = f"./Test_{test_name}_{expand_function}_{expansions}it_{belief_growth}exp_{str(gamma).replace('.','')}g_{eps}eps_{runs}run_{simulations}sim_{timestamp}"
+    os.mkdir(test_folder)
+
+    # Simulations folder
+    sim_folder = test_folder + '/Simulations'
+    os.mkdir(sim_folder)
+
+    # Value functions folder
+    vf_folder = test_folder + '/ValueFunctions'
+    os.mkdir(vf_folder)
+
+    # Making extra steps file
+    extra_steps_file = test_folder + '/extra_steps.csv'
+    with open(extra_steps_file, 'w') as f_object:
+        writer_object = csv_writer(f_object)
+        writer_object.writerow(['Average'] + [f'Sim-{i}' for i in range(simulations)])
+
+    # Actual test loop
+    for iter in range(runs):
+        try:
+            
+            print('--------------------------------------------------------------------------------')
+            print(f'Run {iter+1} of {runs} (Run-{iter})')
+            print('--------------------------------------------------------------------------------')
+
+            
+            # Loading model
+            model = Model.load_from_file(model_file)
+
+            # Solving model
+            pbvi_solver = PBVI_Solver(gamma=gamma, eps=eps, expand_function=expand_function)
+            solution, hist = pbvi_solver.solve(model=model,
+                                               expansions=expansions,
+                                               max_belief_growth=belief_growth,
+                                               print_progress=False,
+                                               use_gpu=True)
+            print(hist.summary)
+
+            # Saving value function
+            solution.save(path=vf_folder, file_name=f'run-{iter}-VF', compress=True)
+
+            # Running simulation
+            print()
+            log('Starting simulations')
+            a = Agent(model, solution)
+            all_rewards, all_sim_histories = a.run_n_simulations_parallel(
+                n=simulations,
+                max_steps=sim_horizon,
+                print_progress=False,
+                start_state=sim_starts)
+
+            # Computing extra steps
+            print()
+            extra_steps = np.array(compute_extra_steps(all_sim_histories))
+            log(f'Average Extra steps count: {np.average(extra_steps)}')
+
+            # Saving extra step results
+            with open(extra_steps_file, 'a') as f_object:
+                writer_object = csv_writer(f_object)
+                writer_object.writerow([np.average(extra_steps)] + extra_steps.tolist())
+            
+            # Saving simulations
+            log('Saving results')
+            all_seq = np.empty((simulations, sim_horizon+1), dtype=object)
+            for sim_i, sim in enumerate(all_sim_histories):
+                seq = []
+                for s, a, o, r in zip(sim.states, sim.actions+[], sim.observations+[], sim.rewards+[]):
+                    seq.append(json.dumps({'s':s, 'a':a, 'o':o, 'r':r}))
+                
+                all_seq[sim_i, :len(seq)] = seq
+
+            sim_df = pd.DataFrame(all_seq.T, columns=[f'Sim-{sim_i}' for sim_i in range(len(all_sim_histories))])
+            sim_df.to_csv(sim_folder + f'/run-{iter}-sims.csv')
+
+            print('\n\n')
+
+        except Exception as e:
+            print()
+            print(e)
+            log('/!\\ Error Happend /!\\ \n\n')
+        cp._default_memory_pool.free_all_blocks()
+    
+    print('\n\n')
+    print('--------------------------------------------------------------------------------')
+    print(f'DONE')
+    print('--------------------------------------------------------------------------------')
