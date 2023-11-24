@@ -1926,11 +1926,11 @@ class PBVI_Solver(Solver):
 
         for i in range(max_generation):
             # Choose random action
-            a = int(xp.random.choice(model.actions))
+            a = int(xp.random.choice(model.actions, size=1)[0])
 
             # Choose random observation based on prob: P(o|b,a)
-            obs_prob = xp.ainsum('sor,s->o', model.reachable_transitional_observation_table[:,a,:,:], b.values)
-            o = xp.random.choice(model.observations, p=obs_prob)
+            obs_prob = xp.einsum('sor,s->o', model.reachable_transitional_observation_table[:,a,:,:], b.values)
+            o = int(xp.random.choice(model.observations, size=1, p=obs_prob)[0])
 
             # Update belief
             bao = b.update(a,o)
@@ -1952,6 +1952,7 @@ class PBVI_Solver(Solver):
             - Greedy Error Reduction (ger)
             - Heuristic Search Value Iteration (hsvi)
             - Forward Search Value Iteration (fsvi)
+            - Perseus (perseus)
                 
         Parameters
         ----------
@@ -1969,7 +1970,7 @@ class PBVI_Solver(Solver):
         belief_set_new : BeliefSet
             The belief set the expansion function returns. 
         '''
-        if self.expand_function in 'expand_ssra':
+        if self.expand_function in 'expand_ra':
             return self.expand_ra(model=model, belief_set=belief_set, max_generation=max_generation)
 
         elif self.expand_function in 'expand_ssra':
@@ -2006,7 +2007,7 @@ class PBVI_Solver(Solver):
                                     max_generation=max_generation)
         
         elif self.expand_function in 'expand_perseus':
-            return self.expand_erseus(model=model, b=belief_set.belief_list[0], max_generation=max_generation)
+            return self.expand_perseus(model=model, b=belief_set.belief_list[0], max_generation=max_generation)
         
         else:
             raise Exception('Not implemented')
@@ -2048,7 +2049,7 @@ class PBVI_Solver(Solver):
     def solve(self,
               model:Model,
               expansions:int,
-              full_backup:bool=True,
+              full_backup:Union[bool,None]=None,
               update_passes:int=1,
               max_belief_growth:int=10,
               initial_belief:Union[BeliefSet, Belief, None]=None,
@@ -2072,6 +2073,7 @@ class PBVI_Solver(Solver):
             - ger: Greedy Error Reduction. Extra params: /
             - hsvi: Heuristic Search Value Iteration. Extra param: mdp_policy (ValueFunction)
             - fsvi: Forward Search Value Iteration: Extra param: mdp_policy (ValueFunction)
+            - perseus: Perseus. Extra params: /
 
         Parameters
         ----------
@@ -2079,8 +2081,9 @@ class PBVI_Solver(Solver):
             The model to solve.
         expansions : int
             How many times the algorithm has to expand the belief set. (the size will be doubled every time, eg: for 5, the belief set will be of size 32)
-        full_backup : bool, default=True
-            Whether the backup function has to be run on the full set beliefs uncovered since the beginning or only on the new points.
+        full_backup : bool, optional
+            Whether to force the backup function has to be run on the full set beliefs uncovered since the beginning or only on the new points.
+            By default, it will be determined by which expand function is chosen (False if: fsvi, hsvi, perseus; True otherwise)
         update_passes : int, default=1
             How many times the backup function has to be run every time the belief set is expanded.
         max_belief_growth : int, default=10
@@ -2133,8 +2136,12 @@ class PBVI_Solver(Solver):
         else:
             value_function = initial_value_function.to_gpu() if use_gpu else initial_value_function
 
+        # Full backup setter if not forced
+        if full_backup is None:
+            full_backup = any([self.expand_function in func for func in ['expand_ra', 'expand_ssra', 'expand_ssga', 'expand_ssea', 'expand_ger']])
+
         # For hsvi of fsvi, mdp policy is required as upper bound, so if it is not required, generate it
-        if self.expand_function_params['mdp_policy'] is None:
+        if ('mdp_policy' not in self.expand_function_params) or (self.expand_function_params['mdp_policy'] is None):
             log('[Warning] MDP solution not provided, running value iteration on the problem to retrieve it...')
             vi_solver = VI_Solver(gamma=self.gamma, eps=self.eps)
 
@@ -2811,26 +2818,13 @@ class Agent:
     def run_n_simulations_parallel(self,
                                    n:int=1000,
                                    max_steps:int=1000,
-                                   start_state:Union[int,None]=None,
+                                   start_state:Union[list[int],int,None]=None,
                                    reward_discount:float=0.99,
                                    print_progress:bool=True,
                                    print_stats:bool=True
                                    ) -> Tuple[RewardSet, list[SimulationHistory]]:
         '''
-        Function that tests a value function with n simulations. It returns the start states, the amount of steps in which the simulation reached an end state, the rewards received and the discounted rewards received.
-
-        Parameters
-        ----------
-        model : pomdp.Model
-            The model on which to run the simulations.
-        value_function : ValueFunction
-            The value function that will be evaluated.
-        n : int, default=1000
-            The amount of simulations to run.
-        horizon : int, default=300
-            The maximum amount of steps the simulation can run for.
-        print_progress : bool, default=False
-            Whether to display a progress bar of how many simulation steps have been run so far. 
+        TODO
         '''
         # GPU support
         xp = np if not self.value_function.is_on_gpu else cp
