@@ -6,8 +6,6 @@ import numpy as np
 from cupy.cuda import runtime as cuda_runtime
 
 
-def reward_func(s,a,sn,o):
-    return np.where(sn == 10890, 1.0, 0.0)
 
 def main():
     # Set GPU used

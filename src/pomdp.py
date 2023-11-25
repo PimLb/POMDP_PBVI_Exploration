@@ -173,6 +173,9 @@ class Model(MDP_Model):
         print()
         log('POMDP particular parameters:')
 
+        def end_reward_function(s, a, sn, o):
+            return (np.isin(sn, self.end_states) | np.isin(a, self.end_actions)).astype(int)
+
         # ------------------------- Observations -------------------------
         if isinstance(observations, int):
             self.observation_labels = [f'o_{i}' for i in range(observations)]
@@ -209,10 +212,16 @@ class Model(MDP_Model):
         self.immediate_reward_function = None
         
         if rewards is None:
-            # If no reward matrix given, generate random one
-            self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count, self.observation_count)
+            if (len(self.end_states) > 0) or (len(self.end_actions) > 0):
+                log('- [Warning] Rewards are not define but end states/actions are, reaching an end state or doing an end action will give a reward of 1.')
+                self.immediate_reward_function = self._end_reward_function
+            else:
+                # If no reward matrix given, generate random one
+                self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count, self.observation_count)
         elif callable(rewards):
             # Rewards is a function
+            log('- [Warning] The rewards are provided as a function, if the model is saved, the rewards will need to be defined before loading model.')
+            log('    > Alternative: Setting end states/actions and leaving the rewards can be done to make the end states/action giving a reward of 1 by default.')
             self.immediate_reward_function = rewards
             assert len(signature(rewards).parameters) == 4, "Reward function should accept 4 parameters: s, a, sn, o..."
         else:
@@ -247,6 +256,10 @@ class Model(MDP_Model):
         duration = (datetime.now() - start_ts).total_seconds()
         log(f'    > Done in {duration:.3f}s')
 
+
+    def _end_reward_function(self, s, a, sn, o):
+        return (np.isin(sn, self.end_states) | np.isin(a, self.end_actions)).astype(int)
+    
 
     def reward(self, s:int, a:int, s_p:int, o:int) -> Union[int,float]:
         '''
