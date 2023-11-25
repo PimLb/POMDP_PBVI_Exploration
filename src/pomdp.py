@@ -2920,7 +2920,7 @@ class Agent:
             new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
 
             # Rewards computation
-            step_rewards = xp.array([model.immediate_reward_function(s,a,s_p,o) for s,a,s_p,o in zip(states, best_actions, next_states, observations)])
+            step_rewards = xp.array([model.immediate_reward_function(int(s), int(a), int(s_p), int(o)) for s,a,s_p,o in zip(states, best_actions, next_states, observations)])
             rewards.append(xp.where(~sim_is_done, step_rewards, 0))
             discounted_rewards.append(xp.where(~sim_is_done, step_rewards * discount, 0))
 
