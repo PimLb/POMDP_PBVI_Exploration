@@ -15,7 +15,11 @@ from datetime import datetime
 
 
 
-def grid_test(value_function:ValueFunction, cell_size:int=10, points_per_cell:int=10, zone=None, ax=None) -> pd.DataFrame:
+def grid_test(value_function:ValueFunction,
+              cell_size:int=10,
+              points_per_cell:int=10,
+              zone=None,
+              print_progress:bool=False) -> pd.DataFrame:
     '''
     Function to test a given value function with a certain amount of simulations within cells of the state space.
     It then plots the average extra steps required for each cell to reach the goal given an optimal trajectory computed with the manhatan distance.
@@ -38,9 +42,14 @@ def grid_test(value_function:ValueFunction, cell_size:int=10, points_per_cell:in
 
     # Generation of points
     random_points = []
+    cell_centers_x = []
+    cell_centers_y = []
 
     for i in range(min_y, max_y, cell_size):
         for j in range(min_x, max_x, cell_size):
+            cell_centers_x.append((j + min([max_x, j+cell_size])) / 2)
+            cell_centers_y.append((i + min([max_y, i+cell_size])) / 2)
+
             for _ in range(points_per_cell):
                 rand_x = np.random.randint(j, min([max_x, j+cell_size]))
                 rand_y = np.random.randint(i, min([max_y, i+cell_size]))
@@ -53,6 +62,8 @@ def grid_test(value_function:ValueFunction, cell_size:int=10, points_per_cell:in
 
     # # Cells
     points_df['cell'] = np.repeat(np.arange(len(points_df)/points_per_cell, dtype=int), points_per_cell)
+    points_df['cell_x'] = np.repeat(np.array(cell_centers_x), points_per_cell)
+    points_df['cell_y'] = np.repeat(np.array(cell_centers_y), points_per_cell)
 
     # Traj and ids
     goal_state_coords = model.get_coords(model.end_states[0])
@@ -63,42 +74,11 @@ def grid_test(value_function:ValueFunction, cell_size:int=10, points_per_cell:in
     a = Agent(model, value_function)
 
     # Run test
-    _, all_sim_hist = a.run_n_simulations_parallel(len(rand_points_array), start_state=points_df['point_id'].to_list())
+    _, all_sim_hist = a.run_n_simulations_parallel(len(rand_points_array), start_state=points_df['point_id'].to_list(), print_progress=print_progress)
 
     # Adding sim results
     points_df['steps_taken'] = [len(sim) for sim in all_sim_hist]
     points_df['extra_steps'] = points_df['steps_taken'] - points_df['opt_traj']
-
-    # Computing averages per cell and cell position
-    average_per_cell = points_df.groupby('cell').mean('extra_steps')['extra_steps'].to_list()
-    cell_centers = []
-    average_grid = []
-    item = 0
-    for i in range(min_y, max_y, cell_size):
-        row = []
-        for j in range(min_x, max_x, cell_size):
-            row.append(average_per_cell[item])
-
-            cell_centers.append([j+int(cell_size/2), i+int(cell_size/2)])
-
-            item += 1
-        average_grid.append(row)
-
-    average_grid_array = np.array(average_grid)
-    cell_centers_array = np.array(cell_centers)
-
-    # Actual plot
-    if ax is None:
-        _, ax = plt.subplots()
-
-    ax.set_title(f'Additional steps needed\nAvg of {points_per_cell} realizations per tile')
-
-    im = ax.imshow(average_grid_array, cmap=plt.cm.get_cmap('RdYlGn').reversed())
-    plt.colorbar(im, orientation='horizontal', ax=ax)
-
-    # Axes
-    ax.set_xticks(np.arange(average_grid_array.shape[1]), labels=np.unique(cell_centers_array[:,0]), rotation=90)
-    ax.set_yticks(np.arange(average_grid_array.shape[0]), labels=np.unique(cell_centers_array[:,1]))
 
     # Return results
     return points_df

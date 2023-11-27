@@ -178,3 +178,34 @@ def plot_extra_steps(all_sim_histories:list[SimulationHistory], ax=None) -> None
 
     # Plotting extra steps
     plot_extra_steps_from_pandas(df, ax)
+
+
+def plot_grid_extra_steps(points_df, ax=None) -> None:
+    '''
+    Plot the average extra steps required in a grid format
+    '''
+    # Computing averages per cell and cell position
+    average_per_cell = points_df.groupby('cell').mean('extra_steps')['extra_steps'].to_list()
+    cell_xs = pd.unique(points_df['cell_x'])
+    cell_ys = pd.unique(points_df['cell_y'])
+
+    average_grid = []
+    item = 0
+    for _ in cell_ys:
+        row = []
+        for _ in cell_xs:
+            row.append(average_per_cell[item])
+            item += 1
+        average_grid.append(row)
+    average_grid_array = np.array(average_grid)
+
+    # Actual plot
+    if ax is None:
+        _, ax = plt.subplots()
+
+    im = ax.imshow(average_grid_array, cmap=plt.cm.get_cmap('RdYlGn').reversed())
+    plt.colorbar(im, orientation='horizontal', ax=ax)
+
+    # Axes
+    ax.set_xticks(np.arange(average_grid_array.shape[1]), labels=cell_xs.astype(int), rotation=90)
+    ax.set_yticks(np.arange(average_grid_array.shape[0]), labels=cell_ys.astype(int))
