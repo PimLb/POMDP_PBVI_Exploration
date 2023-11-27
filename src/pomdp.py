@@ -2931,7 +2931,7 @@ class Agent:
 
             # Update iterator postfix
             if print_progress:
-                iterator.set_postfix({'done': xp.sum(sim_is_done)})
+                iterator.set_postfix({'done ': f' {xp.sum(sim_is_done)} of {n}'})
 
             # Replacing old with new
             states = next_states
