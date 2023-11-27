@@ -59,7 +59,7 @@ def plot_steps(sim_hist:SimulationHistory, ax=None) -> None:
 
     # Points sniff
     sniff_air_action_id = -1
-    for i, al in model.action_labels:
+    for i, al in enumerate(model.action_labels):
         if 'air' in al.lower():
             sniff_air_action_id = i
     sniff_in_air = np.where(np.array(sim_hist.actions) == sniff_air_action_id)
