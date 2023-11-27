@@ -220,6 +220,7 @@ def run_single_solve_test(
         simulations:int=300,
         sim_starts:Union[int,list[int],None]=None,
         sim_horizon:int=1000,
+        use_gpu:bool=True,
         name:Union[str,None]=None
 ):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -231,7 +232,8 @@ def run_single_solve_test(
 
     # Simulations folder
     sim_folder = test_folder + '/Simulations'
-    os.mkdir(sim_folder)
+    if simulations > 0:
+        os.mkdir(sim_folder)
 
     # Value functions folder
     vf_folder = test_folder + '/ValueFunctions'
@@ -239,11 +241,13 @@ def run_single_solve_test(
 
     # Making extra steps file
     extra_steps_file = test_folder + '/extra_steps.csv'
-    with open(extra_steps_file, 'w') as f_object:
-        writer_object = csv_writer(f_object)
-        writer_object.writerow(['Average'] + [f'Sim-{i}' for i in range(simulations)])
+    if simulations > 0:
+        with open(extra_steps_file, 'w') as f_object:
+            writer_object = csv_writer(f_object)
+            writer_object.writerow(['Average'] + [f'Sim-{i}' for i in range(simulations)])
 
     # Prev solution file
+    solution = None
     solution_file = None
 
     # Actual test loop
@@ -259,18 +263,17 @@ def run_single_solve_test(
             model = Model.load_from_file(model_file)
 
             # Value function loading
-            value_function = None
-            if solution_file is not None:
-                value_function = ValueFunction.load_from_file(solution_file, model)
+            if use_gpu and solution_file is not None:
+                solution = ValueFunction.load_from_file(solution_file, model)
 
             # Solving model
             pbvi_solver = PBVI_Solver(gamma=gamma, eps=eps, expand_function=expand_function)
             solution, hist = pbvi_solver.solve(model=model,
                                                expansions=int(expansions/runs),
                                                max_belief_growth=belief_growth,
-                                               initial_value_function=value_function,
+                                               initial_value_function=solution,
                                                print_progress=False,
-                                               use_gpu=True)
+                                               use_gpu=use_gpu)
             print(hist.summary)
 
             # Saving value function
@@ -278,37 +281,38 @@ def run_single_solve_test(
             solution.save(path=vf_folder, file_name=f'run-{iter}-VF', compress=True)
 
             # Running simulation
-            print()
-            log('Starting simulations')
-            a = Agent(model, solution)
-            all_rewards, all_sim_histories = a.run_n_simulations_parallel(
-                n=simulations,
-                max_steps=sim_horizon,
-                print_progress=False,
-                start_state=sim_starts)
+            if simulations > 0:
+                print()
+                log('Starting simulations')
+                a = Agent(model, solution)
+                all_rewards, all_sim_histories = a.run_n_simulations_parallel(
+                    n=simulations,
+                    max_steps=sim_horizon,
+                    print_progress=False,
+                    start_state=sim_starts)
 
-            # Computing extra steps
-            print()
-            extra_steps = np.array(compute_extra_steps(all_sim_histories))
-            log(f'Average Extra steps count: {np.average(extra_steps)}')
+                # Computing extra steps
+                print()
+                extra_steps = np.array(compute_extra_steps(all_sim_histories))
+                log(f'Average Extra steps count: {np.average(extra_steps)}')
 
-            # Saving extra step results
-            with open(extra_steps_file, 'a') as f_object:
-                writer_object = csv_writer(f_object)
-                writer_object.writerow([np.average(extra_steps)] + extra_steps.tolist())
-            
-            # Saving simulations
-            log('Saving results')
-            all_seq = np.empty((simulations, sim_horizon+1), dtype=object)
-            for sim_i, sim in enumerate(all_sim_histories):
-                seq = []
-                for s, a, o, r in zip(sim.states, sim.actions+[], sim.observations+[], sim.rewards+[]):
-                    seq.append(json.dumps({'s':s, 'a':a, 'o':o, 'r':r}))
+                # Saving extra step results
+                with open(extra_steps_file, 'a') as f_object:
+                    writer_object = csv_writer(f_object)
+                    writer_object.writerow([np.average(extra_steps)] + extra_steps.tolist())
                 
-                all_seq[sim_i, :len(seq)] = seq
+                # Saving simulations
+                log('Saving results')
+                all_seq = np.empty((simulations, sim_horizon+1), dtype=object)
+                for sim_i, sim in enumerate(all_sim_histories):
+                    seq = []
+                    for s, a, o, r in zip(sim.states, sim.actions+[], sim.observations+[], sim.rewards+[]):
+                        seq.append(json.dumps({'s':s, 'a':a, 'o':o, 'r':r}))
+                    
+                    all_seq[sim_i, :len(seq)] = seq
 
-            sim_df = pd.DataFrame(all_seq.T, columns=[f'Sim-{sim_i}' for sim_i in range(len(all_sim_histories))])
-            sim_df.to_csv(sim_folder + f'/run-{iter}-sims.csv')
+                sim_df = pd.DataFrame(all_seq.T, columns=[f'Sim-{sim_i}' for sim_i in range(len(all_sim_histories))])
+                sim_df.to_csv(sim_folder + f'/run-{iter}-sims.csv')
 
             print('\n\n')
 

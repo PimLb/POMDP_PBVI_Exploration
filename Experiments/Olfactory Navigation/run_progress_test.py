@@ -12,15 +12,18 @@ def main():
     cuda_runtime.setDevice(3)
 
     run_single_solve_test(
-        model_file='./Models/Alt_WrapVert_GroundAir.pck',
+        model_file='./Models/Alt_Wrap_GroundAir.pck',
         expand_function='fsvi',
-        runs=30,
+        expansions=600,
+        runs=60,
+        simulations=0,
         sim_starts=[
             (361*30)+300, # Center
             (361*15)+300, # Above center
             (361*45)+300  # Bellow center
         ],
-        name='ProgVertGroundAir'
+        use_gpu=False,
+        name='LongerGroundAir'
     )
 
 
