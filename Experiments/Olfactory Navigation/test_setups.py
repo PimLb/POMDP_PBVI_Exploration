@@ -306,3 +306,69 @@ def run_single_solve_test(
     print('--------------------------------------------------------------------------------')
     print(f'DONE')
     print('--------------------------------------------------------------------------------')
+
+
+def run_grid_test(model_file:str,
+                  folder:str,
+                  points_per_cell:int=20,
+                  use_gpu:bool=True):
+    
+    if not folder.endswith('/'):
+        folder += '/'
+
+    log('Gathering value function files...')
+    value_function_files = os.listdir(folder + 'ValueFunctions')
+
+    print('Running Grid test with parameters:')
+    print(f'\t- model: "{model_file}"')
+    print(f'\t- folder: "{folder}"')
+    print(f'\t- vf count: {len(value_function_files)}')
+    print()
+
+    log('Creation of GridSimulations folder is doesnt exist yet')
+    if not os.path.isdir(folder + 'GridSimulations'):
+        os.mkdir(folder + 'GridSimulations')
+
+    for i, vf_file in enumerate(value_function_files):
+        print('--------------------------------------------------------------------------------')
+        print(f'Run {i+1} of {len(value_function_files)} (Run-{i})')
+        print('--------------------------------------------------------------------------------')
+
+        model = Model.load_from_file(model_file)
+
+        # Value functions
+        log(f'Loading Value function: {vf_file}')
+        vf = ValueFunction.load_from_file(folder + f'ValueFunctions/' + vf_file, model)
+
+        if use_gpu:
+            vf = vf.to_gpu()
+
+        # Run grid test
+        log('Starting simulations')
+        res_df = grid_test(vf, points_per_cell=points_per_cell)
+
+        # Save results
+        log('Simulations done, saving results')
+        res_df.to_csv(folder + f'GridSimulations/Grid-run-{i}-{len(res_df)}sims.csv', index=False)
+
+        # Refresh memory
+        cp._default_memory_pool.free_all_blocks()
+
+        # Print average extra steps
+        print(f'\nAverage Extra steps count: {res_df["extra_steps"].mean()}')
+        print('\n\n')
+    
+    # Summarize extra steps in grid_extra_steps.csv file
+    print('--------------------------------------------------------------------------------')
+    log('Summarizing extra steps')
+    all_averages = []
+    for i in range(20):
+        df = pd.read_csv(folder + f'GridSimulations/Grid-run-{i}-{len(res_df)}sims.csv')
+        all_averages.append(df['extra_steps'].tolist())
+
+    df = pd.DataFrame(np.array(all_averages), columns=[f'Sim-{i}' for i in range(len(res_df))])
+    df.to_csv(folder + 'grid_extra_steps.csv', index=False)
+
+    print('--------------------------------------------------------------------------------')
+    print(f'DONE')
+    print('--------------------------------------------------------------------------------')

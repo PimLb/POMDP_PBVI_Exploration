@@ -209,3 +209,7 @@ def plot_grid_extra_steps(points_df, ax=None) -> None:
     # Axes
     ax.set_xticks(np.arange(average_grid_array.shape[1]), labels=cell_xs.astype(int), rotation=90)
     ax.set_yticks(np.arange(average_grid_array.shape[0]), labels=cell_ys.astype(int))
+
+
+def plot_grid_extra_steps_from_file(file) -> None:
+    plot_grid_extra_steps(pd.read_csv(file))
