@@ -213,3 +213,87 @@ def plot_grid_extra_steps(points_df, ax=None) -> None:
 
 def plot_grid_extra_steps_from_file(file) -> None:
     plot_grid_extra_steps(pd.read_csv(file))
+
+
+def plot_distance_rates(model:Model, all_sim_histories:list[SimulationHistory], ax=None) -> None:
+
+    nose_data = model.observation_table[:,5,1] # Data from model where the action taken is 5 (sniff air) and observation is 1 (something)
+    close_points = np.where(nose_data.ravel() > 0)[0]
+
+    # Computing rates
+    close_rates = []
+    far_rates = []
+    for sim in all_sim_histories:
+        close_sniff_air = 0
+        close_steps = 0
+
+        far_sniff_air = 0
+        far_steps = 0
+        for s,a in zip(sim.states[1:], sim.actions):
+            if s in close_points:
+                close_steps += 1
+                if a == 5:
+                    close_sniff_air +=1
+            else:
+                far_steps += 1
+                if a == 5:
+                    far_sniff_air += 1
+
+        close_rates.append(close_sniff_air / close_steps)
+        far_rates.append(far_sniff_air / far_steps)
+
+    # Actual plot
+    if ax is None:
+        _, ax = plt.subplots()
+    
+    ax.set_ylabel('PDF')
+    ax.set_xlabel('Rates of sniff in air')
+
+    ax.hist(np.array(far_rates), alpha=0.5, label='Far')
+    ax.hist(np.array(close_rates), alpha=0.5, label='Close')
+    ax.legend()
+
+
+def plot_cast_rates(all_sim_histories:list[SimulationHistory], ax=None) -> None:
+    # Computing rates
+    surge_rates = []
+    cast_rates = []
+
+    for sim in all_sim_histories:
+
+        # Cast action: 0 or 2
+        is_action = np.where((np.array(sim.actions) == 0) | (np.array(sim.actions) == 2) | (np.array(sim.actions) == 5), 1, 0)
+        is_action_seq = is_action[:-2] + is_action[1:-1] + is_action[2:]
+        cast_sequence = np.zeros(len(sim), dtype=bool)
+
+        for i, el in enumerate(is_action_seq):
+            if el == 3:
+                cast_sequence[i:i+3] = True
+
+        cast_count = np.sum(cast_sequence[:-1])
+        cast_sniff = np.sum(cast_sequence[:-1] & (np.array(sim.actions) == 5))
+        cast_rates.append(cast_sniff / cast_count)
+
+        # Surge action: 3
+        is_action = np.where((np.array(sim.actions) == 3) | (np.array(sim.actions) == 5), 1, 0)
+        is_action_seq = is_action[:-2] + is_action[1:-1] + is_action[2:]
+        surge_sequence = np.zeros(len(sim), dtype=bool)
+
+        for i, el in enumerate(is_action_seq):
+            if el == 3:
+                surge_sequence[i:i+3] = True
+
+        surge_count = np.sum(surge_sequence[:-1])
+        surge_sniff = np.sum(surge_sequence[:-1] & (np.array(sim.actions) == 5))
+        surge_rates.append(surge_sniff / surge_count)
+
+    # Actual plot
+    if ax is None:
+        _, ax = plt.subplots()
+        
+    ax.set_ylabel('PDF')
+    ax.set_xlabel('Rates of sniff in air')
+    
+    ax.hist(surge_rates, alpha=0.5, label='Surge')
+    ax.hist(cast_rates, alpha=0.5, label='Cast')
+    ax.legend()
