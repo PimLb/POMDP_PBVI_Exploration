@@ -157,7 +157,7 @@ def plot_extra_steps_from_file(file:str, ax=None) -> None:
     plot_extra_steps_from_pandas(df, ax)
     
 
-def plot_extra_steps(all_sim_histories:list[SimulationHistory], ax=None) -> None:
+def plot_extra_steps(all_sim_histories:list[SimulationHistory], ax=None):
     '''
     Plot box plots of additional steps along simulations in the list provided.
     Will produce a single box plot as it is a single run.
@@ -180,7 +180,7 @@ def plot_extra_steps(all_sim_histories:list[SimulationHistory], ax=None) -> None
     plot_extra_steps_from_pandas(df, ax)
 
 
-def plot_grid_extra_steps(points_df, ax=None) -> None:
+def plot_grid_extra_steps(points_df, vmax=None, ax=None) -> None:
     '''
     Plot the average extra steps required in a grid format
     '''
@@ -203,16 +203,18 @@ def plot_grid_extra_steps(points_df, ax=None) -> None:
     if ax is None:
         _, ax = plt.subplots()
 
-    im = ax.imshow(average_grid_array, cmap=plt.cm.get_cmap('RdYlGn').reversed())
-    plt.colorbar(im, orientation='horizontal', ax=ax)
+    im = ax.imshow(average_grid_array, cmap=plt.cm.get_cmap('RdYlGn').reversed(), vmin=0, vmax=(np.max(average_grid_array) if vmax is None else vmax))
+    # plt.colorbar(im, orientation='horizontal', ax=ax)
 
     # Axes
     ax.set_xticks(np.arange(average_grid_array.shape[1]), labels=cell_xs.astype(int), rotation=90)
     ax.set_yticks(np.arange(average_grid_array.shape[0]), labels=cell_ys.astype(int))
 
+    return im
 
-def plot_grid_extra_steps_from_file(file) -> None:
-    plot_grid_extra_steps(pd.read_csv(file))
+
+def plot_grid_extra_steps_from_file(file, vmax=None, ax=None):
+    return plot_grid_extra_steps(pd.read_csv(file), vmax=vmax, ax=ax)
 
 
 def plot_distance_rates(model:Model, all_sim_histories:list[SimulationHistory], ax=None) -> None:

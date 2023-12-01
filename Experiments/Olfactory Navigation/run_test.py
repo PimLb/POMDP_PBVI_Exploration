@@ -9,10 +9,10 @@ from cupy.cuda import runtime as cuda_runtime
 
 def main():
     # Set GPU used
-    cuda_runtime.setDevice(1)
+    cuda_runtime.setDevice(0)
 
     run_solve_test(
-        model_file='./Models/Alt_WrapVert_GroundOnly.pck',
+        model_file='./Models/Alt_Wrap_GroundOnly.pck',
         expand_function='fsvi',
         runs=20,
         sim_starts=[
@@ -20,7 +20,7 @@ def main():
             (361*15)+300, # Above center
             (361*45)+300  # Bellow center
         ],
-        name='VertGround'
+        name='Ground'
     )
 
 

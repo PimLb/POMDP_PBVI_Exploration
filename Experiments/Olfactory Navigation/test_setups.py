@@ -362,7 +362,7 @@ def run_grid_test(model_file:str,
     print('--------------------------------------------------------------------------------')
     log('Summarizing extra steps')
     all_averages = []
-    for i in range(20):
+    for i in range(len(value_function_files)):
         df = pd.read_csv(folder + f'GridSimulations/Grid-run-{i}-{len(res_df)}sims.csv')
         all_averages.append(df['extra_steps'].tolist())
 
