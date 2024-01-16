@@ -779,7 +779,7 @@ class ValueFunction:
         self._pruning_level = 1
 
 
-    def to_gpu(self) -> 'Model':
+    def to_gpu(self) -> 'ValueFunction':
         '''
         Function returning an equivalent value function object with the arrays stored on GPU instead of CPU.
 
@@ -805,7 +805,7 @@ class ValueFunction:
         return gpu_value_function
     
 
-    def to_cpu(self) -> 'Model':
+    def to_cpu(self) -> 'ValueFunction':
         '''
         Function returning an equivalent value function object with the arrays stored on CPU instead of GPU.
 
