@@ -34,9 +34,9 @@ from tqdm.auto import trange
 from typing import Union, Tuple
 
 import copy
-import json
 import os
 import pandas as pd
+import pickle
 import random
 
 import numpy as np
@@ -237,14 +237,14 @@ class Model:
         if transitions is None:
             if reachable_states is None:
                 # If no transitiong matrix and no reachable states given, generate random one
-                print(&#39;[Warning] No transition matrix and no reachable states have provided so a random transition matrix is generated...&#39;)
+                log(&#39;    &gt; [Warning] No transition matrix and no reachable states have provided so a random transition matrix is generated...&#39;)
                 random_probs = np.random.rand(self.state_count, self.action_count, self.state_count)
 
                 # Normalization to have s_p probabilies summing to 1
                 self.transition_table = random_probs / np.sum(random_probs, axis=2, keepdims=True)
             else:
                 # Make uniform transition probabilities over reachable states
-                print(f&#39;[Warning] No transition matrix or function provided but reachable states are, so probability to reach any reachable states will &#34;1 / reachable state count&#34; so here: {1/self.reachable_state_count:.3f}.&#39;)
+                log(f&#39;    &gt; [Warning] No transition matrix or function provided but reachable states are, so probability to reach any reachable states will &#34;1 / reachable state count&#34; so here: {1/self.reachable_state_count:.3f}.&#39;)
 
         elif callable(transitions): # Transition function
             self.transition_function = transitions
@@ -253,7 +253,7 @@ class Model:
             try:
                 t_arr = np.fromfunction(self.transition_function, (self.state_count, self.action_count, self.state_count))
             except MemoryError:
-                print(&#39;[Warning] Not enough memory to store transition table, using transition function provided...&#39;)
+                log(&#39;    &gt; [Warning] Not enough memory to store transition table, using transition function provided...&#39;)
             else:
                 self.transition_table = t_arr
 
@@ -266,7 +266,7 @@ class Model:
         duration = (datetime.now() - start_ts).total_seconds()
         log(f&#39;    &gt; Done in {duration:.3f}s&#39;)
         if duration &gt; 1:
-            log(f&#39;    &gt; /!\\ Transition table generation took long, if not done already, try to use the reachable_states parameter to speedup the process.&#39;)
+            log(f&#39;    &gt; [Warning] Transition table generation took long, if not done already, try to use the reachable_states parameter to speedup the process.&#39;)
 
         # ------------------------- Rewards are probabilistic toggle -------------------------
         self.rewards_are_probabilistic = rewards_are_probabilistic
@@ -292,7 +292,7 @@ class Model:
                     self.state_grid = state_grid
 
             else:
-                log(&#39;    &gt; Warning: looping through all grid states provided to find the corresponding states, can take a while...&#39;)
+                log(&#39;    &gt; [Warning] Looping through all grid states provided to find the corresponding states, can take a while...&#39;)
                 
                 np_state_grid = np.zeros(grid_shape, dtype=int)
                 states_covered = 0
@@ -327,7 +327,7 @@ class Model:
             log(&#39;- Starting computation of reachable states from transition data&#39;)
             
             if self.state_count &gt; 1000:
-                log(&#39;-    &gt; Warning: For models with large amounts of states, this operation can take time. Try generating it advance and use the parameter \&#39;reachable_states\&#39;...&#39;)
+                log(&#39;-    &gt; [Warning] For models with large amounts of states, this operation can take time. Try generating it advance and use the parameter \&#39;reachable_states\&#39;...&#39;)
             
             start_ts = datetime.now()
 
@@ -386,10 +386,16 @@ class Model:
         if rewards == -1: # If -1 is set, it means the rewards are defined in the superclass POMDP
             pass
         elif rewards is None:
-            # If no reward matrix given, generate random one
-            self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count)
+            if (len(self.end_states) &gt; 0) or (len(self.end_actions) &gt; 0):
+                log(&#39;- [Warning] Rewards are not define but end states/actions are, reaching an end state or doing an end action will give a reward of 1.&#39;)
+                self.immediate_reward_function = self._end_reward_function
+            else:
+                # If no reward matrix given, generate random one
+                self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count)
         elif callable(rewards):
             # Rewards is a function
+            log(&#39;- [Warning] The rewards are provided as a function, if the model is saved, the rewards will need to be defined before loading model.&#39;)
+            log(&#39;    &gt; Alternative: Setting end states/actions and leaving the rewards can be done to make the end states/action giving a reward of 1 by default.&#39;)
             self.immediate_reward_function = rewards
             assert len(signature(rewards).parameters) == 3, &#34;Reward function should accept 3 parameters: s, a, sn...&#34;
         else:
@@ -398,6 +404,10 @@ class Model:
             r_shape = self.immediate_reward_table.shape
             exp_shape = (self.state_count, self.action_count, self.state_count)
             assert r_shape == exp_shape, f&#34;Rewards table doesnt have the right shape, it should be SxAxS (expected: {exp_shape}, received {r_shape})&#34;
+
+        # ------------------------- Min and max rewards -------------------------
+        self._min_reward = None
+        self._max_reward = None
 
         # ------------------------- Expected rewards -------------------------
         self.expected_rewards_table = None
@@ -416,12 +426,19 @@ class Model:
                     return self.immediate_reward_function(s,a,self.reachable_states[s,a,ri])
                 
                 reachable_rewards = np.fromfunction(reach_reward_func, self.reachable_states.shape)
-                
+            
+            self._min_reward = float(np.min(reachable_rewards))
+            self._max_reward = float(np.max(reachable_rewards))
+
             self.expected_rewards_table = np.einsum(&#39;sar,sar-&gt;sa&#39;, self.reachable_probabilities, reachable_rewards)
 
             duration = (datetime.now() - start_ts).total_seconds()
             log(f&#39;    &gt; Done in {duration:.3f}s&#39;)
 
+
+    def _end_reward_function(self, s, a, sn):
+        return (np.isin(sn, self.end_states) | np.isin(a, self.end_actions)).astype(int)
+    
     
     def transition(self, s:int, a:int) -&gt; int:
         &#39;&#39;&#39;
@@ -468,7 +485,7 @@ class Model:
         reward : int or float
             The reward received.
         &#39;&#39;&#39;
-        reward = self.immediate_reward_table[s,a,s_p] if self.immediate_reward_table is not None else self.immediate_reward_function(s,a,s_p)
+        reward = float(self.immediate_reward_table[s,a,s_p] if self.immediate_reward_table is not None else self.immediate_reward_function(s,a,s_p))
         if self.rewards_are_probabilistic:
             rnd = random.random()
             return 1 if rnd &lt; reward else 0
@@ -476,9 +493,29 @@ class Model:
             return reward
     
 
+    def get_coords(self, item:Union[int,list]) -&gt; list[list[int]] | list[int]:
+        &#39;&#39;&#39;
+        Function to get the coordinate (on the state_grid) for the provided state index or indices.
+
+        Parameters
+        ----------
+        items : int | list[int]
+            The states ids or id get convert to a 2D coordinate.
+
+        Returns
+        -------
+        item_coords : list[int] | list[list[int]]
+            The 2D positions of the provided item ids.
+        &#39;&#39;&#39;
+        item_list = [item] if isinstance(item, int) else item
+        item_coords = [np.argwhere(self.cpu_model.state_grid == s)[0] for s in item_list]
+
+        return item_coords[0] if isinstance(item, int) else item_coords
+
+
     def save(self, file_name:str, path:str=&#39;./Models&#39;) -&gt; None:
         &#39;&#39;&#39;
-        Function to save the current model in a json file.
+        Function to save the current model in a pickle file.
         By default, the model will be saved in &#39;Models&#39; directory in the current working directory but this can be changed using the &#39;path&#39; parameter.
 
         Parameters
@@ -492,25 +529,18 @@ class Model:
             print(&#39;Folder does not exist yet, creating it...&#39;)
             os.makedirs(path)
 
-        if not file_name.endswith(&#39;.json&#39;):
-            file_name += &#39;.json&#39;
+        if not file_name.endswith(&#39;.pck&#39;):
+            file_name += &#39;.pck&#39;
 
-        # Taking the arguments of the CPU version of the model
-        argument_dict = self.cpu_model.__dict__
-
-        # Converting the numpy array to lists
-        for k,v in argument_dict.items():
-            argument_dict.__setattr__(k, v.tolist() if isinstance(v, np.ndarray) else v)
-
-        json_object = json.dumps(argument_dict, indent=4)
-        with open(path + &#39;/&#39; + file_name, &#39;w&#39;) as outfile:
-            outfile.write(json_object)
+        # Writing the cpu version of the file to a pickle file
+        with open(path + &#39;/&#39; + file_name, &#39;wb&#39;) as f:
+            pickle.dump(self.cpu_model, f)
 
 
     @classmethod
-    def load_from_json(cls, file:str) -&gt; &#39;Model&#39;:
+    def load_from_file(cls, file:str) -&gt; &#39;Model&#39;:
         &#39;&#39;&#39;
-        Function to load a MDP model from a json file. The json structure must contain the same items as in the constructor of this class.
+        Function to load a MDP model from a pickle file. The json structure must contain the same items as in the constructor of this class.
 
         Parameters
         ----------
@@ -522,15 +552,8 @@ class Model:
         loaded_model : mdp.Model
             An instance of the loaded model.
         &#39;&#39;&#39;
-        with open(file, &#39;r&#39;) as openfile:
-            json_model = json.load(openfile)
-
-        loaded_model = super().__new__(cls)
-        for k,v in json_model.items():
-            loaded_model.__setattr__(k, np.array(v) if isinstance(v, list) else v)
-
-        if &#39;grid_states&#39; in json_model:
-            loaded_model.convert_to_grid(json_model[&#39;grid_states&#39;])
+        with open(file, &#39;rb&#39;) as openfile:
+            loaded_model = pickle.load(openfile)
 
         return loaded_model
 
@@ -911,9 +934,9 @@ class ValueFunction:
         self._pruning_level = level
     
 
-    def save(self, path:str=&#39;./ValueFunctions&#39;, file_name:Union[str,None]=None) -&gt; None:
+    def save(self, path:str=&#39;./ValueFunctions&#39;, file_name:Union[str,None]=None, compress:bool=False) -&gt; None:
         &#39;&#39;&#39;
-        Function to save the save function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
+        Function to save the value function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
         If no file_name is provided, it be saved as &#39;&lt;current_timestamp&gt;_value_function.csv&#39;.
 
         Parameters
@@ -922,6 +945,8 @@ class ValueFunction:
             The path at which the csv will be saved.
         file_name : str, default=&#39;&lt;current_timestamp&gt;_value_function.csv&#39;
             The file name used to save in.
+        compress : bool, default=False
+            Whether to compress the resulting file to a gzip file or not.
         &#39;&#39;&#39;
         if not os.path.exists(path):
             print(&#39;Folder does not exist yet, creating it...&#39;)
@@ -931,6 +956,16 @@ class ValueFunction:
             timestamp = datetime.now().strftime(&#39;%Y%m%d_%H%M%S&#39;)
             file_name = timestamp + &#39;_value_function.csv&#39;
 
+        # Make sure that .csv is in the file name
+        if &#39;.csv&#39; not in file_name:
+            file_name += &#39;.csv&#39;
+
+        # Compression check
+        compression_type = None
+        if compress:
+            file_name += &#39;.gzip&#39;
+            compression_type = &#39;gzip&#39;
+
         vector_array = self.alpha_vector_array
         actions = self.actions
 
@@ -939,11 +974,11 @@ class ValueFunction:
             vector_array = cp.asnumpy(vector_array)
             actions = cp.asnumpy(actions)
 
-        data = np.concatenate((np.array(self.actions)[:,None], self.alpha_vector_array), axis=1)
+        data = np.concatenate((np.array(actions)[:,None], vector_array), axis=1)
         columns = [&#39;action&#39;, *self.model.state_labels]
 
         df = pd.DataFrame(data)
-        df.to_csv(path + &#39;/&#39; + file_name, index=False, header=columns)
+        df.to_csv(path + &#39;/&#39; + file_name, index=False, header=columns, compression=compression_type)
 
 
     @classmethod
@@ -963,7 +998,11 @@ class ValueFunction:
         loaded_value_function : ValueFunction
             The loaded value function.
         &#39;&#39;&#39;
-        df = pd.read_csv(file, header=0, index_col=False)
+        compression_type = None
+        if &#39;.gzip&#39; in file:
+            compression_type = &#39;gzip&#39;
+        
+        df = pd.read_csv(file, header=0, index_col=False, compression=compression_type)
         alpha_vectors = df.to_numpy()
 
         return ValueFunction(model, alpha_vectors[:,1:], alpha_vectors[:,0].astype(int))
@@ -1644,12 +1683,20 @@ class SimulationHistory:
         The set of rewards received by the agent throughout the simulation process.
     &#39;&#39;&#39;
     def __init__(self, model:Model, start_state:int):
-        self.model = model
+        self.model = model.cpu_model
 
         self.states = [start_state]
-        self.grid_point_sequence = [[i[0] for i in np.where(self.model.state_grid == start_state)]]
+        self._grid_point_sequence = [[int(i[0]) for i in np.where(self.model.state_grid == start_state)]]
         self.actions = []
         self.rewards = RewardSet()
+
+
+    @property
+    def grid_point_sequence(self) -&gt; list[list[int]]:
+        if len(self._grid_point_sequence) &lt; len(self):
+            self._grid_point_sequence = [[int(i[0]) for i in np.where(self.model.state_grid == s)] for s in self.states] 
+
+        return self._grid_point_sequence
 
 
     def add(self, action:int, reward, next_state:int) -&gt; None:
@@ -1668,7 +1715,7 @@ class SimulationHistory:
         self.actions.append(action)
         self.rewards.append(reward)
         self.states.append(next_state)
-        self.grid_point_sequence.append([i[0] for i in np.where(self.model.state_grid == next_state)])
+        self._grid_point_sequence.append([int(i[0]) for i in np.where(self.model.state_grid == next_state)])
     
 
     def __len__(self):
@@ -1691,18 +1738,20 @@ class SimulationHistory:
         dimensions = self.model.state_grid.shape
         x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] &lt; 10 else int(dimensions[1] / 10)))
         y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] &lt; 5 else int(dimensions[0] / 5)))
-        
-        plt.xticks(x_ticks)
-        plt.yticks(y_ticks)
-
-        # Inverting y axis
-        ax = plt.gca()
-        ax.invert_yaxis()
 
         # Actual plotting
         data = np.array(self.grid_point_sequence)
         plt.plot(data[:,1], data[:,0], color=&#39;red&#39;)
         plt.scatter(data[:,1], data[:,0], color=&#39;red&#39;)
+
+        # Inverting y axis
+        ax = plt.gca()
+        ax.set_xticks(x_ticks)
+        ax.set_xlim((0, dimensions[1]))
+        ax.set_yticks(y_ticks)
+        ax.set_ylim((0,dimensions[0]))
+        ax.invert_yaxis()
+
         plt.show()
 
 
@@ -1712,8 +1761,8 @@ class SimulationHistory:
 
         # Ticks
         dimensions = self.model.state_grid.shape
-        x_ticks = [i for i in range(dimensions[1])]
-        y_ticks = [i for i in range(dimensions[0])]
+        x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] &lt; 10 else int(dimensions[1] / 10)))
+        y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] &lt; 5 else int(dimensions[0] / 5)))
 
         # Plotting
         ax.clear()
@@ -1753,13 +1802,54 @@ class SimulationHistory:
 
         # Video saving
         if not os.path.exists(&#39;./Sim Videos&#39;):
-            print(&#39;Folder does not exist yet, creating it...&#39;)
+            print(f&#39;Folder &#34;./Sim Videos&#34; does not exist yet, creating it...&#39;)
             os.makedirs(&#39;./Sim Videos&#39;)
 
         writervideo = animation.FFMpegWriter(fps=fps)
         ani.save(&#39;./Sim Videos/&#39; + video_title, writer=writervideo)
-        print(f&#39;Video saved at \&#39;Sim Videos/{video_title}\&#39;...&#39;)
+        print(f&#39;Video saved at \&#39;./Sim Videos/{video_title}\&#39;...&#39;)
         plt.close()
+
+
+    def to_dataframe(self) -&gt; pd.DataFrame:
+        &#39;&#39;&#39;
+        Returns a pandas dataframe representation of the simulation history.
+        &#39;&#39;&#39;
+        return pd.DataFrame({
+            &#39;States&#39;: self.states,
+            &#39;State_grid_x&#39;: [point[0] for point in self.grid_point_sequence],
+            &#39;State_grid_y&#39;: [point[1] for point in self.grid_point_sequence],
+            &#39;Actions&#39;: self.actions + [None],
+            &#39;Rewards&#39;: self.rewards + [None]
+        })
+
+
+    def save(self, path:str=&#39;./Simulations&#39;, file_name:Union[str,None]=None) -&gt; None:
+        &#39;&#39;&#39;
+        Function to save the simulation history in a file at a given path. If no path is provided, it will be saved in a subfolder (Simulations) inside the current working directory.
+        If no file_name is provided, it be saved as &#39;&lt;current_timestamp&gt;_simulation.csv&#39;.
+
+        Parameters
+        ----------
+        path : str, default=&#39;./Simulations&#39;
+            The path at which the csv will be saved.
+        file_name : str, default=&#39;&lt;current_timestamp&gt;_simulation.csv&#39;
+            The file name used to save in.
+        &#39;&#39;&#39;
+        if not os.path.exists(path):
+            print(&#39;Folder does not exist yet, creating it...&#39;)
+            os.makedirs(path)
+            
+        if file_name is None:
+            timestamp = datetime.now().strftime(&#39;%Y%m%d_%H%M%S&#39;)
+            file_name = timestamp + &#39;_simulation.csv&#39;
+
+        if not file_name.endswith(&#39;.csv&#39;):
+            file_name += &#39;.csv&#39;
+        
+        df = self.to_dataframe()
+
+        df.to_csv(path + &#39;/&#39; + file_name, index=False)
 
 
 class Simulation:
@@ -1810,7 +1900,7 @@ class Simulation:
         xp = np if not self.model.is_on_gpu else cp
 
         if start_state is None:
-            self.agent_state = int(np.random.choice(a=self.model.states, size=1, p=self.model.start_probabilities)[0])
+            self.agent_state = int(xp.random.choice(a=self.model.states, size=1, p=self.model.start_probabilities)[0])
         else:
             self.agent_state = start_state
         
@@ -2909,14 +2999,14 @@ It is made by taking the weighted average of immediate rewards and the transitio
         if transitions is None:
             if reachable_states is None:
                 # If no transitiong matrix and no reachable states given, generate random one
-                print(&#39;[Warning] No transition matrix and no reachable states have provided so a random transition matrix is generated...&#39;)
+                log(&#39;    &gt; [Warning] No transition matrix and no reachable states have provided so a random transition matrix is generated...&#39;)
                 random_probs = np.random.rand(self.state_count, self.action_count, self.state_count)
 
                 # Normalization to have s_p probabilies summing to 1
                 self.transition_table = random_probs / np.sum(random_probs, axis=2, keepdims=True)
             else:
                 # Make uniform transition probabilities over reachable states
-                print(f&#39;[Warning] No transition matrix or function provided but reachable states are, so probability to reach any reachable states will &#34;1 / reachable state count&#34; so here: {1/self.reachable_state_count:.3f}.&#39;)
+                log(f&#39;    &gt; [Warning] No transition matrix or function provided but reachable states are, so probability to reach any reachable states will &#34;1 / reachable state count&#34; so here: {1/self.reachable_state_count:.3f}.&#39;)
 
         elif callable(transitions): # Transition function
             self.transition_function = transitions
@@ -2925,7 +3015,7 @@ It is made by taking the weighted average of immediate rewards and the transitio
             try:
                 t_arr = np.fromfunction(self.transition_function, (self.state_count, self.action_count, self.state_count))
             except MemoryError:
-                print(&#39;[Warning] Not enough memory to store transition table, using transition function provided...&#39;)
+                log(&#39;    &gt; [Warning] Not enough memory to store transition table, using transition function provided...&#39;)
             else:
                 self.transition_table = t_arr
 
@@ -2938,7 +3028,7 @@ It is made by taking the weighted average of immediate rewards and the transitio
         duration = (datetime.now() - start_ts).total_seconds()
         log(f&#39;    &gt; Done in {duration:.3f}s&#39;)
         if duration &gt; 1:
-            log(f&#39;    &gt; /!\\ Transition table generation took long, if not done already, try to use the reachable_states parameter to speedup the process.&#39;)
+            log(f&#39;    &gt; [Warning] Transition table generation took long, if not done already, try to use the reachable_states parameter to speedup the process.&#39;)
 
         # ------------------------- Rewards are probabilistic toggle -------------------------
         self.rewards_are_probabilistic = rewards_are_probabilistic
@@ -2964,7 +3054,7 @@ It is made by taking the weighted average of immediate rewards and the transitio
                     self.state_grid = state_grid
 
             else:
-                log(&#39;    &gt; Warning: looping through all grid states provided to find the corresponding states, can take a while...&#39;)
+                log(&#39;    &gt; [Warning] Looping through all grid states provided to find the corresponding states, can take a while...&#39;)
                 
                 np_state_grid = np.zeros(grid_shape, dtype=int)
                 states_covered = 0
@@ -2999,7 +3089,7 @@ It is made by taking the weighted average of immediate rewards and the transitio
             log(&#39;- Starting computation of reachable states from transition data&#39;)
             
             if self.state_count &gt; 1000:
-                log(&#39;-    &gt; Warning: For models with large amounts of states, this operation can take time. Try generating it advance and use the parameter \&#39;reachable_states\&#39;...&#39;)
+                log(&#39;-    &gt; [Warning] For models with large amounts of states, this operation can take time. Try generating it advance and use the parameter \&#39;reachable_states\&#39;...&#39;)
             
             start_ts = datetime.now()
 
@@ -3058,10 +3148,16 @@ It is made by taking the weighted average of immediate rewards and the transitio
         if rewards == -1: # If -1 is set, it means the rewards are defined in the superclass POMDP
             pass
         elif rewards is None:
-            # If no reward matrix given, generate random one
-            self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count)
+            if (len(self.end_states) &gt; 0) or (len(self.end_actions) &gt; 0):
+                log(&#39;- [Warning] Rewards are not define but end states/actions are, reaching an end state or doing an end action will give a reward of 1.&#39;)
+                self.immediate_reward_function = self._end_reward_function
+            else:
+                # If no reward matrix given, generate random one
+                self.immediate_reward_table = np.random.rand(self.state_count, self.action_count, self.state_count)
         elif callable(rewards):
             # Rewards is a function
+            log(&#39;- [Warning] The rewards are provided as a function, if the model is saved, the rewards will need to be defined before loading model.&#39;)
+            log(&#39;    &gt; Alternative: Setting end states/actions and leaving the rewards can be done to make the end states/action giving a reward of 1 by default.&#39;)
             self.immediate_reward_function = rewards
             assert len(signature(rewards).parameters) == 3, &#34;Reward function should accept 3 parameters: s, a, sn...&#34;
         else:
@@ -3070,6 +3166,10 @@ It is made by taking the weighted average of immediate rewards and the transitio
             r_shape = self.immediate_reward_table.shape
             exp_shape = (self.state_count, self.action_count, self.state_count)
             assert r_shape == exp_shape, f&#34;Rewards table doesnt have the right shape, it should be SxAxS (expected: {exp_shape}, received {r_shape})&#34;
+
+        # ------------------------- Min and max rewards -------------------------
+        self._min_reward = None
+        self._max_reward = None
 
         # ------------------------- Expected rewards -------------------------
         self.expected_rewards_table = None
@@ -3088,12 +3188,19 @@ It is made by taking the weighted average of immediate rewards and the transitio
                     return self.immediate_reward_function(s,a,self.reachable_states[s,a,ri])
                 
                 reachable_rewards = np.fromfunction(reach_reward_func, self.reachable_states.shape)
-                
+            
+            self._min_reward = float(np.min(reachable_rewards))
+            self._max_reward = float(np.max(reachable_rewards))
+
             self.expected_rewards_table = np.einsum(&#39;sar,sar-&gt;sa&#39;, self.reachable_probabilities, reachable_rewards)
 
             duration = (datetime.now() - start_ts).total_seconds()
             log(f&#39;    &gt; Done in {duration:.3f}s&#39;)
 
+
+    def _end_reward_function(self, s, a, sn):
+        return (np.isin(sn, self.end_states) | np.isin(a, self.end_actions)).astype(int)
+    
     
     def transition(self, s:int, a:int) -&gt; int:
         &#39;&#39;&#39;
@@ -3140,7 +3247,7 @@ It is made by taking the weighted average of immediate rewards and the transitio
         reward : int or float
             The reward received.
         &#39;&#39;&#39;
-        reward = self.immediate_reward_table[s,a,s_p] if self.immediate_reward_table is not None else self.immediate_reward_function(s,a,s_p)
+        reward = float(self.immediate_reward_table[s,a,s_p] if self.immediate_reward_table is not None else self.immediate_reward_function(s,a,s_p))
         if self.rewards_are_probabilistic:
             rnd = random.random()
             return 1 if rnd &lt; reward else 0
@@ -3148,9 +3255,29 @@ It is made by taking the weighted average of immediate rewards and the transitio
             return reward
     
 
+    def get_coords(self, item:Union[int,list]) -&gt; list[list[int]] | list[int]:
+        &#39;&#39;&#39;
+        Function to get the coordinate (on the state_grid) for the provided state index or indices.
+
+        Parameters
+        ----------
+        items : int | list[int]
+            The states ids or id get convert to a 2D coordinate.
+
+        Returns
+        -------
+        item_coords : list[int] | list[list[int]]
+            The 2D positions of the provided item ids.
+        &#39;&#39;&#39;
+        item_list = [item] if isinstance(item, int) else item
+        item_coords = [np.argwhere(self.cpu_model.state_grid == s)[0] for s in item_list]
+
+        return item_coords[0] if isinstance(item, int) else item_coords
+
+
     def save(self, file_name:str, path:str=&#39;./Models&#39;) -&gt; None:
         &#39;&#39;&#39;
-        Function to save the current model in a json file.
+        Function to save the current model in a pickle file.
         By default, the model will be saved in &#39;Models&#39; directory in the current working directory but this can be changed using the &#39;path&#39; parameter.
 
         Parameters
@@ -3164,25 +3291,18 @@ It is made by taking the weighted average of immediate rewards and the transitio
             print(&#39;Folder does not exist yet, creating it...&#39;)
             os.makedirs(path)
 
-        if not file_name.endswith(&#39;.json&#39;):
-            file_name += &#39;.json&#39;
+        if not file_name.endswith(&#39;.pck&#39;):
+            file_name += &#39;.pck&#39;
 
-        # Taking the arguments of the CPU version of the model
-        argument_dict = self.cpu_model.__dict__
-
-        # Converting the numpy array to lists
-        for k,v in argument_dict.items():
-            argument_dict.__setattr__(k, v.tolist() if isinstance(v, np.ndarray) else v)
-
-        json_object = json.dumps(argument_dict, indent=4)
-        with open(path + &#39;/&#39; + file_name, &#39;w&#39;) as outfile:
-            outfile.write(json_object)
+        # Writing the cpu version of the file to a pickle file
+        with open(path + &#39;/&#39; + file_name, &#39;wb&#39;) as f:
+            pickle.dump(self.cpu_model, f)
 
 
     @classmethod
-    def load_from_json(cls, file:str) -&gt; &#39;Model&#39;:
+    def load_from_file(cls, file:str) -&gt; &#39;Model&#39;:
         &#39;&#39;&#39;
-        Function to load a MDP model from a json file. The json structure must contain the same items as in the constructor of this class.
+        Function to load a MDP model from a pickle file. The json structure must contain the same items as in the constructor of this class.
 
         Parameters
         ----------
@@ -3194,15 +3314,8 @@ It is made by taking the weighted average of immediate rewards and the transitio
         loaded_model : mdp.Model
             An instance of the loaded model.
         &#39;&#39;&#39;
-        with open(file, &#39;r&#39;) as openfile:
-            json_model = json.load(openfile)
-
-        loaded_model = super().__new__(cls)
-        for k,v in json_model.items():
-            loaded_model.__setattr__(k, np.array(v) if isinstance(v, list) else v)
-
-        if &#39;grid_states&#39; in json_model:
-            loaded_model.convert_to_grid(json_model[&#39;grid_states&#39;])
+        with open(file, &#39;rb&#39;) as openfile:
+            loaded_model = pickle.load(openfile)
 
         return loaded_model
 
@@ -3272,11 +3385,11 @@ It is made by taking the weighted average of immediate rewards and the transitio
 </ul>
 <h3>Static methods</h3>
 <dl>
-<dt id="src.mdp.Model.load_from_json"><code class="name flex">
-<span>def <span class="ident">load_from_json</span></span>(<span>file: str) ‑> <a title="src.mdp.Model" href="#src.mdp.Model">Model</a></span>
+<dt id="src.mdp.Model.load_from_file"><code class="name flex">
+<span>def <span class="ident">load_from_file</span></span>(<span>file: str) ‑> <a title="src.mdp.Model" href="#src.mdp.Model">Model</a></span>
 </code></dt>
 <dd>
-<div class="desc"><p>Function to load a MDP model from a json file. The json structure must contain the same items as in the constructor of this class.</p>
+<div class="desc"><p>Function to load a MDP model from a pickle file. The json structure must contain the same items as in the constructor of this class.</p>
 <h2 id="parameters">Parameters</h2>
 <dl>
 <dt><strong><code>file</code></strong> :&ensp;<code>str</code></dt>
@@ -3292,9 +3405,9 @@ It is made by taking the weighted average of immediate rewards and the transitio
 <span>Expand source code</span>
 </summary>
 <pre><code class="python">@classmethod
-def load_from_json(cls, file:str) -&gt; &#39;Model&#39;:
+def load_from_file(cls, file:str) -&gt; &#39;Model&#39;:
     &#39;&#39;&#39;
-    Function to load a MDP model from a json file. The json structure must contain the same items as in the constructor of this class.
+    Function to load a MDP model from a pickle file. The json structure must contain the same items as in the constructor of this class.
 
     Parameters
     ----------
@@ -3306,15 +3419,8 @@ def load_from_json(cls, file:str) -&gt; &#39;Model&#39;:
     loaded_model : mdp.Model
         An instance of the loaded model.
     &#39;&#39;&#39;
-    with open(file, &#39;r&#39;) as openfile:
-        json_model = json.load(openfile)
-
-    loaded_model = super().__new__(cls)
-    for k,v in json_model.items():
-        loaded_model.__setattr__(k, np.array(v) if isinstance(v, list) else v)
-
-    if &#39;grid_states&#39; in json_model:
-        loaded_model.convert_to_grid(json_model[&#39;grid_states&#39;])
+    with open(file, &#39;rb&#39;) as openfile:
+        loaded_model = pickle.load(openfile)
 
     return loaded_model</code></pre>
 </details>
@@ -3399,6 +3505,45 @@ def gpu_model(self) -&gt; &#39;Model&#39;:
 </dl>
 <h3>Methods</h3>
 <dl>
+<dt id="src.mdp.Model.get_coords"><code class="name flex">
+<span>def <span class="ident">get_coords</span></span>(<span>self, item: Union[int, list]) ‑> list[list[int]] | list[int]</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Function to get the coordinate (on the state_grid) for the provided state index or indices.</p>
+<h2 id="parameters">Parameters</h2>
+<dl>
+<dt><strong><code>items</code></strong> :&ensp;<code>int | list[int]</code></dt>
+<dd>The states ids or id get convert to a 2D coordinate.</dd>
+</dl>
+<h2 id="returns">Returns</h2>
+<dl>
+<dt><strong><code>item_coords</code></strong> :&ensp;<code>list[int] | list[list[int]]</code></dt>
+<dd>The 2D positions of the provided item ids.</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def get_coords(self, item:Union[int,list]) -&gt; list[list[int]] | list[int]:
+    &#39;&#39;&#39;
+    Function to get the coordinate (on the state_grid) for the provided state index or indices.
+
+    Parameters
+    ----------
+    items : int | list[int]
+        The states ids or id get convert to a 2D coordinate.
+
+    Returns
+    -------
+    item_coords : list[int] | list[list[int]]
+        The 2D positions of the provided item ids.
+    &#39;&#39;&#39;
+    item_list = [item] if isinstance(item, int) else item
+    item_coords = [np.argwhere(self.cpu_model.state_grid == s)[0] for s in item_list]
+
+    return item_coords[0] if isinstance(item, int) else item_coords</code></pre>
+</details>
+</dd>
 <dt id="src.mdp.Model.reward"><code class="name flex">
 <span>def <span class="ident">reward</span></span>(<span>self, s: int, a: int, s_p: int) ‑> Union[int, float]</span>
 </code></dt>
@@ -3442,7 +3587,7 @@ If the rewards are probabilistic, it will return 0 or 1.</p>
     reward : int or float
         The reward received.
     &#39;&#39;&#39;
-    reward = self.immediate_reward_table[s,a,s_p] if self.immediate_reward_table is not None else self.immediate_reward_function(s,a,s_p)
+    reward = float(self.immediate_reward_table[s,a,s_p] if self.immediate_reward_table is not None else self.immediate_reward_function(s,a,s_p))
     if self.rewards_are_probabilistic:
         rnd = random.random()
         return 1 if rnd &lt; reward else 0
@@ -3454,7 +3599,7 @@ If the rewards are probabilistic, it will return 0 or 1.</p>
 <span>def <span class="ident">save</span></span>(<span>self, file_name: str, path: str = './Models') ‑> None</span>
 </code></dt>
 <dd>
-<div class="desc"><p>Function to save the current model in a json file.
+<div class="desc"><p>Function to save the current model in a pickle file.
 By default, the model will be saved in 'Models' directory in the current working directory but this can be changed using the 'path' parameter.</p>
 <h2 id="parameters">Parameters</h2>
 <dl>
@@ -3469,7 +3614,7 @@ By default, the model will be saved in 'Models' directory in the current working
 </summary>
 <pre><code class="python">def save(self, file_name:str, path:str=&#39;./Models&#39;) -&gt; None:
     &#39;&#39;&#39;
-    Function to save the current model in a json file.
+    Function to save the current model in a pickle file.
     By default, the model will be saved in &#39;Models&#39; directory in the current working directory but this can be changed using the &#39;path&#39; parameter.
 
     Parameters
@@ -3483,19 +3628,12 @@ By default, the model will be saved in 'Models' directory in the current working
         print(&#39;Folder does not exist yet, creating it...&#39;)
         os.makedirs(path)
 
-    if not file_name.endswith(&#39;.json&#39;):
-        file_name += &#39;.json&#39;
+    if not file_name.endswith(&#39;.pck&#39;):
+        file_name += &#39;.pck&#39;
 
-    # Taking the arguments of the CPU version of the model
-    argument_dict = self.cpu_model.__dict__
-
-    # Converting the numpy array to lists
-    for k,v in argument_dict.items():
-        argument_dict.__setattr__(k, v.tolist() if isinstance(v, np.ndarray) else v)
-
-    json_object = json.dumps(argument_dict, indent=4)
-    with open(path + &#39;/&#39; + file_name, &#39;w&#39;) as outfile:
-        outfile.write(json_object)</code></pre>
+    # Writing the cpu version of the file to a pickle file
+    with open(path + &#39;/&#39; + file_name, &#39;wb&#39;) as f:
+        pickle.dump(self.cpu_model, f)</code></pre>
 </details>
 </dd>
 <dt id="src.mdp.Model.transition"><code class="name flex">
@@ -3945,7 +4083,7 @@ Parameters</p>
         xp = np if not self.model.is_on_gpu else cp
 
         if start_state is None:
-            self.agent_state = int(np.random.choice(a=self.model.states, size=1, p=self.model.start_probabilities)[0])
+            self.agent_state = int(xp.random.choice(a=self.model.states, size=1, p=self.model.start_probabilities)[0])
         else:
             self.agent_state = start_state
         
@@ -4030,7 +4168,7 @@ Parameters</p>
     xp = np if not self.model.is_on_gpu else cp
 
     if start_state is None:
-        self.agent_state = int(np.random.choice(a=self.model.states, size=1, p=self.model.start_probabilities)[0])
+        self.agent_state = int(xp.random.choice(a=self.model.states, size=1, p=self.model.start_probabilities)[0])
     else:
         self.agent_state = start_state
     
@@ -4162,12 +4300,20 @@ Parameters</p>
         The set of rewards received by the agent throughout the simulation process.
     &#39;&#39;&#39;
     def __init__(self, model:Model, start_state:int):
-        self.model = model
+        self.model = model.cpu_model
 
         self.states = [start_state]
-        self.grid_point_sequence = [[i[0] for i in np.where(self.model.state_grid == start_state)]]
+        self._grid_point_sequence = [[int(i[0]) for i in np.where(self.model.state_grid == start_state)]]
         self.actions = []
         self.rewards = RewardSet()
+
+
+    @property
+    def grid_point_sequence(self) -&gt; list[list[int]]:
+        if len(self._grid_point_sequence) &lt; len(self):
+            self._grid_point_sequence = [[int(i[0]) for i in np.where(self.model.state_grid == s)] for s in self.states] 
+
+        return self._grid_point_sequence
 
 
     def add(self, action:int, reward, next_state:int) -&gt; None:
@@ -4186,7 +4332,7 @@ Parameters</p>
         self.actions.append(action)
         self.rewards.append(reward)
         self.states.append(next_state)
-        self.grid_point_sequence.append([i[0] for i in np.where(self.model.state_grid == next_state)])
+        self._grid_point_sequence.append([int(i[0]) for i in np.where(self.model.state_grid == next_state)])
     
 
     def __len__(self):
@@ -4209,18 +4355,20 @@ Parameters</p>
         dimensions = self.model.state_grid.shape
         x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] &lt; 10 else int(dimensions[1] / 10)))
         y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] &lt; 5 else int(dimensions[0] / 5)))
-        
-        plt.xticks(x_ticks)
-        plt.yticks(y_ticks)
-
-        # Inverting y axis
-        ax = plt.gca()
-        ax.invert_yaxis()
 
         # Actual plotting
         data = np.array(self.grid_point_sequence)
         plt.plot(data[:,1], data[:,0], color=&#39;red&#39;)
         plt.scatter(data[:,1], data[:,0], color=&#39;red&#39;)
+
+        # Inverting y axis
+        ax = plt.gca()
+        ax.set_xticks(x_ticks)
+        ax.set_xlim((0, dimensions[1]))
+        ax.set_yticks(y_ticks)
+        ax.set_ylim((0,dimensions[0]))
+        ax.invert_yaxis()
+
         plt.show()
 
 
@@ -4230,8 +4378,8 @@ Parameters</p>
 
         # Ticks
         dimensions = self.model.state_grid.shape
-        x_ticks = [i for i in range(dimensions[1])]
-        y_ticks = [i for i in range(dimensions[0])]
+        x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] &lt; 10 else int(dimensions[1] / 10)))
+        y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] &lt; 5 else int(dimensions[0] / 5)))
 
         # Plotting
         ax.clear()
@@ -4271,18 +4419,77 @@ Parameters</p>
 
         # Video saving
         if not os.path.exists(&#39;./Sim Videos&#39;):
-            print(&#39;Folder does not exist yet, creating it...&#39;)
+            print(f&#39;Folder &#34;./Sim Videos&#34; does not exist yet, creating it...&#39;)
             os.makedirs(&#39;./Sim Videos&#39;)
 
         writervideo = animation.FFMpegWriter(fps=fps)
         ani.save(&#39;./Sim Videos/&#39; + video_title, writer=writervideo)
-        print(f&#39;Video saved at \&#39;Sim Videos/{video_title}\&#39;...&#39;)
-        plt.close()</code></pre>
+        print(f&#39;Video saved at \&#39;./Sim Videos/{video_title}\&#39;...&#39;)
+        plt.close()
+
+
+    def to_dataframe(self) -&gt; pd.DataFrame:
+        &#39;&#39;&#39;
+        Returns a pandas dataframe representation of the simulation history.
+        &#39;&#39;&#39;
+        return pd.DataFrame({
+            &#39;States&#39;: self.states,
+            &#39;State_grid_x&#39;: [point[0] for point in self.grid_point_sequence],
+            &#39;State_grid_y&#39;: [point[1] for point in self.grid_point_sequence],
+            &#39;Actions&#39;: self.actions + [None],
+            &#39;Rewards&#39;: self.rewards + [None]
+        })
+
+
+    def save(self, path:str=&#39;./Simulations&#39;, file_name:Union[str,None]=None) -&gt; None:
+        &#39;&#39;&#39;
+        Function to save the simulation history in a file at a given path. If no path is provided, it will be saved in a subfolder (Simulations) inside the current working directory.
+        If no file_name is provided, it be saved as &#39;&lt;current_timestamp&gt;_simulation.csv&#39;.
+
+        Parameters
+        ----------
+        path : str, default=&#39;./Simulations&#39;
+            The path at which the csv will be saved.
+        file_name : str, default=&#39;&lt;current_timestamp&gt;_simulation.csv&#39;
+            The file name used to save in.
+        &#39;&#39;&#39;
+        if not os.path.exists(path):
+            print(&#39;Folder does not exist yet, creating it...&#39;)
+            os.makedirs(path)
+            
+        if file_name is None:
+            timestamp = datetime.now().strftime(&#39;%Y%m%d_%H%M%S&#39;)
+            file_name = timestamp + &#39;_simulation.csv&#39;
+
+        if not file_name.endswith(&#39;.csv&#39;):
+            file_name += &#39;.csv&#39;
+        
+        df = self.to_dataframe()
+
+        df.to_csv(path + &#39;/&#39; + file_name, index=False)</code></pre>
 </details>
 <h3>Subclasses</h3>
 <ul class="hlist">
 <li><a title="src.pomdp.SimulationHistory" href="pomdp.html#src.pomdp.SimulationHistory">SimulationHistory</a></li>
 </ul>
+<h3>Instance variables</h3>
+<dl>
+<dt id="src.mdp.SimulationHistory.grid_point_sequence"><code class="name">var <span class="ident">grid_point_sequence</span> : list[list[int]]</code></dt>
+<dd>
+<div class="desc"></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">@property
+def grid_point_sequence(self) -&gt; list[list[int]]:
+    if len(self._grid_point_sequence) &lt; len(self):
+        self._grid_point_sequence = [[int(i[0]) for i in np.where(self.model.state_grid == s)] for s in self.states] 
+
+    return self._grid_point_sequence</code></pre>
+</details>
+</dd>
+</dl>
 <h3>Methods</h3>
 <dl>
 <dt id="src.mdp.SimulationHistory.add"><code class="name flex">
@@ -4319,7 +4526,7 @@ Parameters</p>
     self.actions.append(action)
     self.rewards.append(reward)
     self.states.append(next_state)
-    self.grid_point_sequence.append([i[0] for i in np.where(self.model.state_grid == next_state)])</code></pre>
+    self._grid_point_sequence.append([int(i[0]) for i in np.where(self.model.state_grid == next_state)])</code></pre>
 </details>
 </dd>
 <dt id="src.mdp.SimulationHistory.plot_simulation_steps"><code class="name flex">
@@ -4352,19 +4559,66 @@ Parameters</p>
     dimensions = self.model.state_grid.shape
     x_ticks = np.arange(0, dimensions[1], (1 if dimensions[1] &lt; 10 else int(dimensions[1] / 10)))
     y_ticks = np.arange(0, dimensions[0], (1 if dimensions[0] &lt; 5 else int(dimensions[0] / 5)))
-    
-    plt.xticks(x_ticks)
-    plt.yticks(y_ticks)
-
-    # Inverting y axis
-    ax = plt.gca()
-    ax.invert_yaxis()
 
     # Actual plotting
     data = np.array(self.grid_point_sequence)
     plt.plot(data[:,1], data[:,0], color=&#39;red&#39;)
     plt.scatter(data[:,1], data[:,0], color=&#39;red&#39;)
+
+    # Inverting y axis
+    ax = plt.gca()
+    ax.set_xticks(x_ticks)
+    ax.set_xlim((0, dimensions[1]))
+    ax.set_yticks(y_ticks)
+    ax.set_ylim((0,dimensions[0]))
+    ax.invert_yaxis()
+
     plt.show()</code></pre>
+</details>
+</dd>
+<dt id="src.mdp.SimulationHistory.save"><code class="name flex">
+<span>def <span class="ident">save</span></span>(<span>self, path: str = './Simulations', file_name: Optional[str] = None) ‑> None</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Function to save the simulation history in a file at a given path. If no path is provided, it will be saved in a subfolder (Simulations) inside the current working directory.
+If no file_name is provided, it be saved as '<current_timestamp>_simulation.csv'.</p>
+<h2 id="parameters">Parameters</h2>
+<dl>
+<dt><strong><code>path</code></strong> :&ensp;<code>str</code>, default=<code>'./Simulations'</code></dt>
+<dd>The path at which the csv will be saved.</dd>
+<dt><strong><code>file_name</code></strong> :&ensp;<code>str</code>, default=<code>'&lt;current_timestamp&gt;_simulation.csv'</code></dt>
+<dd>The file name used to save in.</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def save(self, path:str=&#39;./Simulations&#39;, file_name:Union[str,None]=None) -&gt; None:
+    &#39;&#39;&#39;
+    Function to save the simulation history in a file at a given path. If no path is provided, it will be saved in a subfolder (Simulations) inside the current working directory.
+    If no file_name is provided, it be saved as &#39;&lt;current_timestamp&gt;_simulation.csv&#39;.
+
+    Parameters
+    ----------
+    path : str, default=&#39;./Simulations&#39;
+        The path at which the csv will be saved.
+    file_name : str, default=&#39;&lt;current_timestamp&gt;_simulation.csv&#39;
+        The file name used to save in.
+    &#39;&#39;&#39;
+    if not os.path.exists(path):
+        print(&#39;Folder does not exist yet, creating it...&#39;)
+        os.makedirs(path)
+        
+    if file_name is None:
+        timestamp = datetime.now().strftime(&#39;%Y%m%d_%H%M%S&#39;)
+        file_name = timestamp + &#39;_simulation.csv&#39;
+
+    if not file_name.endswith(&#39;.csv&#39;):
+        file_name += &#39;.csv&#39;
+    
+    df = self.to_dataframe()
+
+    df.to_csv(path + &#39;/&#39; + file_name, index=False)</code></pre>
 </details>
 </dd>
 <dt id="src.mdp.SimulationHistory.save_simulation_video"><code class="name flex">
@@ -4409,13 +4663,35 @@ Parameters</p>
 
     # Video saving
     if not os.path.exists(&#39;./Sim Videos&#39;):
-        print(&#39;Folder does not exist yet, creating it...&#39;)
+        print(f&#39;Folder &#34;./Sim Videos&#34; does not exist yet, creating it...&#39;)
         os.makedirs(&#39;./Sim Videos&#39;)
 
     writervideo = animation.FFMpegWriter(fps=fps)
     ani.save(&#39;./Sim Videos/&#39; + video_title, writer=writervideo)
-    print(f&#39;Video saved at \&#39;Sim Videos/{video_title}\&#39;...&#39;)
+    print(f&#39;Video saved at \&#39;./Sim Videos/{video_title}\&#39;...&#39;)
     plt.close()</code></pre>
+</details>
+</dd>
+<dt id="src.mdp.SimulationHistory.to_dataframe"><code class="name flex">
+<span>def <span class="ident">to_dataframe</span></span>(<span>self) ‑> pandas.core.frame.DataFrame</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Returns a pandas dataframe representation of the simulation history.</p></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def to_dataframe(self) -&gt; pd.DataFrame:
+    &#39;&#39;&#39;
+    Returns a pandas dataframe representation of the simulation history.
+    &#39;&#39;&#39;
+    return pd.DataFrame({
+        &#39;States&#39;: self.states,
+        &#39;State_grid_x&#39;: [point[0] for point in self.grid_point_sequence],
+        &#39;State_grid_y&#39;: [point[1] for point in self.grid_point_sequence],
+        &#39;Actions&#39;: self.actions + [None],
+        &#39;Rewards&#39;: self.rewards + [None]
+    })</code></pre>
 </details>
 </dd>
 </dl>
@@ -5337,9 +5613,9 @@ If an initial value function is not provided, the value function will be initiat
         self._pruning_level = level
     
 
-    def save(self, path:str=&#39;./ValueFunctions&#39;, file_name:Union[str,None]=None) -&gt; None:
+    def save(self, path:str=&#39;./ValueFunctions&#39;, file_name:Union[str,None]=None, compress:bool=False) -&gt; None:
         &#39;&#39;&#39;
-        Function to save the save function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
+        Function to save the value function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
         If no file_name is provided, it be saved as &#39;&lt;current_timestamp&gt;_value_function.csv&#39;.
 
         Parameters
@@ -5348,6 +5624,8 @@ If an initial value function is not provided, the value function will be initiat
             The path at which the csv will be saved.
         file_name : str, default=&#39;&lt;current_timestamp&gt;_value_function.csv&#39;
             The file name used to save in.
+        compress : bool, default=False
+            Whether to compress the resulting file to a gzip file or not.
         &#39;&#39;&#39;
         if not os.path.exists(path):
             print(&#39;Folder does not exist yet, creating it...&#39;)
@@ -5357,6 +5635,16 @@ If an initial value function is not provided, the value function will be initiat
             timestamp = datetime.now().strftime(&#39;%Y%m%d_%H%M%S&#39;)
             file_name = timestamp + &#39;_value_function.csv&#39;
 
+        # Make sure that .csv is in the file name
+        if &#39;.csv&#39; not in file_name:
+            file_name += &#39;.csv&#39;
+
+        # Compression check
+        compression_type = None
+        if compress:
+            file_name += &#39;.gzip&#39;
+            compression_type = &#39;gzip&#39;
+
         vector_array = self.alpha_vector_array
         actions = self.actions
 
@@ -5365,11 +5653,11 @@ If an initial value function is not provided, the value function will be initiat
             vector_array = cp.asnumpy(vector_array)
             actions = cp.asnumpy(actions)
 
-        data = np.concatenate((np.array(self.actions)[:,None], self.alpha_vector_array), axis=1)
+        data = np.concatenate((np.array(actions)[:,None], vector_array), axis=1)
         columns = [&#39;action&#39;, *self.model.state_labels]
 
         df = pd.DataFrame(data)
-        df.to_csv(path + &#39;/&#39; + file_name, index=False, header=columns)
+        df.to_csv(path + &#39;/&#39; + file_name, index=False, header=columns, compression=compression_type)
 
 
     @classmethod
@@ -5389,7 +5677,11 @@ If an initial value function is not provided, the value function will be initiat
         loaded_value_function : ValueFunction
             The loaded value function.
         &#39;&#39;&#39;
-        df = pd.read_csv(file, header=0, index_col=False)
+        compression_type = None
+        if &#39;.gzip&#39; in file:
+            compression_type = &#39;gzip&#39;
+        
+        df = pd.read_csv(file, header=0, index_col=False, compression=compression_type)
         alpha_vectors = df.to_numpy()
 
         return ValueFunction(model, alpha_vectors[:,1:], alpha_vectors[:,0].astype(int))
@@ -5671,7 +5963,11 @@ def load_from_file(cls, file:str, model:Model) -&gt; &#39;Model&#39;:
     loaded_value_function : ValueFunction
         The loaded value function.
     &#39;&#39;&#39;
-    df = pd.read_csv(file, header=0, index_col=False)
+    compression_type = None
+    if &#39;.gzip&#39; in file:
+        compression_type = &#39;gzip&#39;
+    
+    df = pd.read_csv(file, header=0, index_col=False, compression=compression_type)
     alpha_vectors = df.to_numpy()
 
     return ValueFunction(model, alpha_vectors[:,1:], alpha_vectors[:,0].astype(int))</code></pre>
@@ -5972,10 +6268,10 @@ The pruning is as thorough as the level:
 </details>
 </dd>
 <dt id="src.mdp.ValueFunction.save"><code class="name flex">
-<span>def <span class="ident">save</span></span>(<span>self, path: str = './ValueFunctions', file_name: Optional[str] = None) ‑> None</span>
+<span>def <span class="ident">save</span></span>(<span>self, path: str = './ValueFunctions', file_name: Optional[str] = None, compress: bool = False) ‑> None</span>
 </code></dt>
 <dd>
-<div class="desc"><p>Function to save the save function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
+<div class="desc"><p>Function to save the value function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
 If no file_name is provided, it be saved as '<current_timestamp>_value_function.csv'.</p>
 <h2 id="parameters">Parameters</h2>
 <dl>
@@ -5983,14 +6279,16 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
 <dd>The path at which the csv will be saved.</dd>
 <dt><strong><code>file_name</code></strong> :&ensp;<code>str</code>, default=<code>'&lt;current_timestamp&gt;_value_function.csv'</code></dt>
 <dd>The file name used to save in.</dd>
+<dt><strong><code>compress</code></strong> :&ensp;<code>bool</code>, default=<code>False</code></dt>
+<dd>Whether to compress the resulting file to a gzip file or not.</dd>
 </dl></div>
 <details class="source">
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def save(self, path:str=&#39;./ValueFunctions&#39;, file_name:Union[str,None]=None) -&gt; None:
+<pre><code class="python">def save(self, path:str=&#39;./ValueFunctions&#39;, file_name:Union[str,None]=None, compress:bool=False) -&gt; None:
     &#39;&#39;&#39;
-    Function to save the save function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
+    Function to save the value function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
     If no file_name is provided, it be saved as &#39;&lt;current_timestamp&gt;_value_function.csv&#39;.
 
     Parameters
@@ -5999,6 +6297,8 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
         The path at which the csv will be saved.
     file_name : str, default=&#39;&lt;current_timestamp&gt;_value_function.csv&#39;
         The file name used to save in.
+    compress : bool, default=False
+        Whether to compress the resulting file to a gzip file or not.
     &#39;&#39;&#39;
     if not os.path.exists(path):
         print(&#39;Folder does not exist yet, creating it...&#39;)
@@ -6008,6 +6308,16 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
         timestamp = datetime.now().strftime(&#39;%Y%m%d_%H%M%S&#39;)
         file_name = timestamp + &#39;_value_function.csv&#39;
 
+    # Make sure that .csv is in the file name
+    if &#39;.csv&#39; not in file_name:
+        file_name += &#39;.csv&#39;
+
+    # Compression check
+    compression_type = None
+    if compress:
+        file_name += &#39;.gzip&#39;
+        compression_type = &#39;gzip&#39;
+
     vector_array = self.alpha_vector_array
     actions = self.actions
 
@@ -6016,11 +6326,11 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
         vector_array = cp.asnumpy(vector_array)
         actions = cp.asnumpy(actions)
 
-    data = np.concatenate((np.array(self.actions)[:,None], self.alpha_vector_array), axis=1)
+    data = np.concatenate((np.array(actions)[:,None], vector_array), axis=1)
     columns = [&#39;action&#39;, *self.model.state_labels]
 
     df = pd.DataFrame(data)
-    df.to_csv(path + &#39;/&#39; + file_name, index=False, header=columns)</code></pre>
+    df.to_csv(path + &#39;/&#39; + file_name, index=False, header=columns, compression=compression_type)</code></pre>
 </details>
 </dd>
 <dt id="src.mdp.ValueFunction.to_cpu"><code class="name flex">
@@ -6142,8 +6452,9 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
 <h4><code><a title="src.mdp.Model" href="#src.mdp.Model">Model</a></code></h4>
 <ul class="two-column">
 <li><code><a title="src.mdp.Model.cpu_model" href="#src.mdp.Model.cpu_model">cpu_model</a></code></li>
+<li><code><a title="src.mdp.Model.get_coords" href="#src.mdp.Model.get_coords">get_coords</a></code></li>
 <li><code><a title="src.mdp.Model.gpu_model" href="#src.mdp.Model.gpu_model">gpu_model</a></code></li>
-<li><code><a title="src.mdp.Model.load_from_json" href="#src.mdp.Model.load_from_json">load_from_json</a></code></li>
+<li><code><a title="src.mdp.Model.load_from_file" href="#src.mdp.Model.load_from_file">load_from_file</a></code></li>
 <li><code><a title="src.mdp.Model.reward" href="#src.mdp.Model.reward">reward</a></code></li>
 <li><code><a title="src.mdp.Model.save" href="#src.mdp.Model.save">save</a></code></li>
 <li><code><a title="src.mdp.Model.transition" href="#src.mdp.Model.transition">transition</a></code></li>
@@ -6167,8 +6478,11 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
 <h4><code><a title="src.mdp.SimulationHistory" href="#src.mdp.SimulationHistory">SimulationHistory</a></code></h4>
 <ul class="">
 <li><code><a title="src.mdp.SimulationHistory.add" href="#src.mdp.SimulationHistory.add">add</a></code></li>
+<li><code><a title="src.mdp.SimulationHistory.grid_point_sequence" href="#src.mdp.SimulationHistory.grid_point_sequence">grid_point_sequence</a></code></li>
 <li><code><a title="src.mdp.SimulationHistory.plot_simulation_steps" href="#src.mdp.SimulationHistory.plot_simulation_steps">plot_simulation_steps</a></code></li>
+<li><code><a title="src.mdp.SimulationHistory.save" href="#src.mdp.SimulationHistory.save">save</a></code></li>
 <li><code><a title="src.mdp.SimulationHistory.save_simulation_video" href="#src.mdp.SimulationHistory.save_simulation_video">save_simulation_video</a></code></li>
+<li><code><a title="src.mdp.SimulationHistory.to_dataframe" href="#src.mdp.SimulationHistory.to_dataframe">to_dataframe</a></code></li>
 </ul>
 </li>
 <li>
