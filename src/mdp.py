@@ -906,6 +906,28 @@ class ValueFunction:
         self._pruning_level = level
     
 
+    def __save_common(self, path) -> pd.DataFrame:
+        '''
+        Function to create path and summarize items in pandas df.
+        '''
+        if not os.path.exists(path):
+            print('Folder does not exist yet, creating it...')
+            os.makedirs(path)
+        
+        vector_array = self.alpha_vector_array
+        actions = self.actions
+
+        # Convert arrays to numpy if on gpu
+        if self.is_on_gpu:
+            vector_array = cp.asnumpy(vector_array)
+            actions = cp.asnumpy(actions)
+
+        data = np.concatenate((np.array(actions)[:,None], vector_array), axis=1)
+        columns = ['action', *self.model.state_labels]
+
+        return pd.DataFrame(data, columns=columns)
+
+
     def save(self, path:str='./ValueFunctions', file_name:Union[str,None]=None, compress:bool=False) -> None:
         '''
         Function to save the value function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
@@ -920,10 +942,8 @@ class ValueFunction:
         compress : bool, default=False
             Whether to compress the resulting file to a gzip file or not.
         '''
-        if not os.path.exists(path):
-            print('Folder does not exist yet, creating it...')
-            os.makedirs(path)
-            
+        df = self.__save_common(path)
+
         if file_name is None:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             file_name = timestamp + '_value_function.csv'
@@ -938,23 +958,36 @@ class ValueFunction:
             file_name += '.gzip'
             compression_type = 'gzip'
 
-        vector_array = self.alpha_vector_array
-        actions = self.actions
+        df.to_csv(path + '/' + file_name, index=False, compression=compression_type)
 
-        # Convert arrays to numpy if on gpu
-        if self.is_on_gpu:
-            vector_array = cp.asnumpy(vector_array)
-            actions = cp.asnumpy(actions)
 
-        data = np.concatenate((np.array(actions)[:,None], vector_array), axis=1)
-        columns = ['action', *self.model.state_labels]
+    def save_parquet(self, path:str='./ValueFunctions', file_name:Union[str,None]=None) -> None:
+        '''
+        Function to save the value function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
+        If no file_name is provided, it be saved as '<current_timestamp>_value_function.parquet'.
 
-        df = pd.DataFrame(data)
-        df.to_csv(path + '/' + file_name, index=False, header=columns, compression=compression_type)
+        Parameters
+        ----------
+        path : str, default='./ValueFunctions'
+            The path at which the parquet will be saved.
+        file_name : str, default='<current_timestamp>_value_function.parquet'
+            The file name used to save in.
+        '''
+        df = self.__save_common(path)
+
+        if file_name is None:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            file_name = timestamp + '_value_function.parquet'
+
+        # Make sure that .parquet is in the file name
+        if '.parquet' not in file_name:
+            file_name += '.parquet'
+
+        df.to_parquet(path + '/' + file_name, index=False)
 
 
     @classmethod
-    def load_from_file(cls, file:str, model:Model) -> 'Model':
+    def load_from_file(cls, file:str, model:Model) -> 'ValueFunction':
         '''
         Function to load the value function from a csv file.
 
@@ -977,7 +1010,30 @@ class ValueFunction:
         df = pd.read_csv(file, header=0, index_col=False, compression=compression_type)
         alpha_vectors = df.to_numpy()
 
-        return ValueFunction(model, alpha_vectors[:,1:], alpha_vectors[:,0].astype(int))
+        return ValueFunction(model, alpha_vectors=alpha_vectors[:,1:], action_list=alpha_vectors[:,0].astype(int))
+
+
+    @classmethod
+    def load_from_parquet(cls, file:str, model:Model) -> 'ValueFunction':
+        '''
+        Function to load the value function from a parquet file.
+
+        Parameters
+        ----------
+        file : str
+            The path and file_name of the value function to be loaded.
+        model : mdp.Model
+            The model the value function is linked to.
+            
+        Returns
+        -------
+        loaded_value_function : ValueFunction
+            The loaded value function.
+        '''
+        df = pd.read_parquet(file)
+        alpha_vectors = df.to_numpy()
+
+        return ValueFunction(model, alpha_vectors=alpha_vectors[:,1:], action_list=alpha_vectors[:,0].astype(int))
 
 
     def plot(self,
@@ -1205,7 +1261,12 @@ class ValueFunction:
 
         ax1.set_title('Value function')
         ax1_plot = ax1.imshow(value_table)
-        plt.colorbar(ax1_plot, ax=ax1)
+
+        if dimensions[0] >= dimensions[1]: # If higher than wide 
+            plt.colorbar(ax1_plot, ax=ax1)
+        else:
+            plt.colorbar(ax1_plot, ax=ax1, location='bottom', orientation='horizontal')
+        
         ax1.set_xticks(x_ticks)
         ax1.set_yticks(y_ticks)
 
