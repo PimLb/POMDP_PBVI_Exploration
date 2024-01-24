@@ -2544,6 +2544,9 @@ class SimulationHistory(MDP_SimulationHistory):
         ax.set_xticks(x_ticks)
         ax.set_yticks(y_ticks)
 
+        ax.set_xlim(0, dimensions[1])
+        ax.set_ylim(dimensions[0], 0)
+
 
 class Simulation(MDP_Simulation):
     '''

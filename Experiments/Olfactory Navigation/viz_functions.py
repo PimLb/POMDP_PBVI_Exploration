@@ -16,7 +16,7 @@ except:
 
 
 
-def plot_steps(sim_hist:SimulationHistory, ax=None) -> None:
+def plot_steps(sim_hist:SimulationHistory, until_step:int=-1, ax=None) -> None:
     '''
     Plots a special version of the simulation plot for olfactory navigation
     
@@ -30,6 +30,9 @@ def plot_steps(sim_hist:SimulationHistory, ax=None) -> None:
     # Generate ax is not provided
     if ax is None:
         fig, ax = plt.subplots(figsize=(18,3))
+
+    # Initial clearing
+    ax.clear()
 
     # Get cpu model
     model = sim_hist.model.cpu_model
@@ -47,13 +50,17 @@ def plot_steps(sim_hist:SimulationHistory, ax=None) -> None:
     goal_coord = np.array([np.argwhere(model.state_grid == g)[0].tolist() for g in model.end_states])
     ax.scatter(goal_coord[:,1], goal_coord[:,0], c='red', label='Goal')
 
+    # Until step
+    if until_step < 0:
+        until_step = len(seq) - 1
+
     # Path
     seq = np.array(sim_hist.grid_point_sequence)
-    ax.plot(seq[:,1], seq[:,0], zorder=-1, c='black', label='Path')
+    ax.plot(seq[:until_step+1,1], seq[:until_step+1,0], zorder=-1, c='black', label='Path')
 
     # Something sensed
     something_obs_id = model.observation_labels.index('something')
-    obs_ts = np.where(np.array(sim_hist.observations) == something_obs_id)
+    obs_ts = np.where(np.array(sim_hist.observations[:until_step]) == something_obs_id)
     points_obs = seq[obs_ts[0],:]
     ax.scatter(points_obs[:,1], points_obs[:,0], zorder=1, label='Something observed')
 
@@ -62,7 +69,7 @@ def plot_steps(sim_hist:SimulationHistory, ax=None) -> None:
     for i, al in enumerate(model.action_labels):
         if 'air' in al.lower():
             sniff_air_action_id = i
-    sniff_in_air = np.where(np.array(sim_hist.actions) == sniff_air_action_id)
+    sniff_in_air = np.where(np.array(sim_hist.actions[:until_step]) == sniff_air_action_id)
     points_sniff = seq[sniff_in_air[0],:]
     if len(points_sniff) > 0:
         ax.scatter(points_sniff[:,1], points_sniff[:,0], zorder=2, marker='x', label='Sniff in the air')
