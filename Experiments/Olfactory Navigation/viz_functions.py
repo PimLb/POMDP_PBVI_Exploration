@@ -51,11 +51,11 @@ def plot_steps(sim_hist:SimulationHistory, until_step:int=-1, ax=None) -> None:
     ax.scatter(goal_coord[:,1], goal_coord[:,0], c='red', label='Goal')
 
     # Until step
+    seq = np.array(sim_hist.grid_point_sequence)
     if until_step < 0:
         until_step = len(seq) - 1
 
     # Path
-    seq = np.array(sim_hist.grid_point_sequence)
     ax.plot(seq[:until_step+1,1], seq[:until_step+1,0], zorder=-1, c='black', label='Path')
 
     # Something sensed
