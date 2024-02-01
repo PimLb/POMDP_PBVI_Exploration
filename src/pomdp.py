@@ -2610,6 +2610,69 @@ class Simulation(MDP_Simulation):
         return (r, o)
 
 
+class SimulationSet:
+    def __init__(self, model:Model):
+        self.model = model
+        
+        # Simulation variables
+        self.agent_states = [-1]
+        self.is_done = [True] # Need to run initialization first
+
+
+    def initialize_simulations(self, n:int=1, start_state:Union[list[int],int,None]=None) -> np.ndarray:
+        # GPU support
+        xp = np if not self.model.is_on_gpu else cp
+
+        start_state_array = xp.empty(n)
+        if isinstance(start_state, int):
+            start_state_array = start_state
+        elif isinstance(start_state, list):
+            repeated_list = xp.repeat(xp.array(start_state), int(np.ceil(n / len(start_state))))
+            start_state_array = xp.resize(repeated_list, n)
+        else:
+            start_state_array = xp.random.choice(self.model.states, size=n, p=self.model.start_probabilities)
+
+        self.n = n
+        self.agent_states = start_state_array
+        self.simulations = xp.arange(n)
+        self.is_done = xp.zeros(n, dtype=bool)
+        return self.agent_states
+        
+
+    def run_actions(self, actions:np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        # GPU support
+        xp = np if not self.model.is_on_gpu else cp
+        
+        # Get each reachable next states for each action
+        reachable_state_per_actions = self.model.reachable_states[:, actions, :]
+
+        # Gathering new states based on the transition function and the chosen actions
+        next_state_potentials = reachable_state_per_actions[self.agent_states, self.simulations]
+        if self.model.reachable_state_count == 1:
+            next_states = next_state_potentials[:,0]
+        else:
+            potential_probabilities = self.model.reachable_probabilities[self.agent_states[:,None], actions[:,None]][:,0,:]
+            chosen_indices = xp.apply_along_axis(lambda x: xp.random.choice(len(x), size=1, p=x), axis=1, arr=potential_probabilities)
+            next_states = next_state_potentials[chosen_indices][:,0,0]
+
+        # Making observations based on the states landed in and the action that was taken
+        observation_probabilities = self.model.observation_table[next_states[:,None], actions[:,None]][:,0,:]
+        observations = xp.sum(xp.random.random(self.n)[:,None] > xp.cumsum(observation_probabilities[:,:-1], axis=1), axis=1)
+
+        # Rewards computation
+        step_rewards = xp.array([self.model.immediate_reward_function(int(s), int(a), int(s_p), int(o)) for s,a,s_p,o in zip(self.agent_states, actions, next_states, observations)])
+        rewards = xp.where(~self.is_done, step_rewards, 0)
+
+        # Checking for done condition
+        are_done = xp.isin(next_states, xp.array(self.model.end_states))
+        self.is_done |= are_done
+
+        # Update states
+        self.agent_states = next_states
+
+        return rewards, observations
+
+
 class Agent:
     '''
     The class of an Agent running on a POMDP model.
@@ -2833,6 +2896,7 @@ class Agent:
 
     def run_n_simulations_parallel(self,
                                    n:int=1000,
+                                   simulator_set:Union[SimulationSet,None]=None,
                                    max_steps:int=1000,
                                    start_state:Union[list[int],int,None]=None,
                                    reward_discount:float=0.99,
@@ -2849,21 +2913,16 @@ class Agent:
         # Genetion of an array of n beliefs
         initial_beliefs = xp.repeat(Belief(model).values[None,:], n, axis=0)
 
-        # Generating n initial positions
-        start_state_array = xp.empty(n)
-        if isinstance(start_state, int):
-            start_state_array = start_state
-        elif isinstance(start_state, list):
-            repeated_list = xp.repeat(xp.array(start_state), int(np.ceil(n / len(start_state))))
-            start_state_array = xp.resize(repeated_list, n)
-        else:
-            start_state_array = xp.random.choice(model.states, size=n, p=model.start_probabilities)
+        if simulator_set is None:
+            simulator_set = SimulationSet(model)
+
+        # Simulations initialization
+        start_state_array = simulator_set.initialize_simulations(n, start_state)
         
         # Belief and state arrays
         beliefs = initial_beliefs
         new_beliefs = None
         states = start_state_array
-        next_states = None
 
         # Tracking what simulations are done
         sim_is_done = xp.zeros(n, dtype=bool)
@@ -2881,8 +2940,8 @@ class Agent:
 
         # Results
         discount = reward_discount
-        rewards = []
-        discounted_rewards = []
+        rewards_history = []
+        discounted_rewards_history = []
 
         # History items
         states_history = [states]
@@ -2902,18 +2961,8 @@ class Agent:
             # Get each reachable next states for each action
             reachable_state_per_actions = model.reachable_states[:, best_actions, :]
 
-            # Gathering new states based on the transition function and the chosen actions
-            next_state_potentials = reachable_state_per_actions[states, simulations]
-            if model.reachable_state_count == 1:
-                next_states = next_state_potentials[:,0]
-            else:
-                potential_probabilities = model.reachable_probabilities[states[:,None], best_actions[:,None]][:,0,:]
-                chosen_indices = xp.apply_along_axis(lambda x: xp.random.choice(len(x), size=1, p=x), axis=1, arr=potential_probabilities)
-                next_states = next_state_potentials[chosen_indices][:,0,0]
-
-            # Making observations based on the states landed in and the action that was taken
-            observation_probabilities = model.observation_table[next_states[:,None], best_actions[:,None]][:,0,:]
-            observations = xp.sum(xp.random.random(n)[:,None] > xp.cumsum(observation_probabilities[:,:-1], axis=1), axis=1)
+            # Run action in simulation
+            rewards, observations = simulator_set.run_actions(best_actions)
 
             # Belief set update
             reachable_probabilities = (model.reachable_transitional_observation_table[:,best_actions,observations,:] * beliefs.T[:,:,None])
@@ -2923,26 +2972,23 @@ class Agent:
             new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
 
             # Rewards computation
-            step_rewards = xp.array([model.immediate_reward_function(int(s), int(a), int(s_p), int(o)) for s,a,s_p,o in zip(states, best_actions, next_states, observations)])
-            rewards.append(xp.where(~sim_is_done, step_rewards, 0))
-            discounted_rewards.append(xp.where(~sim_is_done, step_rewards * discount, 0))
+            rewards_history.append(rewards)
+            discounted_rewards_history.append(rewards * discount)
 
             # Checking for done condition
-            are_done = xp.isin(next_states, xp.array(model.end_states))
-            done_at_step[sim_is_done ^ are_done] = i+1
-            sim_is_done |= are_done
+            done_at_step[sim_is_done ^ simulator_set.is_done] = i+1
+            sim_is_done |= simulator_set.is_done
 
             # Update iterator postfix
             if print_progress:
                 iterator.set_postfix({'done ': f' {xp.sum(sim_is_done)} of {n}'})
 
             # Replacing old with new
-            states = next_states
             beliefs = new_beliefs
             discount *= reward_discount
 
             # History tracking
-            states_history.append(states)
+            states_history.append(simulator_set.agent_states)
             actions_history.append(best_actions)
             observations_history.append(observations)
 
@@ -2957,8 +3003,8 @@ class Agent:
         states_history = xp.array(states_history).T
         actions_history = xp.array(actions_history).T
         observations_history = xp.array(observations_history).T
-        rewards = xp.array(rewards).T
-        discounted_rewards = xp.array(discounted_rewards).T
+        rewards_history = xp.array(rewards_history).T
+        discounted_rewards_history = xp.array(discounted_rewards_history).T
 
         done_at_step_sum = 0
 
@@ -2972,7 +3018,7 @@ class Agent:
             sim_hist.states = states_history[i,:last_step+1].tolist()
             sim_hist.actions = actions_history[i,:last_step].tolist()
             sim_hist.observations = observations_history[i,:last_step].tolist()
-            sim_hist.rewards = rewards[i,:last_step].tolist()
+            sim_hist.rewards = rewards_history[i,:last_step].tolist()
 
             # Adding the sim history to the list of histories
             sim_hist_list.append(sim_hist)
@@ -2984,10 +3030,10 @@ class Agent:
             print(f'All {n} simulations done in {(sim_end_ts - sim_start_ts).total_seconds():.3f}s:')
             print(f'\t- Simulations reached goal: {done_sim_count}/{n} ({n-done_sim_count} failures)')
             print(f'\t- Average step count: {(done_at_step_sum / n)}')
-            print(f'\t- Average total rewards: {(xp.sum(rewards) / n)}')
-            print(f'\t- Average discounted rewards (ADR): {(xp.sum(discounted_rewards) / n)}')
+            print(f'\t- Average total rewards: {(xp.sum(rewards_history) / n)}')
+            print(f'\t- Average discounted rewards (ADR): {(xp.sum(discounted_rewards_history) / n)}')
 
-        return RewardSet(xp.sum(rewards, axis=1).tolist()), sim_hist_list
+        return RewardSet(xp.sum(rewards_history, axis=1).tolist()), sim_hist_list
     
 
 def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
