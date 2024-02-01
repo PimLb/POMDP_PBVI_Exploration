@@ -8,6 +8,7 @@ import numpy as np
 import cupy as cp
 import json
 import os
+import cv2
 
 from cupy.cuda import runtime as cuda_runtime
 from csv import writer as csv_writer
@@ -368,6 +369,212 @@ def run_grid_test(model_file:str,
 
     df = pd.DataFrame(np.array(all_averages), columns=[f'Sim-{i}' for i in range(len(res_df))])
     df.to_csv(folder + 'grid_extra_steps.csv', index=False)
+
+    print('--------------------------------------------------------------------------------')
+    print(f'DONE')
+    print('--------------------------------------------------------------------------------')
+
+
+def get_stats_data(dx_mod:float=1.0, dy_mod:float=1.0) -> tuple[np.ndarray, np.ndarray]:
+    # The full statistics
+    nose_data = pd.read_csv('./Data/statistics_abs_nose_3e6.dat', sep=' ', skiprows=[0], names=list(range(320)), index_col=False).to_numpy().T
+    ground_data = pd.read_csv('./Data/statistics_abs_ground_3e6.dat', sep=' ', skiprows=[0], names=list(range(320)), index_col=False).to_numpy().T
+    
+    # General variables
+    points_per_unit = 30
+    env_x = [-2,10]
+    env_y = [-1,1]
+
+    width = ((env_x[1] - env_x[0]) * points_per_unit) + 1
+    height = ((env_y[1] - env_y[0]) * points_per_unit) + 1
+
+    env_shape = [height, width]
+
+    # Computing the width and height
+    dx = int((4 * points_per_unit) * dx_mod)
+    dx += 1 if dx % 2 == 0 else 0
+
+    dy = int((points_per_unit) * dy_mod)
+    dy += 1 if dy % 2 == 0 else 0
+
+    top_y = int(points_per_unit - ((dy-1) / 2))
+
+    nose_data = cv2.resize(nose_data, dsize=(dx, dy))
+    ground_data = cv2.resize(ground_data, dsize=(dx, dy))
+
+    # Generation of the final arrays
+    nose_data_padded = np.zeros(env_shape)
+    nose_data_padded[top_y:top_y+dy, 60:60+dx] = nose_data
+
+    ground_data_padded = np.zeros(env_shape)
+    ground_data_padded[top_y:top_y+dy, 60:60+dx] = ground_data
+
+    nose_data = nose_data_padded
+    ground_data = ground_data_padded
+
+    return nose_data, ground_data
+
+
+class AltSimulationSet(SimulationSet):
+    # An alternative to the SimulationSet to have an alternate observation probabilities
+    def __init__(self, model:Model, alt_air:np.ndarray, alt_ground:np.ndarray):
+        self.alt_air = alt_air.ravel()
+        self.alt_ground = alt_ground.ravel()
+        super().__init__(model)
+
+    
+    def run_actions(self, actions:np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        rewards,_ =  super().run_actions(actions)
+
+        # GPU support
+        xp = np if not self.model.is_on_gpu else cp
+
+        # Generate observations
+        obs_probs = xp.where(actions == 5, self.alt_air[self.agent_states], self.alt_ground[self.agent_states])
+        observations = (xp.random.random(self.n) < obs_probs).astype(int)
+
+        # Check if at goal
+        observations = xp.where(xp.isin(self.agent_states, xp.array(self.model.end_states)), 2, observations)
+
+        return rewards, observations
+
+
+def grid_test_alt_model(model_file:str,
+                        vf_file:str,
+                        dx_alt:float,
+                        dy_alt:float) -> pd.DataFrame:
+    
+    # Retreiving model and vf from storage
+    log(f'Loading Value function and model')
+    model = Model.load_from_file(model_file)
+    vf = ValueFunction.load_from_file(vf_file, model)
+
+    #Retrieving observations arrays
+    log(f'Loading olfactory data')
+    nose_data, ground_data = get_stats_data(dx_alt,dy_alt)
+
+    # Sending arrays to gpu
+    model = model.gpu_model
+    value_function = vf.to_gpu()
+    nose_data = cp.array(nose_data)
+    ground_data = cp.array(ground_data)
+
+    # Getting grid zone
+    zone = None
+    cell_size = 10
+    points_per_cell = 10
+
+    min_x = None
+    max_x = None
+    min_y = None
+    max_y = None
+
+    if zone is None:
+        start_coords = np.array(model.cpu_model.get_coords(model.cpu_model.states[model.cpu_model.start_probabilities > 0]))
+        (min_x, max_x) = (np.min(start_coords[:,1]), np.max(start_coords[:,1]))
+        (min_y, max_y) = (np.min(start_coords[:,0]), np.max(start_coords[:,0]))
+    else:
+        ((min_x,max_x),(min_y,max_y)) = zone
+
+    # Generation of points
+    random_points = []
+    cell_centers_x = []
+    cell_centers_y = []
+
+    for i in range(min_y, max_y, cell_size):
+        for j in range(min_x, max_x, cell_size):
+            cell_centers_x.append((j + min([max_x, j+cell_size])) / 2)
+            cell_centers_y.append((i + min([max_y, i+cell_size])) / 2)
+
+            for _ in range(points_per_cell):
+                rand_x = np.random.randint(j, min([max_x, j+cell_size]))
+                rand_y = np.random.randint(i, min([max_y, i+cell_size]))
+
+                random_points.append([rand_x, rand_y])
+
+    rand_points_array = np.array(random_points)
+
+    points_df = pd.DataFrame(rand_points_array, columns=['x','y'])
+
+    # # Cells
+    points_df['cell'] = np.repeat(np.arange(len(points_df)/points_per_cell, dtype=int), points_per_cell)
+    points_df['cell_x'] = np.repeat(np.array(cell_centers_x), points_per_cell)
+    points_df['cell_y'] = np.repeat(np.array(cell_centers_y), points_per_cell)
+
+    # Traj and ids
+    goal_state_coords = model.get_coords(model.end_states[0])
+    points_df['opt_traj'] = np.abs(goal_state_coords[1] - rand_points_array[:,0]) + np.abs(goal_state_coords[0] - rand_points_array[:,1])
+    points_df['point_id'] = (model.state_grid.shape[1] * rand_points_array[:,1]) + rand_points_array[:,0]
+
+    # Make agent and simulte
+    a = Agent(model, value_function)
+
+    _, all_sim_hist = a.run_n_simulations_parallel(len(rand_points_array),
+                                                    simulator_set=AltSimulationSet(model, alt_air=nose_data, alt_ground=ground_data),
+                                                    start_state=points_df['point_id'].to_list(),
+                                                    print_progress=False)
+
+    # Adding sim results
+    points_df['steps_taken'] = [len(sim) for sim in all_sim_hist]
+    points_df['extra_steps'] = points_df['steps_taken'] - points_df['opt_traj']
+
+    # Return results
+    return points_df
+
+
+def run_grid_test_alt(folder:str):
+    
+    changes = [i/10 for i in range(2,19)]
+
+    print('Running Grid test for alternate observation probabilities:')
+    print(f'\t- model: "Alt_Wrap_GroundAir"')
+    print(f'\t- value function: "./Test_GroundAir_FSVI_300it_100exp_099g_e6eps_20run_20231121_165329/ValueFunctions/run-3-VF.gzip"')
+    print(f'\t- Amounts of tests: {str(len(changes)**2)}')
+    print()
+
+    log('Creation of GridSimulations folder is doesnt exist yet')
+    if not os.path.isdir(folder + '/GridSimulations'):
+        os.mkdir(folder + '/GridSimulations')
+
+    change_sets = []
+    for c_x in changes:
+        for c_y in changes:
+            change_sets.append([c_x, c_y])
+
+    for i, c_set in enumerate(change_sets):
+        c_x, c_y = c_set
+        print('--------------------------------------------------------------------------------')
+        print(f'Run {i+1} of {len(change_sets)} (Run-{i})')
+        print('--------------------------------------------------------------------------------')
+
+        # Run grid test
+        log('Starting simulations')
+        res_df = grid_test_alt_model(model_file='./Models/Alt_Wrap_GroundAir.pck',
+                                     vf_file='./Test_GroundAir_FSVI_300it_100exp_099g_e6eps_20run_20231121_165329/ValueFunctions/run-3-VF.gzip',
+                                     dx_alt=c_x,
+                                     dy_alt=c_y)
+
+        # Save results
+        log('Simulations done, saving results')
+        res_df.to_csv(folder + f'/GridSimulations/Grid-run-{i}-{len(res_df)}sims.csv', index=False)
+
+        # Refresh memory
+        cp._default_memory_pool.free_all_blocks()
+
+        # Print average extra steps
+        print(f'\nAverage Extra steps count: {res_df["extra_steps"].mean()}')
+        print('\n\n')
+    
+    # Summarize extra steps in grid_extra_steps.csv file
+    print('--------------------------------------------------------------------------------')
+    log('Summarizing extra steps')
+    all_averages = []
+    for i in range(len(change_sets)):
+        df = pd.read_csv(folder + f'/GridSimulations/Grid-run-{i}-{len(res_df)}sims.csv')
+        all_averages.append(df['extra_steps'].tolist())
+
+    df = pd.DataFrame(np.array(all_averages), columns=[f'Sim-{i}' for i in range(len(res_df))])
+    df.to_csv(folder + '/grid_extra_steps.csv', index=False)
 
     print('--------------------------------------------------------------------------------')
     print(f'DONE')
