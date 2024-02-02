@@ -2,14 +2,16 @@ from datetime import datetime
 from inspect import signature
 from matplotlib import animation, colors, patches
 from matplotlib import pyplot as plt
-from tqdm.auto import trange
+from tqdm.auto import tqdm, trange
 from typing import Union, Tuple
 
 import copy
+import json
 import os
 import pandas as pd
 import pickle
 import random
+import inspect
 
 import numpy as np
 gpu_support = False
@@ -137,6 +139,26 @@ class Model:
     cpu_model : mdp.Model
         An equivalent model with the np.ndarray objects on CPU. (If already on CPU, returns self)
     '''
+    def __new__(cls) -> 'Model':
+        obj = object.__new__(cls)
+
+        obj._alt_model = None
+        obj.is_on_gpu = False
+        obj.state_grid = None
+        obj.reachable_states = None
+        obj.transition_table = None
+        obj.transition_function = None
+        obj.transition_table = None
+        obj.transition_function = None
+        obj.immediate_reward_table = None
+        obj.immediate_reward_function = None
+        obj._min_reward = None
+        obj._max_reward = None
+        obj.expected_rewards_table = None
+
+        return obj
+
+
     def __init__(self,
                  states:Union[int, list[str], list[list[str]]],
                  actions:Union[int, list],
@@ -151,13 +173,13 @@ class Model:
                  ):
         
         # Empty variable
-        self._alt_model = None
-        self.is_on_gpu = False
+        # self._alt_model = None
+        # self.is_on_gpu = False
         
         log('Instantiation of MDP Model:')
         
         # ------------------------- States -------------------------
-        self.state_grid = None
+        # self.state_grid = None
         if isinstance(states, int): # State count
             self.state_labels = [f's_{i}' for i in range(states)]
 
@@ -192,7 +214,7 @@ class Model:
         log(f'- {self.action_count} actions')
 
         # ------------------------- Reachable states provided -------------------------
-        self.reachable_states = None
+        # self.reachable_states = None
         if reachable_states is not None:
             self.reachable_states = np.array(reachable_states)
             assert self.reachable_states.shape[:2] == (self.state_count, self.action_count), f"Reachable states provided is not of the expected shape (received {self.reachable_states.shape}, expected ({self.state_count}, {self.action_count}, :))"
@@ -204,8 +226,8 @@ class Model:
         log('- Starting generation of transitions table')
         start_ts = datetime.now()
 
-        self.transition_table = None
-        self.transition_function = None
+        # self.transition_table = None
+        # self.transition_function = None
         if transitions is None:
             if reachable_states is None:
                 # If no transitiong matrix and no reachable states given, generate random one
@@ -353,8 +375,8 @@ class Model:
         log(f'    > Done in {duration:.3f}s')
 
         # ------------------------- Rewards -------------------------
-        self.immediate_reward_table = None
-        self.immediate_reward_function = None
+        # self.immediate_reward_table = None
+        # self.immediate_reward_function = None
         if rewards == -1: # If -1 is set, it means the rewards are defined in the superclass POMDP
             pass
         elif rewards is None:
@@ -378,11 +400,11 @@ class Model:
             assert r_shape == exp_shape, f"Rewards table doesnt have the right shape, it should be SxAxS (expected: {exp_shape}, received {r_shape})"
 
         # ------------------------- Min and max rewards -------------------------
-        self._min_reward = None
-        self._max_reward = None
+        # self._min_reward = None
+        # self._max_reward = None
 
         # ------------------------- Expected rewards -------------------------
-        self.expected_rewards_table = None
+        # self.expected_rewards_table = None
         if rewards != -1:
             log('- Starting generation of expected rewards table')
             start_ts = datetime.now()
@@ -483,6 +505,83 @@ class Model:
         item_coords = [np.argwhere(self.cpu_model.state_grid == s)[0] for s in item_list]
 
         return item_coords[0] if isinstance(item, int) else item_coords
+
+
+    def save_new(self, name:str, path:str='./Models', force:bool=False) -> None:
+        if self.is_on_gpu:
+            self.cpu_model.save_new(name, path)
+            return
+
+        if not os.path.exists(path + '/' + name):
+            print('Folder does not exist yet, creating it...')
+            os.makedirs(path + '/' + name)
+        else:
+            if not force:
+                raise Exception(f"A model of this name already exists at this path ({path + '/' + name}), if you are sure, set 'force' to True")
+            
+            print('Erasing current contents of the directory')
+            for f in os.listdir(path + '/' + name):
+                os.remove(path + '/' + name + '/' + f)
+
+        meta_dict = {}
+
+        for k in tqdm(self.__dict__):
+            attr = self.__getattribute__(k)
+            
+            # Label lists should also be saved
+            if '_labels' in k:
+                attr = np.array(attr)
+                k += '-l'
+            
+            # Save each numpy array
+            if isinstance(attr, np.ndarray):
+                shape_str = '_'.join(map(str, attr.shape))
+                pd.DataFrame(attr.reshape(attr.shape[0], -1)).to_parquet(path + '/' + name + f'/_array-{k}-{shape_str}.parquet', index=False)
+
+            elif callable(attr):
+                with open(path + '/' + name + f'/_function-{k}.py', 'w+') as fnct_file:
+                    fnct_file.write(inspect.getsource(attr).replace(attr.__name__ + '(', '_temp_fnct('))
+
+            elif attr is not None and k != '_alt_model':
+                meta_dict[k] = attr
+
+        # Metadata
+        with open(path + '/' + name + '/metadata', 'w+') as meta_file:
+            json.dump(meta_dict, meta_file, indent=4)
+
+
+    @classmethod
+    def load_new(cls, file:str) -> 'Model':
+        if not file.endswith('/'):
+            file += '/'
+
+        model = object.__new__(cls)
+
+        for item in os.listdir(file):
+            if item.startswith('_array'):
+                name_split = item.replace('.parquet','').split('-')
+                model.__setattr__(name_split[1], pd.read_parquet(file + item).to_numpy().reshape(list(map(int, name_split[-1].split('_')))))
+
+                # Label lists (special case)
+                if name_split[-2] == 'l':
+                    model.__setattr__(name_split[1], model.__getattribute__(name_split[1]).tolist())
+
+            elif item.startswith('_function'):
+                with open(file + item, 'r') as r_file:
+                    res = ''.join([l for l in r_file])
+                exec(res.lstrip())
+
+                name_split = item.replace('.py','').split('-')
+                model.__setattr__(name_split[-1], model._temp_fnct) # type: ignore
+
+            elif item == 'metadata':
+                with open(file + 'metadata', 'r+') as meta_file:
+                    meta_dict = json.load(meta_file)
+
+                    for k, v in meta_dict.items():
+                        model.__setattr__(k, v)
+        
+        return model
 
 
     def save(self, file_name:str, path:str='./Models') -> None:
