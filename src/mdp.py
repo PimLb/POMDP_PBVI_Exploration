@@ -2127,6 +2127,7 @@ class Agent:
                           n:int=1000,
                           max_steps:int=1000,
                           start_state:int=-1,
+                          reward_discount:float=0.99,
                           print_progress:bool=True,
                           print_stats:bool=True
                           ) -> Tuple[RewardSet, list[SimulationHistory]]:
@@ -2171,7 +2172,7 @@ class Agent:
 
             all_histories.append(sim_history)
             all_final_rewards.append(sum(sim_history.rewards))
-            all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(0.99)) # TODO: make it variable
+            all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(reward_discount))
             all_sim_length.append(len(sim_history))
 
         if print_stats:
