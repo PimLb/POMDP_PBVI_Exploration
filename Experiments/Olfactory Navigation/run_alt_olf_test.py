@@ -11,7 +11,7 @@ from cupy.cuda import runtime as cuda_runtime
 
 def main():
     # Set GPU used
-    cuda_runtime.setDevice(2)
+    cuda_runtime.setDevice(3)
     
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 

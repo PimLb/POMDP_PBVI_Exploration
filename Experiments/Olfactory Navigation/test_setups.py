@@ -442,7 +442,8 @@ class AltSimulationSet(SimulationSet):
 def grid_test_alt_model(model_file:str,
                         vf_file:str,
                         dx_alt:float,
-                        dy_alt:float) -> pd.DataFrame:
+                        dy_alt:float
+                        ) -> tuple[pd.DataFrame, list[SimulationHistory]]:
     
     # Retreiving model and vf from storage
     log(f'Loading Value function and model')
@@ -519,7 +520,7 @@ def grid_test_alt_model(model_file:str,
     points_df['extra_steps'] = points_df['steps_taken'] - points_df['opt_traj']
 
     # Return results
-    return points_df
+    return points_df, all_sim_hist
 
 
 def run_grid_test_alt(folder:str):
@@ -536,6 +537,11 @@ def run_grid_test_alt(folder:str):
     if not os.path.isdir(folder + '/GridSimulations'):
         os.mkdir(folder + '/GridSimulations')
 
+    log('Creation of SimulationsLog folder is doesnt exist yet')
+    sim_folder = folder + '/SimulationsLog'
+    if not os.path.isdir(sim_folder):
+        os.mkdir(sim_folder)
+
     change_sets = []
     for c_x in changes:
         for c_y in changes:
@@ -544,19 +550,33 @@ def run_grid_test_alt(folder:str):
     for i, c_set in enumerate(change_sets):
         c_x, c_y = c_set
         print('--------------------------------------------------------------------------------')
-        print(f'Run {i+1} of {len(change_sets)} (Run-{i})')
+        print(f'Run {i+1} of {len(change_sets)} (Run-{i}) (dx: {int(c_x*100)}%; dy: {int(c_y*100)}%)')
         print('--------------------------------------------------------------------------------')
 
         # Run grid test
         log('Starting simulations')
-        res_df = grid_test_alt_model(model_file='./Models/Alt_Wrap_GroundAir.pck',
-                                     vf_file='./Test_GroundAir_FSVI_300it_100exp_099g_e6eps_20run_20231121_165329/ValueFunctions/run-3-VF.gzip',
-                                     dx_alt=c_x,
-                                     dy_alt=c_y)
+        res_df, all_sim_histories = grid_test_alt_model(model_file='./Models/Alt_Wrap_GroundAir.pck',
+                                                        vf_file='./Test_GroundAir_FSVI_300it_100exp_099g_e6eps_20run_20231121_165329/ValueFunctions/run-3-VF.gzip',
+                                                        dx_alt=c_x,
+                                                        dy_alt=c_y)
 
         # Save results
         log('Simulations done, saving results')
-        res_df.to_csv(folder + f'/GridSimulations/Grid-run-{i}-{len(res_df)}sims.csv', index=False)
+        res_df.to_csv(folder + f'/GridSimulations/Grid-run-{i}-dx{c_x}-dy{c_y}-{len(res_df)}sims.csv', index=False)
+
+        # Saving simulations
+        log('Saving simulation logs')
+        all_seq = np.empty((780, 1001), dtype=object)
+        for sim_i, sim in enumerate(all_sim_histories):
+            seq = []
+            for s, a, o, r in zip(sim.states, sim.actions+[], sim.observations+[], sim.rewards+[]):
+                seq.append(json.dumps({'s':s, 'a':a, 'o':o, 'r':r}))
+            
+            all_seq[sim_i, :len(seq)] = seq
+
+        sim_df = pd.DataFrame(all_seq.T, columns=[f'Sim-{sim_i}' for sim_i in range(len(all_sim_histories))])
+        sim_df.to_csv(sim_folder + f'/run-{i}-dx{c_x}-dy{c_y}-sims.csv')
+
 
         # Refresh memory
         cp._default_memory_pool.free_all_blocks()
