@@ -5,6 +5,7 @@ from src.pomdp import *
 from typing import Union
 
 import pandas as pd
+import json
 
 import numpy as np
 gpu_support = False
@@ -54,3 +55,63 @@ def compute_extra_steps(simulations:Union[SimulationHistory, list[SimulationHist
         all_extra_steps.append(extra_steps)
 
     return all_extra_steps[0] if not isinstance(simulations, list) else all_extra_steps
+
+
+def save_simulations_to_csv(file:str, simulation_histories:list[SimulationHistory]) -> None:
+    '''
+    Function to save a set of simulations to a csv file
+
+    Parameters
+    ----------
+    file : str
+        The file on which the simulation set has to be saved to saved to.
+    simulation_histories : list[SimulationHistory]
+        The set of simulations to save
+    '''
+    log('Saving simulation logs')
+    max_sim_length = max([len(sim) for sim in simulation_histories])
+    all_seq = np.empty((len(simulation_histories), max_sim_length), dtype=object)
+    for sim_i, sim in enumerate(simulation_histories):
+        seq = []
+        for s, a, o, r in zip(sim.states, sim.actions+[], sim.observations+[], sim.rewards+[]):
+            seq.append(json.dumps({'s':s, 'a':a, 'o':o, 'r':r}))
+        all_seq[sim_i, :len(seq)] = seq
+
+    sim_df = pd.DataFrame(all_seq.T, columns=[f'Sim-{sim_i}' for sim_i in range(len(simulation_histories))])
+    sim_df.to_csv(file)
+
+
+def load_simulations_from_csv(file:str, model:Model) -> list[SimulationHistory]:
+    '''
+    Function to load a set of simulations that have been saved to a csv file
+
+    Parameters
+    ----------
+    file : str
+        The file on which the simulation set has been saved to.
+    model : pomdp.Model
+        The model on which the simulations have been run.
+
+    Returns
+    -------
+    sims : list[SimulationHistory]
+        The list of simulations histories.
+    '''
+    simulations_df = pd.read_csv(file, index_col=0)
+
+    sims = []
+    for col in simulations_df.columns:
+        sim_steps = simulations_df[col].tolist()
+        sim_steps = [json.loads(step) for step in sim_steps if isinstance(step, str)]
+
+        # Creation of simulation history
+        sim_hist = SimulationHistory(model, sim_steps[0]['s'], Belief(model))
+
+        sim_hist.states = [step['s'] for step in sim_steps]
+        sim_hist.actions = [step['a'] for step in sim_steps]
+        sim_hist.observations = [step['o'] for step in sim_steps]
+        sim_hist.rewards = [step['r'] for step in sim_steps]
+
+        sims.append(sim_hist)
+
+    return sims
