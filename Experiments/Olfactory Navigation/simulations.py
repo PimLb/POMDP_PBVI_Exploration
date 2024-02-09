@@ -14,9 +14,11 @@ class RealSimulationAlt(Simulation):
     def __init__(self,
                  model:Model,
                  nose_file:str|np.ndarray,
-                 ground_file:str|np.ndarray
+                 ground_file:str|np.ndarray,
+                 shift:int=0
                  ) -> None:
         self.iter = None
+        self.shift = shift
 
         # Processing simulation matrices
         nose_data = np.load(nose_file) if isinstance(nose_file, str) else nose_file
@@ -43,7 +45,7 @@ class RealSimulationAlt(Simulation):
         r,_ = super().run_action(a)
 
         x,y = self.model.get_coords(self.agent_state)
-        o = 1 if (self.nose_resized if a == 5 else self.ground_resized)[self.iter, x, y] else 0
+        o = 1 if (self.nose_resized if a == 5 else self.ground_resized)[self.shift + self.iter, x, y] else 0
         if self.agent_state in self.model.end_states:
             o = 2
 
@@ -58,9 +60,11 @@ class RealSimulationSetAlt(SimulationSet):
     def __init__(self,
                  model:Model,
                  nose_file:str|np.ndarray,
-                 ground_file:str|np.ndarray
+                 ground_file:str|np.ndarray,
+                 shift:int=0
                  ) -> None:
         self.iter = None
+        self.shift = shift
 
         # Processing simulation matrices
         nose_data = np.load(nose_file) if isinstance(nose_file, str) else nose_file
@@ -98,7 +102,7 @@ class RealSimulationSetAlt(SimulationSet):
         xp = np if not self.model.is_on_gpu else cp
 
         # Generate observations
-        observations = xp.where(actions == 5, self.nose_resized[self.iter, self.agent_states], self.ground_resized[self.iter, self.agent_states])
+        observations = xp.where(actions == 5, self.nose_resized[self.shift + self.iter, self.agent_states], self.ground_resized[self.shift + self.iter, self.agent_states])
 
         # Check if at goal
         observations = xp.where(xp.isin(self.agent_states, xp.array(self.model.end_states)), 2, observations)
@@ -113,9 +117,11 @@ class RealSimulationSetQComp(SimulationSet):
     '''
     def __init__(self,
                  model:Model,
-                 file:str|np.ndarray
+                 file:str|np.ndarray,
+                 shift:int=0
                  ) -> None:
         self.iter = None
+        self.shift = shift
 
         # Processing simulation matrices
         data = np.load(file) if isinstance(file, str) else file
@@ -144,7 +150,7 @@ class RealSimulationSetQComp(SimulationSet):
         xp = np if not self.model.is_on_gpu else cp
 
         # Generate observations
-        observations = self.data_resized[self.iter, self.agent_states]
+        observations = self.data_resized[self.shift + self.iter, self.agent_states]
 
         # Check if at goal
         observations = xp.where(xp.isin(self.agent_states, xp.array(self.model.end_states)), 2, observations)
