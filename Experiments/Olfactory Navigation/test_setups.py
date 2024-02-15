@@ -2,7 +2,7 @@ import sys
 sys.path.append('../..')
 from src.pomdp import *
 from util_functions import compute_extra_steps
-from simulations import RealSimulationSetQComp
+from simulations import RealSimulationSetQComp, RealSimulationSetAlt
 from util_functions import save_simulations_to_csv
 
 import pandas as pd
@@ -660,6 +660,84 @@ def run_all_start_test_q(folder:str):
         sim_stats_df['steps_taken'] = [len(sim) for sim in all_sims]
         sim_stats_df['opt_steps'] = np.abs(sim_stats_df['start_x'] - source[1]) + np.abs(sim_stats_df['start_y'] - source[0])
         sim_stats_df['converged'] = sim_stats_df['steps_taken'] < 401
+        sim_stats_df['Tmin_over_T'] = sim_stats_df['opt_steps'] / sim_stats_df['steps_taken']
+        sim_stats_df['extra_steps'] = sim_stats_df['steps_taken'] - sim_stats_df['opt_steps']
+
+        sim_stats_df.to_csv(sim_stats_folder + f'/run-{i}-shift{shift}-sim_stats.csv')
+
+        # Saving simulations
+        log('Saving simulation logs')
+        save_simulations_to_csv(sim_folder + f'/run-{i}-shift{shift}-sims.csv', all_sims)
+
+        # Refresh memory
+        cp._default_memory_pool.free_all_blocks()
+
+        # Print average extra steps
+        print(f'\nAverage Extra steps count: {sim_stats_df["extra_steps"].mean()}')
+        print('\n\n')
+
+    print('--------------------------------------------------------------------------------')
+    print(f'DONE')
+    print('--------------------------------------------------------------------------------')
+
+
+def run_all_start_test_real(folder:str):
+    
+    shifts = [i*100 for i in range(0,20)]
+    model_file = './Models/Alt_Wrap_GroundAir.pck'
+    value_function_file = './Test_Results/Test_GroundAir_FSVI_300it_100exp_099g_e6eps_20run_20231121_165329/ValueFunctions/run-3-VF.parquet'
+
+    print('Running simulations from all possible starting positions with shifts at each 10 timesteps:')
+    print(f'\t- model: "{model_file}"')
+    print(f'\t- value function: "{value_function_file}"')
+    print(f'\t- Amounts of tests: {str(len(shifts))}')
+    print()
+
+    log('Creation of SimulationSets folder is doesnt exist yet')
+    sim_folder = folder + '/SimulationSets'
+    if not os.path.isdir(sim_folder):
+        os.mkdir(sim_folder)
+
+    log('Creation of SimulationStats folder is doesnt exist yet')
+    sim_stats_folder = folder + '/SimulationStats'
+    if not os.path.isdir(sim_stats_folder):
+        os.mkdir(sim_stats_folder)
+
+    for i, shift in enumerate(shifts):
+        print('--------------------------------------------------------------------------------')
+        print(f'Run {i+1} of {len(shifts)} (Run-{i}) (Start frame: {shift})')
+        print('--------------------------------------------------------------------------------')
+
+        # Loading model and vf to gpu
+        log('Loading model and value function')
+        model = Model.load_from_file(model_file).gpu_model
+        vf = ValueFunction.load_from_parquet(value_function_file, model).to_gpu()
+
+        # Run grid test
+        log('Starting simulations')
+        a = Agent(model=model, value_function=vf)
+        start_positions = np.argwhere(model.start_probabilities > 0)[:,0].tolist()
+
+        simulator_set = RealSimulationSetAlt(model, nose_file='/storage/arnaud/nose_data_31_121.npy', ground_file='/storage/arnaud/ground_data_31_121.npy', shift=shift)
+
+        _, all_sims = a.run_n_simulations_parallel(n=len(start_positions),
+                                                   simulator_set=simulator_set,
+                                                   max_steps=1000,
+                                                   start_state=start_positions,
+                                                   print_progress=False)
+
+        # Save results
+        log('Simulations done, saving results')
+        env_shape = [61, 361]
+        source = [30,60]
+
+        sim_stats_df = pd.DataFrame()
+        sim_stats_df['start_id'] = [sim.states[0] for sim in all_sims]
+        sim_stats_df['start_x'] = [np.unravel_index(sim.states[0], env_shape)[1] for sim in all_sims]
+        sim_stats_df['start_y'] = [np.unravel_index(sim.states[0], env_shape)[0] for sim in all_sims]
+        sim_stats_df['steps_taken'] = [len(sim) for sim in all_sims]
+        sim_stats_df['opt_steps'] = np.abs(sim_stats_df['start_x'] - source[1]) + np.abs(sim_stats_df['start_y'] - source[0])
+        sim_stats_df['converged'] = sim_stats_df['steps_taken'] < 1001
         sim_stats_df['Tmin_over_T'] = sim_stats_df['opt_steps'] / sim_stats_df['steps_taken']
         sim_stats_df['extra_steps'] = sim_stats_df['steps_taken'] - sim_stats_df['opt_steps']
 
