@@ -2186,7 +2186,8 @@ class PBVI_Solver(Solver):
         old_value_function = value_function
 
         try:
-            for expansion_i in range(expansions) if not print_progress else trange(expansions, desc='Expansions'):
+            iterator = trange(expansions, desc='Expansions') if print_progress else range(expansions)
+            for expansion_i in iterator:
 
                 # 1: Expand belief set
                 start_ts = datetime.now()
@@ -2252,6 +2253,13 @@ class PBVI_Solver(Solver):
                     break
 
                 expand_value_function = value_function
+
+                if print_progress:
+                    iterator.set_postfix({
+                        '|V|':len(value_function),
+                        '|B|':len(belief_set)
+                    })
+
         except MemoryError as e:
             print(f'Memory full: {e}')
             print('Returning value function and history as is...\n')
