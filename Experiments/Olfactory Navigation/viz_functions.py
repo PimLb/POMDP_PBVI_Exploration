@@ -141,7 +141,8 @@ def plot_extra_steps_from_pandas(df:pd.DataFrame, ax=None) -> None:
     if ax is None:
         _, ax = plt.subplots()
 
-    extra_steps_df.plot(kind='box', ax=ax, rot=45)
+    ax.boxplot(extra_steps_df.to_numpy())
+    ax.set_xticks(np.arange(len(extra_steps_df.columns))+1, extra_steps_df.columns, rotation=45)
     ax.set_ylabel('Additional steps to target')
 
 
