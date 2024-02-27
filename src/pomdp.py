@@ -1837,13 +1837,12 @@ class PBVI_Solver(Solver):
 
     def expand_fsvi(self,
                    model:Model,
-                   b:Belief,
+                   b0:Belief,
                    mdp_policy:ValueFunction,
-                   s:Union[int, None]=None,
-                   max_generation:int=10,
-                   sequence_string:str=''
+                   max_generation:int=10
                    ) -> BeliefSet:
         '''
+        # TODO: Not anymore a recursive function, to rework
         Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs following the the Forward Search Value Iteration principles.
         It is a recursive function that is started by a initial state 's' and using the MDP policy, chooses the best action to take.
         Following this, a random next state 's_p' is being sampled from the transition probabilities and a random observation 'o' based on the observation probabilities.
@@ -1854,55 +1853,123 @@ class PBVI_Solver(Solver):
         ----------
         model : pomdp.Model
             The model in which the exploration process will happen.
-        b : Belief
-            A belief to be added to the returned belief sequence and updated for the next step of the recursion.
+        b0 : Belief
+            The belief to start the sequence with.
+            A random state will be chosen based on the probability distribution of the belief.
         mdp_policy : ValueFunction
             The mdp policy used to choose the action from with the given state 's'.
-        s : int
-            The state that starts the exploration sequence and based on which an action will be chosen.
         max_generation : int, default=10
             The maximum recursion depth that can be reached before the generated belief sequence is returned.
-        sequence_string : str, default=''
-            The sequence of previously explored actions and observations.
         
         Returns
         -------
         belief_set : BeliefSet
             A new sequence of beliefs.
         '''
-        xp = np if not gpu_support else cp.get_array_module(b.values)
-        belief_list = [b]
+        xp = np if not gpu_support else cp.get_array_module(b0.values)
+        belief_list = [b0]
 
-        # If state not provided pick a random one
-        if s is None:
-            s = b.random_state()
+        # Choose a random starting state
+        s = b0.random_state()
 
-        # If end is not reached
-        if (s not in model.end_states) and (max_generation > 0):
+        # Setting the working belief
+        b = b0
+
+        for _ in range(max_generation - 1): #-1 due to a one belief already being present in the set
             # Choose action based on mdp value function
             a_star = xp.argmax(mdp_policy.alpha_vector_array[:,s])
 
             # Pick a random next state (weighted by transition probabilities)
             s_p = model.transition(s, a_star)
-
+            
             # Pick a random observation weighted by observation probabilities in state s_p and after having done action a_star
             o = model.observe(s_p, a_star)
-
-            # Update sequence string
-            sequence_string += ('-' if len(sequence_string) > 0 else '') + f'{a_star},{o}'
-
+            
             # Generate a new belief based on a_star and o
             b_p = b.update(a_star, o)
 
-            # Recursive call to go closer to goal
-            b_set = self.expand_fsvi(model=model,
-                                     b=b_p,
-                                     mdp_policy=mdp_policy,
-                                     s=s_p,
-                                     max_generation=max_generation-1,
-                                     sequence_string=sequence_string)
-            belief_list.extend(b_set.belief_list)
+            # Record new belief
+            belief_list.append(b_p)
+
+            # Updating s and b
+            s = s_p
+            b = b_p
+
+            # Reset and belief if end state is reached
+            if s in model.end_states:
+                s = b0.random_state()
+                b = b0
+
+        return BeliefSet(model, belief_list)
+
+
+    def expand_fsvi_eg(self,
+                       model:Model,
+                       b0:Belief,
+                       mdp_policy:ValueFunction,
+                       eps_greedy:Union[callable, None]=None,
+                       max_generation:int=10
+                       ) -> BeliefSet:
+        '''
+        # TODO
+
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model in which the exploration process will happen.
+        b0 : Belief
+            The belief to start the sequence with.
+            A random state will be chosen based on the probability distribution of the belief.
+        mdp_policy : ValueFunction
+            The mdp policy used to choose the action from with the given state 's'.
+        eps_greedy : callable, default=0.2 (fixed)
+            A function or a callable, representing how a the epsilon parameter should evolve through the iterations
+        max_generation : int, default=10
+            The maximum recursion depth that can be reached before the generated belief sequence is returned.
         
+        Returns
+        -------
+        belief_set : BeliefSet
+            A new sequence of beliefs.
+        '''
+        xp = np if not gpu_support else cp.get_array_module(b0.values)
+        belief_list = [b0]
+
+        # Choose a random starting state
+        s = b0.random_state()
+
+        # Setting the working belief
+        b = b0
+
+        # If eps_greedy is None
+        if eps_greedy is None:
+            eps_greedy = (lambda t: 0.2)
+
+        for i in range(max_generation - 1): # -1 due to a one belief already being present in the set
+            # Choose action based on mdp value function
+            a_star = int(random.choice(model.actions)) if random.random() < eps_greedy(i) else xp.argmax(mdp_policy.alpha_vector_array[:,s])
+
+            # Pick a random next state (weighted by transition probabilities)
+            s_p = model.transition(s, a_star)
+            
+            # Pick a random observation weighted by observation probabilities in state s_p and after having done action a_star
+            o = model.observe(s_p, a_star)
+            
+            # Generate a new belief based on a_star and o
+            b_p = b.update(a_star, o)
+
+            # Record new belief
+            belief_list.append(b_p)
+
+            # Updating s and b
+            s = s_p
+            b = b_p
+
+            # Reset and belief if end state is reached
+            if s in model.end_states:
+                s = b0.random_state()
+                b = b0
+
         return BeliefSet(model, belief_list)
     
 
@@ -1965,6 +2032,7 @@ class PBVI_Solver(Solver):
             - Greedy Error Reduction (ger)
             - Heuristic Search Value Iteration (hsvi)
             - Forward Search Value Iteration (fsvi)
+            - Forward Search Value Iteration - Epsilon Greedy (fsvi_eg)
             - Perseus (perseus)
                 
         Parameters
@@ -2015,9 +2083,17 @@ class PBVI_Solver(Solver):
         elif self.expand_function in 'expand_fsvi':
             args = {arg: function_specific_parameters[arg] for arg in ['mdp_policy'] if arg in function_specific_parameters}
             return self.expand_fsvi(model=model, 
-                                    b=belief_set.belief_list[0],
+                                    b0=belief_set.belief_list[0],
                                     mdp_policy=args['mdp_policy'],
                                     max_generation=max_generation)
+        
+        elif self.expand_function in 'expand_fsvi_eg':
+            args = {arg: function_specific_parameters[arg] for arg in ['mdp_policy', 'eps_greedy'] if arg in function_specific_parameters}
+            return self.expand_fsvi_eg(model=model, 
+                                       b0=belief_set.belief_list[0],
+                                       mdp_policy=args['mdp_policy'],
+                                       eps_greedy=args['eps_greedy'] if 'eps_greedy' in args else None,
+                                       max_generation=max_generation)
         
         elif self.expand_function in 'expand_perseus':
             return self.expand_perseus(model=model, b=belief_set.belief_list[0], max_generation=max_generation)
@@ -2379,6 +2455,40 @@ class FSVI_Solver(PBVI_Solver):
                              use_gpu=use_gpu,
                              history_tracking_level=history_tracking_level,
                              print_progress=print_progress)
+
+
+class FSVI_EG_Solver(FSVI_Solver):
+    '''
+    As FSVI_Solver except actions are chosen in an epsilon-greedy fashion
+    
+    ...
+    Parameters
+    ----------
+    gamma : float, default=0.9
+        The learning rate, used to control how fast the value function will change after the each iterations.
+    eps : float, default=0.001
+        The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.
+    mdp_policy : ValueFunction, optional
+        The value that will be used to decide actions during the MDP explore procedure. If not provided, it will be computed at solve time.
+    eps_greedy : callable, default=0.2 (fixed)
+        A function or a callable, representing how a the epsilon parameter should evolve through the iterations.
+
+    Attributes
+    ----------
+    gamma : float
+    eps : float
+    '''
+    def __init__(self,
+                 gamma:float=0.9,
+                 eps:float=0.001,
+                 mdp_policy:Union[ValueFunction,None]=None,
+                 eps_greedy:Union[callable,None]=None
+                 ):
+        super().__init__(gamma,
+                         eps,
+                         mdp_policy)
+        self.expand_function = 'fsvi_eg'
+        self.expand_function_params['eps_greedy'] = eps_greedy if eps_greedy is not None else (lambda t: 0.2)
 
 
 class SimulationHistory(MDP_SimulationHistory):
@@ -2989,7 +3099,8 @@ class Agent:
 
             # Update iterator postfix
             if print_progress:
-                iterator.set_postfix({'done ': f' {xp.sum(sim_is_done)} of {n}'})
+                done_count = int(xp.sum(sim_is_done))
+                iterator.set_postfix({'done ': f' {done_count} of {n} ({done_count/n:.1f}%)'})
 
             # Replacing old with new
             beliefs = new_beliefs
