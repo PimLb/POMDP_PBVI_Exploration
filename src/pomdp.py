@@ -515,6 +515,7 @@ class BeliefSet:
 
         self._belief_list = None
         self._belief_array = None
+        self._uniqueness_dict = None
 
         self.is_on_gpu = False
 
@@ -536,10 +537,6 @@ class BeliefSet:
             # Check if array is on gpu
             if gpu_support and cp.get_array_module(beliefs) == cp:
                 self.is_on_gpu = True
-
-        # # Deduplication
-        # self._uniqueness_dict = {belief.values.tobytes(): belief for belief in self._belief_list}
-        # self._belief_list = list(self._uniqueness_dict.values())
 
 
     @property
@@ -577,7 +574,38 @@ class BeliefSet:
         for belief in self.belief_list:
             all_successors.extend(belief.generate_successors())
         return BeliefSet(self.model, all_successors)
-    
+
+
+    @property
+    def unique_belief_dict(self) -> dict:
+        if self._uniqueness_dict is None:
+            self._uniqueness_dict = {belief.bytes_repr: belief for belief in self.belief_list}
+        return self._uniqueness_dict
+
+
+    def union(self, other_belief_set:'BeliefSet') -> 'BeliefSet':
+        '''
+        Function to make the union between two belief set objects.
+
+        Parameters
+        ----------
+        other_belief_set : BeliefSet
+            The other belief set to make the union with
+        
+        Returns
+        -------
+        new_belief_set : BeliefSet
+            A new, combined, belief set
+        '''
+        # Deduplication
+        combined_uniqueness_dict = self.unique_belief_dict | other_belief_set.unique_belief_dict
+
+        # Generation of new set
+        new_belief_set = BeliefSet(self.model, list(combined_uniqueness_dict.values()))
+        new_belief_set._uniqueness_dict = combined_uniqueness_dict
+
+        return new_belief_set
+
 
     def __len__(self) -> int:
         return len(self._belief_list) if self._belief_list is not None else self._belief_array.shape[0]
@@ -2145,6 +2173,7 @@ class PBVI_Solver(Solver):
               initial_value_function:Union[ValueFunction,None]=None,
               prune_level:int=1,
               prune_interval:int=10,
+              limit_value_function_size:int=-1,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -2185,6 +2214,9 @@ class PBVI_Solver(Solver):
             Parameter to prune the value function further before the expand function.
         prune_interval : int, default=10
             How often to prune the value function. It is counted in number of backup iterations.
+        limit_value_function_size : int, default=-1
+            When the value function size crosses this treshold, a random selection of 'max_belief_growth' alpha vectors will be removed from the value function
+            If set to -1, the value function can grow without bounds.
         use_gpu : bool, default=False
             Whether to use the GPU with cupy array to accelerate solving.
         history_tracking_level : int, default=1
@@ -2230,7 +2262,8 @@ class PBVI_Solver(Solver):
             full_backup = any([self.expand_function in func for func in ['expand_ra', 'expand_ssra', 'expand_ssga', 'expand_ssea', 'expand_ger']])
 
         # For hsvi of fsvi, mdp policy is required as upper bound, so if it is not required, generate it
-        if ('mdp_policy' not in self.expand_function_params) or (self.expand_function_params['mdp_policy'] is None):
+        if (('fsvi' in self.expand_function or 'hsvi' in self.expand_function) and 
+            (('mdp_policy' not in self.expand_function_params) or (self.expand_function_params['mdp_policy'] is None))):
             log('[Warning] MDP solution not provided, running value iteration on the problem to retrieve it...')
             vi_solver = VI_Solver(gamma=self.gamma, eps=self.eps)
 
@@ -2263,6 +2296,7 @@ class PBVI_Solver(Solver):
 
         try:
             iterator = trange(expansions, desc='Expansions') if print_progress else range(expansions)
+            iterator_postfix = {}
             for expansion_i in iterator:
 
                 # 1: Expand belief set
@@ -2274,11 +2308,8 @@ class PBVI_Solver(Solver):
                                              max_generation=max_belief_growth,
                                              **self.expand_function_params)
 
-                # If full backup append the newly generated set to the old belief_set
-                if full_backup:
-                    belief_set = BeliefSet(model, xp.vstack((belief_set.belief_array, new_belief_set.belief_array)))
-                else:
-                    belief_set = new_belief_set
+                # Add new beliefs points to the total belief_set
+                belief_set = belief_set.union(new_belief_set)
 
                 expand_time = (datetime.now() - start_ts).total_seconds()
                 solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
@@ -2289,7 +2320,7 @@ class PBVI_Solver(Solver):
 
                     # Backup step
                     value_function = self.backup(model,
-                                                 belief_set,
+                                                 belief_set if full_backup else new_belief_set,
                                                  value_function,
                                                  append=(not full_backup),
                                                  belief_dominance_prune=False)
@@ -2305,6 +2336,29 @@ class PBVI_Solver(Solver):
                         prune_time = (datetime.now() - start_ts).total_seconds()
                         alpha_vectors_pruned = len(value_function) - vf_len
                         solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
+
+                    # Check if value function size is above treshold
+                    if limit_value_function_size >= 0 and len(value_function) > limit_value_function_size:
+                        # Compute matrix multiplications between avs and beliefs
+                        alpha_value_per_belief = xp.matmul(value_function.alpha_vector_array, belief_set.belief_array.T)
+
+                        # Select the useful alpha vectors
+                        best_alpha_vector_per_belief = xp.argmax(alpha_value_per_belief, axis=0)
+                        useful_alpha_vectors = xp.unique(best_alpha_vector_per_belief)
+
+                        # Select a random selection of vectors to delete
+                        unuseful_alpha_vectors = xp.delete(xp.arange(len(value_function)), useful_alpha_vectors)
+                        random_vectors_to_delete = xp.random.choice(unuseful_alpha_vectors,
+                                                                    size=max_belief_growth,
+                                                                    p=(xp.arange(len(unuseful_alpha_vectors))[::-1] / xp.sum(xp.arange(len(unuseful_alpha_vectors)))))
+                                                                    # replace=False,
+                                                                    # p=1/len(unuseful_alpha_vectors))
+
+                        value_function = ValueFunction(model=model,
+                                                       alpha_vectors=xp.delete(value_function.alpha_vector_array, random_vectors_to_delete, axis=0),
+                                                       action_list=xp.delete(value_function.actions, random_vectors_to_delete))
+                        
+                        iterator_postfix['|useful|'] = useful_alpha_vectors.shape[0]
                     
                     # Compute the change between value functions
                     max_change = self.compute_change(value_function, old_value_function, belief_set)
@@ -2330,11 +2384,11 @@ class PBVI_Solver(Solver):
 
                 expand_value_function = value_function
 
+                iterator_postfix['|V|'] = len(value_function)
+                iterator_postfix['|B|'] = len(belief_set)
+
                 if print_progress:
-                    iterator.set_postfix({
-                        '|V|':len(value_function),
-                        '|B|':len(belief_set)
-                    })
+                    iterator.set_postfix(iterator_postfix)
 
         except MemoryError as e:
             print(f'Memory full: {e}')
@@ -2375,6 +2429,7 @@ class HSVI_Solver(PBVI_Solver):
               initial_value_function:Union[ValueFunction,None]=None,
               prune_level:int=1,
               prune_interval:int=10,
+              limit_value_function_size:int=-1,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -2388,6 +2443,7 @@ class HSVI_Solver(PBVI_Solver):
                              initial_value_function=initial_value_function,
                              prune_level=prune_level,
                              prune_interval=prune_interval,
+                             limit_value_function_size=limit_value_function_size,
                              use_gpu=use_gpu,
                              history_tracking_level=history_tracking_level,
                              print_progress=print_progress)
@@ -2439,6 +2495,7 @@ class FSVI_Solver(PBVI_Solver):
               initial_value_function:Union[ValueFunction, None]=None,
               prune_level:int=1,
               prune_interval:int=10,
+              limit_value_function_size:int=-1,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -2452,6 +2509,7 @@ class FSVI_Solver(PBVI_Solver):
                              initial_value_function=initial_value_function,
                              prune_level=prune_level,
                              prune_interval=prune_interval,
+                             limit_value_function_size=limit_value_function_size,
                              use_gpu=use_gpu,
                              history_tracking_level=history_tracking_level,
                              print_progress=print_progress)
@@ -3100,7 +3158,7 @@ class Agent:
             # Update iterator postfix
             if print_progress:
                 done_count = int(xp.sum(sim_is_done))
-                iterator.set_postfix({'done ': f' {done_count} of {n} ({done_count/n:.1f}%)'})
+                iterator.set_postfix({'done ': f' {done_count} of {n} ({(done_count*100)/n:.1f}%)'})
 
             # Replacing old with new
             beliefs = new_beliefs
