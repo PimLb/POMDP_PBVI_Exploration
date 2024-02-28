@@ -118,7 +118,7 @@ class RealSimulationSetQComp(SimulationSet):
     def __init__(self,
                  model:Model,
                  file:str|np.ndarray,
-                 shift:int=0
+                 shift:int|list|np.ndarray=0
                  ) -> None:
         self.iter = None
         self.shift = shift
@@ -136,9 +136,15 @@ class RealSimulationSetQComp(SimulationSet):
 
     def initialize_simulations(self, n: int = 1, start_state: list[int] | int | None = None) -> ndarray:
         self.iter = 0
+
+        if not isinstance(self.shift, int):
+            assert len(self.shift) == n, "If for shift, an array is provided, it has to match the argument n"
         
         if self.model.is_on_gpu:
             self.data_resized = cp.array(self.data_resized)
+            self.shift = cp.array(self.shift)
+        else:
+            self.shift = np.array(self.shift)
         
         return super().initialize_simulations(n, start_state)
 
@@ -150,7 +156,7 @@ class RealSimulationSetQComp(SimulationSet):
         xp = np if not self.model.is_on_gpu else cp
 
         # Generate observations
-        observations = self.data_resized[self.shift + self.iter, self.agent_states]
+        observations = self.data_resized[self.shift[self.simulations] + self.iter, self.agent_states]
 
         # Check if at goal
         observations = xp.where(xp.isin(self.agent_states, xp.array(self.model.end_states)), 2, observations)

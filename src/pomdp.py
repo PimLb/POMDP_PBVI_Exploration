@@ -2788,6 +2788,9 @@ class Simulation(MDP_Simulation):
 
 class SimulationSet:
     def __init__(self, model:Model):
+        '''
+        TODO
+        '''
         self.model = model
         
         # Simulation variables
@@ -2796,6 +2799,9 @@ class SimulationSet:
 
 
     def initialize_simulations(self, n:int=1, start_state:Union[list[int],int,None]=None) -> np.ndarray:
+        '''
+        TODO
+        '''
         # GPU support
         xp = np if not self.model.is_on_gpu else cp
 
@@ -2813,9 +2819,12 @@ class SimulationSet:
         self.simulations = xp.arange(n)
         self.is_done = xp.zeros(n, dtype=bool)
         return self.agent_states
-        
+
 
     def run_actions(self, actions:np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        '''
+        TODO
+        '''
         # GPU support
         xp = np if not self.model.is_on_gpu else cp
         
@@ -2823,7 +2832,7 @@ class SimulationSet:
         reachable_state_per_actions = self.model.reachable_states[:, actions, :]
 
         # Gathering new states based on the transition function and the chosen actions
-        next_state_potentials = reachable_state_per_actions[self.agent_states, self.simulations]
+        next_state_potentials = reachable_state_per_actions[self.agent_states, xp.arange(self.n)]
         if self.model.reachable_state_count == 1:
             next_states = next_state_potentials[:,0]
         else:
@@ -3098,11 +3107,9 @@ class Agent:
         # Belief and state arrays
         beliefs = initial_beliefs
         new_beliefs = None
-        states = start_state_array
 
         # Tracking what simulations are done
-        sim_is_done = xp.zeros(n, dtype=bool)
-        done_at_step = xp.full(n, -1)
+        done_at_step = xp.full(n, -1, dtype=int)
 
         # Speedup item
         simulations = xp.arange(n)
@@ -3110,19 +3117,21 @@ class Agent:
         flat_shape = (n, (model.state_count * model.reachable_state_count))
 
         # 2D bincount for belief set update
-        def bincount2D_vectorized(a, w):    
+        def bincount2D_vectorized(a, w):
             a_offs = a + flatten_offset
-            return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape(-1,model.state_count)
+            return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape((-1,model.state_count))
 
         # Results
         discount = reward_discount
-        rewards_history = []
-        discounted_rewards_history = []
+        rewards_history = xp.zeros((max_steps, n))
+        discounted_rewards_history = xp.zeros((max_steps, n))
 
         # History items
-        states_history = [states]
-        actions_history = []
-        observations_history = []
+        states_history = xp.empty((max_steps+1, n))
+        states_history[0] = start_state_array
+
+        actions_history = xp.empty((max_steps, n))
+        observations_history = xp.empty((max_steps, n))
 
         sim_start_ts = datetime.now()
         
@@ -3146,61 +3155,66 @@ class Agent:
                                                 w=reachable_probabilities.swapaxes(0,1).reshape(flat_shape))
 
             new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
+            beliefs = new_beliefs
 
             # Rewards computation
-            rewards_history.append(rewards)
-            discounted_rewards_history.append(rewards * discount)
+            rewards_history[i, simulations] = rewards
+            discounted_rewards_history[i, simulations] = rewards * discount
 
-            # Checking for done condition
-            done_at_step[sim_is_done ^ simulator_set.is_done] = i+1
-            sim_is_done |= simulator_set.is_done
+            # History tracking
+            states_history[i+1, simulations] = simulator_set.agent_states
+            actions_history[i, simulations] = best_actions
+            observations_history[i, simulations] = observations
+
+            # Marking the steps at which sims are done
+            done_at_step[simulations[simulator_set.is_done]] = i
+
+            # Filtering to done simulations
+            simulations = simulations[~simulator_set.is_done]
+            beliefs = beliefs[~simulator_set.is_done]
+            flatten_offset = xp.arange(len(simulations))[:,None] * model.state_count
+            flat_shape = (len(simulations), flat_shape[1])
+
+            # Filtering in simulator_set
+            simulator_set.n = len(simulations)
+            simulator_set.agent_states = simulator_set.agent_states[~simulator_set.is_done]
+            simulator_set.simulations = simulator_set.simulations[~simulator_set.is_done]
+            simulator_set.is_done = simulator_set.is_done[~simulator_set.is_done]
 
             # Update iterator postfix
             if print_progress:
-                done_count = int(xp.sum(sim_is_done))
+                done_count = n-len(simulations)
                 iterator.set_postfix({'done ': f' {done_count} of {n} ({(done_count*100)/n:.1f}%)'})
 
             # Replacing old with new
-            beliefs = new_beliefs
             discount *= reward_discount
 
-            # History tracking
-            states_history.append(simulator_set.agent_states)
-            actions_history.append(best_actions)
-            observations_history.append(observations)
-
             # Early stopping
-            if xp.all(sim_is_done):
+            if len(simulations) == 0:
                 break
 
         # Wrap up
         sim_hist_list = []
         b0 = Belief(model)
 
-        states_history = xp.array(states_history).T
-        actions_history = xp.array(actions_history).T
-        observations_history = xp.array(observations_history).T
-        rewards_history = xp.array(rewards_history).T
-        discounted_rewards_history = xp.array(discounted_rewards_history).T
-
         done_at_step_sum = 0
 
         for i, s0 in enumerate(start_state_array):
             sim_hist = SimulationHistory(self.model, int(s0), b0)
             
-            last_step = int(done_at_step[i]) if bool(sim_is_done[i]) else max_steps
+            last_step = int(done_at_step[i]) if done_at_step[i] >= 0  else max_steps
             done_at_step_sum += last_step
 
             # Setting the elements
-            sim_hist.states = states_history[i,:last_step+1].tolist()
-            sim_hist.actions = actions_history[i,:last_step].tolist()
-            sim_hist.observations = observations_history[i,:last_step].tolist()
-            sim_hist.rewards = rewards_history[i,:last_step].tolist()
+            sim_hist.states = states_history[:last_step+1, i].tolist()
+            sim_hist.actions = actions_history[:last_step, i].tolist()
+            sim_hist.observations = observations_history[:last_step, i].tolist()
+            sim_hist.rewards = rewards_history[:last_step, i].tolist()
 
             # Adding the sim history to the list of histories
             sim_hist_list.append(sim_hist)
 
-        done_sim_count = sum([1 if done else 0 for done in sim_is_done])
+        done_sim_count = int(xp.sum(done_at_step >= 0))
 
         if print_stats:
             sim_end_ts = datetime.now()
@@ -3210,8 +3224,8 @@ class Agent:
             print(f'\t- Average total rewards: {(xp.sum(rewards_history) / n)}')
             print(f'\t- Average discounted rewards (ADR): {(xp.sum(discounted_rewards_history) / n)}')
 
-        return RewardSet(xp.sum(rewards_history, axis=1).tolist()), sim_hist_list
-    
+        return RewardSet(xp.sum(rewards_history, axis=0).tolist()), sim_hist_list
+
 
 def load_POMDP_file(file_name:str) -> Tuple[Model, PBVI_Solver]:
     '''
