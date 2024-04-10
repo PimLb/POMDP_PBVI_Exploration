@@ -406,7 +406,9 @@ class Belief:
             return succ
 
         reachable_state_probabilities = self.model.reachable_transitional_observation_table[:,a,o,:] * self.values[:,None]
-        new_state_probabilities = xp.bincount(self.model.reachable_states[:,a,:].flatten(), weights=reachable_state_probabilities.flatten(), minlength=self.model.state_count)
+        new_state_probabilities = xp.bincount(self.model.reachable_states[:,a,:].flatten(),
+                                              weights=reachable_state_probabilities.flatten(),
+                                              minlength=self.model.state_count)
         
         # Normalization
         new_state_probabilities /= xp.sum(new_state_probabilities)
@@ -1484,15 +1486,21 @@ class PBVI_Solver(Solver):
 
         # Step 1
         vector_array = value_function.alpha_vector_array
-        vectors_array_reachable_states = vector_array[xp.arange(vector_array.shape[0])[:,None,None,None], model.reachable_states[None,:,:,:]]
+        vectors_array_reachable_states = vector_array[xp.arange(vector_array.shape[0])[:,None,None,None],
+                                                      model.reachable_states[None,:,:,:]]
         
-        gamma_a_o_t = self.gamma * xp.einsum('saor,vsar->aovs', model.reachable_transitional_observation_table, vectors_array_reachable_states)
+        gamma_a_o_t = self.gamma * xp.einsum('saor,vsar->aovs',
+                                             model.reachable_transitional_observation_table,
+                                             vectors_array_reachable_states)
 
         # Step 2
         belief_array = belief_set.belief_array # bs
         best_alpha_ind = xp.argmax(xp.tensordot(belief_array, gamma_a_o_t, (1,3)), axis=3) # argmax(bs,aovs->baov) -> bao
 
-        best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]] # baos
+        best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None],
+                                        model.observations[None,None,:,None],
+                                        best_alpha_ind[:,:,:,None],
+                                        model.states[None,None,None,:]] # baos
 
         alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2) # as + bas
 
@@ -1517,7 +1525,7 @@ class PBVI_Solver(Solver):
             new_value_function.extend(value_function)
         
         return new_value_function
-    
+
 
     def expand_ra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -> BeliefSet:
         '''
@@ -1542,7 +1550,7 @@ class PBVI_Solver(Solver):
 
         return BeliefSet(model, new_beliefs)
 
-    
+
     def expand_ssra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -> BeliefSet:
         '''
         Stochastic Simulation with Random Action.
@@ -1585,7 +1593,7 @@ class PBVI_Solver(Solver):
             new_belief_array[i] = b_new.values
             
         return BeliefSet(model, new_belief_array)
-    
+
 
     def expand_ssga(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, epsilon:float=0.1, max_generation:int=10) -> BeliefSet:
         '''
@@ -1641,7 +1649,7 @@ class PBVI_Solver(Solver):
             new_belief_array[i] = b_new.values
             
         return BeliefSet(model, new_belief_array)
-    
+
 
     def expand_ssea(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -> BeliefSet:
         '''
@@ -1687,7 +1695,7 @@ class PBVI_Solver(Solver):
         new_belief_array = successor_beliefs[b_star[:,None], a_star[:,None], o_star[:,None], model.states[None,:]]
 
         return BeliefSet(model, new_belief_array)
-    
+
 
     def expand_ger(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, max_generation:int=10) -> BeliefSet:
         '''
@@ -1999,7 +2007,7 @@ class PBVI_Solver(Solver):
                 b = b0
 
         return BeliefSet(model, belief_list)
-    
+
 
     def expand_perseus(self,
                        model:Model,
@@ -2640,7 +2648,7 @@ class SimulationHistory(MDP_SimulationHistory):
 
         Parameters
         ----------
-        include_beliefs : bool, default=False # TODO: implement option
+        include_beliefs : bool, default=False
             Whether or not to include the beliefs in the dataframe or not. Doing so requires potential a large amount of memory.
         '''
         df = super().to_dataframe()
@@ -2653,7 +2661,7 @@ class SimulationHistory(MDP_SimulationHistory):
             df = pd.concat([df, belief_df], axis=1)
 
         return df
-    
+
 
     # Overwritten
     def save(self, path:str='./Simulations', file_name:Union[str,None]=None, include_beliefs:bool=False) -> None:
