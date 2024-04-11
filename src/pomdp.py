@@ -2877,12 +2877,12 @@ class SimulationSet:
         # Handle the different way the starting states can be provided
         start_state_array = xp.empty(n)
         if isinstance(start_state, int):
-            start_state_array = start_state
+            start_state_array = (xp.ones(n) * start_state).astype(int)
         elif isinstance(start_state, list):
             repeated_list = xp.repeat(xp.array(start_state), int(np.ceil(n / len(start_state))))
             start_state_array = xp.resize(repeated_list, n)
         else:
-            start_state_array = xp.random.choice(self.model.states, size=n, p=self.model.start_probabilities)
+            start_state_array = xp.random.choice(self.model.states, size=n, p=self.model.start_probabilities).astype(int)
 
         # Set the attributes
         self.n = n
@@ -2970,12 +2970,19 @@ class Agent:
     value_function : ValueFunction
         The value function the agent has come up to after training.
     '''
-    def __init__(self, model:Model, value_function:Union[ValueFunction,None]=None) -> None:
+    def __init__(self,
+                 model:Model,
+                 value_function:Union[ValueFunction,None]=None
+                 ) -> None:
         self.model = model
         self.value_function = value_function
 
 
-    def train(self, solver:PBVI_Solver, expansions:int, horizon:int) -> SolverHistory:
+    def train(self,
+              solver:PBVI_Solver,
+              expansions:int,
+              horizon:int
+              ) -> SolverHistory:
         '''
         Method to train the agent using a given solver.
         The solver will provide a value function that will map beliefs in belief space to actions.
@@ -3027,6 +3034,7 @@ class Agent:
                  simulator:Union[Simulation,None]=None,
                  max_steps:int=1000,
                  start_state:Union[int,None]=None,
+                 initial_belief:Union[Belief,None]=None,
                  print_progress:bool=True,
                  print_stats:bool=True
                  ) -> SimulationHistory:
@@ -3041,6 +3049,8 @@ class Agent:
             The max amount of steps the simulation can run for.
         start_state : int, optional
             The state the agent should start in, if not provided, will be set at random based on start probabilities of the model.
+        initial_belief : Belief, optional
+            If the agent is to be to start with a different belief than the default one it can be provided here.
         print_progress : bool, default=True
             Whether or not to print out the progress of the simulation.
         print_stats : bool, default=True
@@ -3060,10 +3070,14 @@ class Agent:
         if simulator is None:
             simulator = Simulation(self.model)
 
-        # reset
+        # (Re-)initialize simulator
         s = simulator.initialize_simulation(start_state=start_state) # s is only used for the simulation history
-        belief = Belief(self.model)
 
+        # Generating initial belief or getting the provided initial belief
+        belief = Belief(self.model) if initial_belief is None else initial_belief
+        belief = belief if not self.value_function.is_on_gpu else Belief(belief, cp.array(belief.values))
+
+        # Tracking
         history = SimulationHistory(self.model, start_state=s, start_belief=belief)
 
         sim_start_ts = datetime.now()
@@ -3102,7 +3116,8 @@ class Agent:
                           simulator:Union[Simulation,None]=None,
                           n:int=1000,
                           max_steps:int=1000,
-                          start_state:Union[int,None]=None,
+                          start_states:Union[list[int],int,None]=None,
+                          initial_beliefs:Union[list[Belief],Belief,None]=None,
                           reward_discount:float=0.99,
                           print_progress:bool=True,
                           print_stats:bool=True
@@ -3118,8 +3133,12 @@ class Agent:
             The amount of simulations to run.
         max_steps : int, default=1000
             The max_steps to run per simulation.
-        start_state : int, optional
+        start_states : list[int] or int, optional
             The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
+            If a list is provided it has to have n items.
+        initial_beliefs : list[Belief] or Belief, optional
+            A single or list of beliefs to use instead to the default model initial belief.
+            If a list is provided it has to have n items.
         reward_discount : float, default=0.99
             The reward discount to compute the Average Discounted Reward (ADR).
         print_progress : bool, default=True
@@ -3137,15 +3156,25 @@ class Agent:
         if simulator is None:
             simulator = Simulation(self.model)
 
+        assert (not isinstance(start_states, list)) or (len(start_states) == n), 'The size of the list of start states has to match n'
+        assert (not isinstance(initial_beliefs, list)) or (len(initial_beliefs) == n), 'The size of the list of initial beliefs has to match n'
+
         sim_start_ts = datetime.now()
 
+        # Tracking all simulations
         all_histories = []
         all_final_rewards = RewardSet()
         all_discounted_rewards = []
         all_sim_length = []
         done_sim_count = 0
-        for _ in (trange(n) if print_progress else range(n)):
-            sim_history = self.simulate(simulator, max_steps, start_state, False, False)
+
+        for i in (trange(n) if print_progress else range(n)):
+            sim_history = self.simulate(simulator=simulator,
+                                        max_steps=max_steps,
+                                        start_state=(start_states if not isinstance(start_states, list) else start_states[i]),
+                                        initial_belief=(initial_beliefs if not isinstance(initial_beliefs, list) else initial_beliefs[i]),
+                                        print_progress=False,
+                                        print_stats=False)
 
             if simulator.is_done:
                 done_sim_count += 1
@@ -3171,7 +3200,8 @@ class Agent:
                                    n:int=1000,
                                    simulator_set:Union[SimulationSet,None]=None,
                                    max_steps:int=1000,
-                                   start_state:Union[list[int],int,None]=None,
+                                   start_states:Union[list[int],int,None]=None,
+                                   initial_beliefs:Union[list[Belief],Belief,None]=None,
                                    reward_discount:float=0.99,
                                    print_progress:bool=True,
                                    print_stats:bool=True
@@ -3209,14 +3239,23 @@ class Agent:
         xp = np if not self.value_function.is_on_gpu else cp
         model = self.model.cpu_model if not self.value_function.is_on_gpu else self.model.gpu_model
 
+        assert (not isinstance(start_states, list)) or (len(start_states) == n), 'The size of the list of start states has to match n'
+        assert (not isinstance(initial_beliefs, list)) or (len(initial_beliefs) == n), 'The size of the list of initial beliefs has to match n'
+
         # Genetion of an array of n beliefs
-        initial_beliefs = xp.repeat(Belief(model).values[None,:], n, axis=0)
+        if initial_beliefs is None:
+            initial_beliefs = xp.repeat(Belief(model).values[None,:], n, axis=0)
+        else:
+            if isinstance(initial_beliefs, Belief):
+                initial_beliefs = xp.repeat(initial_beliefs.values[None,:], n, axis=0)
+            else:
+                initial_beliefs = xp.array([b.values for b in initial_beliefs])
 
         if simulator_set is None:
             simulator_set = SimulationSet(model)
 
         # Simulations initialization
-        start_state_array = simulator_set.initialize_simulations(n, start_state)
+        start_state_array = simulator_set.initialize_simulations(n, start_states)
         
         # Belief and state arrays
         beliefs = initial_beliefs
