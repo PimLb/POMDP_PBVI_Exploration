@@ -1173,7 +1173,7 @@ class SolverHistory:
             How many frames per second should the saved video have.
         '''
         assert self.tracking_level >= 2, "Tracking level is set too low, increase it to 2 if you want to have value function and belief sets tracking as well."
-        assert self.model.state_count in [2,3], "Can't plot for models with state count other than 2 or 3" # TODO Make support for gird videos
+        assert self.model.state_count in [2,3], "Can't plot for models with state count other than 2 or 3" # TODO Make support for grid videos
 
         if self.model.state_count == 2:
             self._save_history_video_2D(custom_name, compare_with, copy.copy(graph_names), fps)
@@ -1777,7 +1777,7 @@ class PBVI_Solver(Solver):
                     max_generation:int=10
                     ) -> BeliefSet:
         '''
-        The expand function of the  Heruistic Search Value Iteration (HSVI) technique.
+        The expand function of the  Heuristic Search Value Iteration (HSVI) technique.
         It is a redursive function attempting to minimize the bound between the upper and lower estimations of the value function.
 
         It is developped by Smith T. and Simmons R. and described in the paper "Heuristic Search Value Iteration for POMDPs".
@@ -1872,18 +1872,17 @@ class PBVI_Solver(Solver):
 
 
     def expand_fsvi(self,
-                   model:Model,
-                   b0:Belief,
-                   mdp_policy:ValueFunction,
-                   max_generation:int=10
-                   ) -> BeliefSet:
+                    model:Model,
+                    b0:Belief,
+                    mdp_policy:ValueFunction,
+                    max_generation:int=10
+                    ) -> BeliefSet:
         '''
-        # TODO: Not anymore a recursive function, to rework
         Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs following the the Forward Search Value Iteration principles.
-        It is a recursive function that is started by a initial state 's' and using the MDP policy, chooses the best action to take.
+        It starts in an initial state 's' and using the MDP policy, chooses the best action to take.
         Following this, a random next state 's_p' is being sampled from the transition probabilities and a random observation 'o' based on the observation probabilities.
         Then the given belief is updated using the chosen action and the observation received and the updated belief is added to the sequence.
-        Once the state is a goal state, the recursion is done and the belief sequence is returned.
+        Once the state is a goal state, a new random start state is chosen to continue generating belief points until 'max_generation' are in the sequence.
 
         Parameters
         ----------
@@ -1947,7 +1946,9 @@ class PBVI_Solver(Solver):
                        max_generation:int=10
                        ) -> BeliefSet:
         '''
-        # TODO
+        A modification of the Forward Search Value Iteration algorithm where in some epsilon greedy fashion, the action can be chosen randomly.
+        The randomness is controlled by the eps_greedy parameter.
+        If a random variable is under the epsilon value at iteration t, a random action will be made instead of following the mdp policy.
 
         Parameters
         ----------
@@ -2417,7 +2418,30 @@ class PBVI_Solver(Solver):
 
 class HSVI_Solver(PBVI_Solver):
     '''
-    TODO
+    Solver to solve a POMDP problem based on the Heurisitic Search Value Iteration principle.
+    It is developped by Smith T. and Simmons R. and described in the paper "Heuristic Search Value Iteration for POMDPs".
+    It works by generating beliefs to attempt to minimize the bound between the upper and lower estimations of the value function.
+
+    The solve function is the same as the pomdp.PBVI_Solver class with some parameters prefilled.
+
+    Note:
+    - The backup mode is set to new points only
+    - Only one update/backup is run for each iteration.
+    
+    ...
+    Parameters
+    ----------
+    gamma : float, default=0.99
+        The learning rate, used to control how fast the value function will change after the each iterations.
+    eps : float, default=0.001
+        The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.
+    mdp_solution : ValueFunction, optional
+        The value that will be used to decide actions during the exploration procedure. If not provided, it will be computed at solve time.
+
+    Attributes
+    ----------
+    gamma : float
+    eps : float
     '''
     def __init__(self,
                  gamma:float=0.99,
@@ -2795,24 +2819,62 @@ class Simulation(MDP_Simulation):
 
 
 class SimulationSet:
+    '''
+    Class to reprensent a set of simulation processes for a POMDP model.
+    A set of initial random states are given and actions can be applied to the model that impact the actual states of the agents along with returning rewards and observations.
+
+    ...
+
+    Parameters
+    ----------
+    model: pomdp.Model
+        The POMDP model the simulation will be applied on.
+
+    Attributes
+    ----------
+    model: pomdp.Model
+    n : int
+        How many simulations are running at once.
+    agent_states : np.ndarray
+        An array containing all of the agent's states in the running simulations.
+    simulations : np.ndarray
+        An array of a sequence of numbers with the IDs of the various simulations.
+    is_done : np.ndarray
+        An array of booleans of whether or not the agent has reached an end state or performed an ending action.
+    '''
     def __init__(self, model:Model):
-        '''
-        TODO
-        '''
         self.model = model
         
         # Simulation variables
+        self.n = -1
         self.agent_states = [-1]
+        self.simulations = []
         self.is_done = [True] # Need to run initialization first
 
 
     def initialize_simulations(self, n:int=1, start_state:Union[list[int],int,None]=None) -> np.ndarray:
         '''
-        TODO
+        Function to initialize the various variable used to run a set of simulations in parallel.
+
+
+        Parameters
+        ----------
+        n : int (default = 1)
+            How many simulation to run at once.
+        start_state : list[int] or int (optional)
+            The starting state of the simulations.
+            It can either be set for each simulation or a single starting state for all simulations.
+            If it is not provided random starting states will be chosen.
+
+        Returns
+        -------
+        agent_states : np.ndarray
+            The chosen start states (to be recorded in the history).
         '''
         # GPU support
         xp = np if not self.model.is_on_gpu else cp
 
+        # Handle the different way the starting states can be provided
         start_state_array = xp.empty(n)
         if isinstance(start_state, int):
             start_state_array = start_state
@@ -2822,16 +2884,36 @@ class SimulationSet:
         else:
             start_state_array = xp.random.choice(self.model.states, size=n, p=self.model.start_probabilities)
 
+        # Set the attributes
         self.n = n
         self.agent_states = start_state_array
         self.simulations = xp.arange(n)
         self.is_done = xp.zeros(n, dtype=bool)
+
         return self.agent_states
 
 
     def run_actions(self, actions:np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         '''
-        TODO
+        Function to run a step of the simulation.
+        An action is provided which modifies the agent's state using the transition function.
+        And following this action and new state, an observation is gathered and a potential reward is returned.
+        
+        The observations are selected based on the observation matrix of the model.
+        The rewards are selected based on the immediate function of the model.
+
+
+        Parameters
+        ----------
+        actions : np.ndarray
+            The actions as an array the agents chose based on their belief.
+
+        Returns
+        -------
+        rewards : np.ndarray
+            An array of rewards for each simulation that is sent back to the agent.
+        observations : np.ndarray
+            An array of observations for each simulation that is sent back to the agent.
         '''
         # GPU support
         xp = np if not self.model.is_on_gpu else cp
@@ -3027,8 +3109,6 @@ class Agent:
                           ) -> Tuple[RewardSet, list[SimulationHistory]]:
         '''
         Function to run a set of simulations in a row.
-        This is useful when the simulation has a 'done' condition.
-        In this case, the rewards of individual simulations are summed together under a single number.
 
         Parameters
         ----------
@@ -3097,7 +3177,33 @@ class Agent:
                                    print_stats:bool=True
                                    ) -> Tuple[RewardSet, list[SimulationHistory]]:
         '''
-        TODO
+        Function to run a set of simulations in parallel.
+        The simulation will happen on the gpu if the value function object is on the gpu.
+
+        Parameters
+        ----------
+        n : int (default = 1000)
+            How many simulations should be run at once.
+        simulator_set : SimulationSet (optional)
+            A SimulatorSet object. It is used if the agent has to be simulated in a different situation (different model) than during training.
+        max_steps : int (default = 1000)
+            The horizon of the simulation. How many steps to run before the agent is considered 'lost' and can be killed.
+        start_state : list[int] or int (optional)
+            The state from which the agent will start. Alternatively a list of start states can be provided.
+            If none is provided, random starting states will be generated.
+        reward_discount : float (default = 0.99)
+            A discount of the reward that discount how much a reward is worth based on how late it is received.
+        print_progress : bool (default = True)
+            Whether to print the progress of the simulation as a progress bar.
+        print_stats : bool (default = True)
+            Whether to print statistics about the simulations after the simulations are done.
+
+        Returns
+        -------
+        all_histories : RewardSet
+            A list of the final rewards after the set of simulations.
+        all_histories : list[SimulationHistory]
+            A list the simulation histories gathered in the set of simulations.
         '''
         # GPU support
         xp = np if not self.value_function.is_on_gpu else cp
