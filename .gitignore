@@ -3,4 +3,4 @@
 **/__pycache__
 *.mat
 .ipynb_checkpoints
-**/Olfactory*Navigation/Test_*
+**/Test_*

@@ -173,9 +173,6 @@ class Model(MDP_Model):
         print()
         log('POMDP particular parameters:')
 
-        def end_reward_function(s, a, sn, o):
-            return (np.isin(sn, self.end_states) | np.isin(a, self.end_actions)).astype(int)
-
         # ------------------------- Observations -------------------------
         if isinstance(observations, int):
             self.observation_labels = [f'o_{i}' for i in range(observations)]
@@ -3075,7 +3072,7 @@ class Agent:
 
         # Generating initial belief or getting the provided initial belief
         belief = Belief(self.model) if initial_belief is None else initial_belief
-        belief = belief if not self.value_function.is_on_gpu else Belief(belief, cp.array(belief.values))
+        belief = belief if not self.value_function.is_on_gpu else Belief(self.model, cp.array(belief.values))
 
         # Tracking
         history = SimulationHistory(self.model, start_state=s, start_belief=belief)
