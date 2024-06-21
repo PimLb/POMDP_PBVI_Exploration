@@ -3002,7 +3002,7 @@ class Agent:
         return solve_history
 
 
-    def get_best_action(self, belief:Belief) -> int:
+    def get_best_action(self, belief: Belief | np.ndarray) -> int:
         '''
         Function to retrieve the best action for a given belief based on the value function retrieved from the training.
 
@@ -3021,10 +3021,17 @@ class Agent:
         # GPU
         xp = np if not self.value_function.is_on_gpu else cp
 
-        best_vector = xp.argmax(xp.dot(self.value_function.alpha_vector_array, belief.values))
-        best_action = int(self.value_function.actions[best_vector])
+        # Handle case where we have a single belief
+        is_single_belief = isinstance(belief, Belief)
+        belief_array = belief.values[None,:] if is_single_belief else belief
 
-        return best_action
+        # Retrieving the top vectors according to the value function
+        best_vectors = xp.argmax(xp.matmul(belief_array, self.value_function.alpha_vector_array.T), axis=1)
+
+        # Retrieving the actions associated with the vectors chosen
+        best_actions = self.value_function.actions[best_vectors]
+
+        return int(best_actions[0]) if is_single_belief else best_actions
 
 
     def simulate(self,
@@ -3287,11 +3294,7 @@ class Agent:
         
         iterator = trange(max_steps) if print_progress else range(max_steps)
         for i in iterator:
-            # Retrieving the top vectors according to the value function
-            best_vectors = xp.argmax(xp.matmul(beliefs, self.value_function.alpha_vector_array.T), axis=1)
-
-            # Retrieving the actions associated with the vectors chosen
-            best_actions = self.value_function.actions[best_vectors]
+            best_actions = self.get_best_action(beliefs)
 
             # Get each reachable next states for each action
             reachable_state_per_actions = model.reachable_states[:, best_actions, :]
