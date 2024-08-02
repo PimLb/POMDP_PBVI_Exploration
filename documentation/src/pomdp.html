@@ -201,9 +201,6 @@ class Model(MDP_Model):
         print()
         log(&#39;POMDP particular parameters:&#39;)
 
-        def end_reward_function(s, a, sn, o):
-            return (np.isin(sn, self.end_states) | np.isin(a, self.end_actions)).astype(int)
-
         # ------------------------- Observations -------------------------
         if isinstance(observations, int):
             self.observation_labels = [f&#39;o_{i}&#39; for i in range(observations)]
@@ -434,7 +431,9 @@ class Belief:
             return succ
 
         reachable_state_probabilities = self.model.reachable_transitional_observation_table[:,a,o,:] * self.values[:,None]
-        new_state_probabilities = xp.bincount(self.model.reachable_states[:,a,:].flatten(), weights=reachable_state_probabilities.flatten(), minlength=self.model.state_count)
+        new_state_probabilities = xp.bincount(self.model.reachable_states[:,a,:].flatten(),
+                                              weights=reachable_state_probabilities.flatten(),
+                                              minlength=self.model.state_count)
         
         # Normalization
         new_state_probabilities /= xp.sum(new_state_probabilities)
@@ -543,6 +542,7 @@ class BeliefSet:
 
         self._belief_list = None
         self._belief_array = None
+        self._uniqueness_dict = None
 
         self.is_on_gpu = False
 
@@ -564,10 +564,6 @@ class BeliefSet:
             # Check if array is on gpu
             if gpu_support and cp.get_array_module(beliefs) == cp:
                 self.is_on_gpu = True
-
-        # # Deduplication
-        # self._uniqueness_dict = {belief.values.tobytes(): belief for belief in self._belief_list}
-        # self._belief_list = list(self._uniqueness_dict.values())
 
 
     @property
@@ -605,7 +601,38 @@ class BeliefSet:
         for belief in self.belief_list:
             all_successors.extend(belief.generate_successors())
         return BeliefSet(self.model, all_successors)
-    
+
+
+    @property
+    def unique_belief_dict(self) -&gt; dict:
+        if self._uniqueness_dict is None:
+            self._uniqueness_dict = {belief.bytes_repr: belief for belief in self.belief_list}
+        return self._uniqueness_dict
+
+
+    def union(self, other_belief_set:&#39;BeliefSet&#39;) -&gt; &#39;BeliefSet&#39;:
+        &#39;&#39;&#39;
+        Function to make the union between two belief set objects.
+
+        Parameters
+        ----------
+        other_belief_set : BeliefSet
+            The other belief set to make the union with
+        
+        Returns
+        -------
+        new_belief_set : BeliefSet
+            A new, combined, belief set
+        &#39;&#39;&#39;
+        # Deduplication
+        combined_uniqueness_dict = self.unique_belief_dict | other_belief_set.unique_belief_dict
+
+        # Generation of new set
+        new_belief_set = BeliefSet(self.model, list(combined_uniqueness_dict.values()))
+        new_belief_set._uniqueness_dict = combined_uniqueness_dict
+
+        return new_belief_set
+
 
     def __len__(self) -&gt; int:
         return len(self._belief_list) if self._belief_list is not None else self._belief_array.shape[0]
@@ -1109,7 +1136,7 @@ class SolverHistory:
             summary_str += f&#39; ({np.sum(np.divide(self.expansion_times, self.beliefs_counts[1:])) / len(self.expansion_times):.4f}s/it/belief)&#39;
             
             summary_str += f&#39;\n  - Backup function took on average {sum(self.backup_times) /len(self.backup_times):.4f}s &#39;
-            summary_str += f&#39;and yielded on average value functions of size {sum(self.alpha_vector_counts[1:]) / len(self.alpha_vector_counts[1:]):.2f} per iteration.&#39;
+            summary_str += f&#39;and yielded on average {np.average(np.diff(self.alpha_vector_counts)):.2f} alpha vectors per iteration.&#39;
             summary_str += f&#39; ({np.sum(np.divide(self.backup_times, self.alpha_vector_counts[1:])) / len(self.backup_times):.4f}s/it/alpha)&#39;
 
             summary_str += f&#39;\n  - Pruning function took on average {sum(self.pruning_times) /len(self.pruning_times):.4f}s &#39;
@@ -1171,7 +1198,7 @@ class SolverHistory:
             How many frames per second should the saved video have.
         &#39;&#39;&#39;
         assert self.tracking_level &gt;= 2, &#34;Tracking level is set too low, increase it to 2 if you want to have value function and belief sets tracking as well.&#34;
-        assert self.model.state_count in [2,3], &#34;Can&#39;t plot for models with state count other than 2 or 3&#34; # TODO Make support for gird videos
+        assert self.model.state_count in [2,3], &#34;Can&#39;t plot for models with state count other than 2 or 3&#34; # TODO Make support for grid videos
 
         if self.model.state_count == 2:
             self._save_history_video_2D(custom_name, compare_with, copy.copy(graph_names), fps)
@@ -1484,15 +1511,21 @@ class PBVI_Solver(Solver):
 
         # Step 1
         vector_array = value_function.alpha_vector_array
-        vectors_array_reachable_states = vector_array[xp.arange(vector_array.shape[0])[:,None,None,None], model.reachable_states[None,:,:,:]]
+        vectors_array_reachable_states = vector_array[xp.arange(vector_array.shape[0])[:,None,None,None],
+                                                      model.reachable_states[None,:,:,:]]
         
-        gamma_a_o_t = self.gamma * xp.einsum(&#39;saor,vsar-&gt;aovs&#39;, model.reachable_transitional_observation_table, vectors_array_reachable_states)
+        gamma_a_o_t = self.gamma * xp.einsum(&#39;saor,vsar-&gt;aovs&#39;,
+                                             model.reachable_transitional_observation_table,
+                                             vectors_array_reachable_states)
 
         # Step 2
         belief_array = belief_set.belief_array # bs
         best_alpha_ind = xp.argmax(xp.tensordot(belief_array, gamma_a_o_t, (1,3)), axis=3) # argmax(bs,aovs-&gt;baov) -&gt; bao
 
-        best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]] # baos
+        best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None],
+                                        model.observations[None,None,:,None],
+                                        best_alpha_ind[:,:,:,None],
+                                        model.states[None,None,None,:]] # baos
 
         alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2) # as + bas
 
@@ -1517,7 +1550,7 @@ class PBVI_Solver(Solver):
             new_value_function.extend(value_function)
         
         return new_value_function
-    
+
 
     def expand_ra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
@@ -1542,7 +1575,7 @@ class PBVI_Solver(Solver):
 
         return BeliefSet(model, new_beliefs)
 
-    
+
     def expand_ssra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Stochastic Simulation with Random Action.
@@ -1585,7 +1618,7 @@ class PBVI_Solver(Solver):
             new_belief_array[i] = b_new.values
             
         return BeliefSet(model, new_belief_array)
-    
+
 
     def expand_ssga(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, epsilon:float=0.1, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
@@ -1641,7 +1674,7 @@ class PBVI_Solver(Solver):
             new_belief_array[i] = b_new.values
             
         return BeliefSet(model, new_belief_array)
-    
+
 
     def expand_ssea(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
@@ -1687,7 +1720,7 @@ class PBVI_Solver(Solver):
         new_belief_array = successor_beliefs[b_star[:,None], a_star[:,None], o_star[:,None], model.states[None,:]]
 
         return BeliefSet(model, new_belief_array)
-    
+
 
     def expand_ger(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
@@ -1769,7 +1802,7 @@ class PBVI_Solver(Solver):
                     max_generation:int=10
                     ) -&gt; BeliefSet:
         &#39;&#39;&#39;
-        The expand function of the  Heruistic Search Value Iteration (HSVI) technique.
+        The expand function of the  Heuristic Search Value Iteration (HSVI) technique.
         It is a redursive function attempting to minimize the bound between the upper and lower estimations of the value function.
 
         It is developped by Smith T. and Simmons R. and described in the paper &#34;Heuristic Search Value Iteration for POMDPs&#34;.
@@ -1864,75 +1897,143 @@ class PBVI_Solver(Solver):
 
 
     def expand_fsvi(self,
-                   model:Model,
-                   b:Belief,
-                   mdp_policy:ValueFunction,
-                   s:Union[int, None]=None,
-                   max_generation:int=10,
-                   sequence_string:str=&#39;&#39;
-                   ) -&gt; BeliefSet:
+                    model:Model,
+                    b0:Belief,
+                    mdp_policy:ValueFunction,
+                    max_generation:int=10
+                    ) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs following the the Forward Search Value Iteration principles.
-        It is a recursive function that is started by a initial state &#39;s&#39; and using the MDP policy, chooses the best action to take.
+        It starts in an initial state &#39;s&#39; and using the MDP policy, chooses the best action to take.
         Following this, a random next state &#39;s_p&#39; is being sampled from the transition probabilities and a random observation &#39;o&#39; based on the observation probabilities.
         Then the given belief is updated using the chosen action and the observation received and the updated belief is added to the sequence.
-        Once the state is a goal state, the recursion is done and the belief sequence is returned.
+        Once the state is a goal state, a new random start state is chosen to continue generating belief points until &#39;max_generation&#39; are in the sequence.
 
         Parameters
         ----------
         model : pomdp.Model
             The model in which the exploration process will happen.
-        b : Belief
-            A belief to be added to the returned belief sequence and updated for the next step of the recursion.
+        b0 : Belief
+            The belief to start the sequence with.
+            A random state will be chosen based on the probability distribution of the belief.
         mdp_policy : ValueFunction
             The mdp policy used to choose the action from with the given state &#39;s&#39;.
-        s : int
-            The state that starts the exploration sequence and based on which an action will be chosen.
         max_generation : int, default=10
             The maximum recursion depth that can be reached before the generated belief sequence is returned.
-        sequence_string : str, default=&#39;&#39;
-            The sequence of previously explored actions and observations.
         
         Returns
         -------
         belief_set : BeliefSet
             A new sequence of beliefs.
         &#39;&#39;&#39;
-        xp = np if not gpu_support else cp.get_array_module(b.values)
-        belief_list = [b]
+        xp = np if not gpu_support else cp.get_array_module(b0.values)
+        belief_list = [b0]
 
-        # If state not provided pick a random one
-        if s is None:
-            s = b.random_state()
+        # Choose a random starting state
+        s = b0.random_state()
 
-        # If end is not reached
-        if (s not in model.end_states) and (max_generation &gt; 0):
+        # Setting the working belief
+        b = b0
+
+        for _ in range(max_generation - 1): #-1 due to a one belief already being present in the set
             # Choose action based on mdp value function
             a_star = xp.argmax(mdp_policy.alpha_vector_array[:,s])
 
             # Pick a random next state (weighted by transition probabilities)
             s_p = model.transition(s, a_star)
-
+            
             # Pick a random observation weighted by observation probabilities in state s_p and after having done action a_star
             o = model.observe(s_p, a_star)
-
-            # Update sequence string
-            sequence_string += (&#39;-&#39; if len(sequence_string) &gt; 0 else &#39;&#39;) + f&#39;{a_star},{o}&#39;
-
+            
             # Generate a new belief based on a_star and o
             b_p = b.update(a_star, o)
 
-            # Recursive call to go closer to goal
-            b_set = self.expand_fsvi(model=model,
-                                     b=b_p,
-                                     mdp_policy=mdp_policy,
-                                     s=s_p,
-                                     max_generation=max_generation-1,
-                                     sequence_string=sequence_string)
-            belief_list.extend(b_set.belief_list)
-        
+            # Record new belief
+            belief_list.append(b_p)
+
+            # Updating s and b
+            s = s_p
+            b = b_p
+
+            # Reset and belief if end state is reached
+            if s in model.end_states:
+                s = b0.random_state()
+                b = b0
+
         return BeliefSet(model, belief_list)
-    
+
+
+    def expand_fsvi_eg(self,
+                       model:Model,
+                       b0:Belief,
+                       mdp_policy:ValueFunction,
+                       eps_greedy:Union[callable, None]=None,
+                       max_generation:int=10
+                       ) -&gt; BeliefSet:
+        &#39;&#39;&#39;
+        A modification of the Forward Search Value Iteration algorithm where in some epsilon greedy fashion, the action can be chosen randomly.
+        The randomness is controlled by the eps_greedy parameter.
+        If a random variable is under the epsilon value at iteration t, a random action will be made instead of following the mdp policy.
+
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model in which the exploration process will happen.
+        b0 : Belief
+            The belief to start the sequence with.
+            A random state will be chosen based on the probability distribution of the belief.
+        mdp_policy : ValueFunction
+            The mdp policy used to choose the action from with the given state &#39;s&#39;.
+        eps_greedy : callable, default=0.2 (fixed)
+            A function or a callable, representing how a the epsilon parameter should evolve through the iterations
+        max_generation : int, default=10
+            The maximum recursion depth that can be reached before the generated belief sequence is returned.
+        
+        Returns
+        -------
+        belief_set : BeliefSet
+            A new sequence of beliefs.
+        &#39;&#39;&#39;
+        xp = np if not gpu_support else cp.get_array_module(b0.values)
+        belief_list = [b0]
+
+        # Choose a random starting state
+        s = b0.random_state()
+
+        # Setting the working belief
+        b = b0
+
+        # If eps_greedy is None
+        if eps_greedy is None:
+            eps_greedy = (lambda t: 0.2)
+
+        for i in range(max_generation - 1): # -1 due to a one belief already being present in the set
+            # Choose action based on mdp value function
+            a_star = int(random.choice(model.actions)) if random.random() &lt; eps_greedy(i) else xp.argmax(mdp_policy.alpha_vector_array[:,s])
+
+            # Pick a random next state (weighted by transition probabilities)
+            s_p = model.transition(s, a_star)
+            
+            # Pick a random observation weighted by observation probabilities in state s_p and after having done action a_star
+            o = model.observe(s_p, a_star)
+            
+            # Generate a new belief based on a_star and o
+            b_p = b.update(a_star, o)
+
+            # Record new belief
+            belief_list.append(b_p)
+
+            # Updating s and b
+            s = s_p
+            b = b_p
+
+            # Reset and belief if end state is reached
+            if s in model.end_states:
+                s = b0.random_state()
+                b = b0
+
+        return BeliefSet(model, belief_list)
+
 
     def expand_perseus(self,
                        model:Model,
@@ -1993,6 +2094,7 @@ class PBVI_Solver(Solver):
             - Greedy Error Reduction (ger)
             - Heuristic Search Value Iteration (hsvi)
             - Forward Search Value Iteration (fsvi)
+            - Forward Search Value Iteration - Epsilon Greedy (fsvi_eg)
             - Perseus (perseus)
                 
         Parameters
@@ -2043,9 +2145,17 @@ class PBVI_Solver(Solver):
         elif self.expand_function in &#39;expand_fsvi&#39;:
             args = {arg: function_specific_parameters[arg] for arg in [&#39;mdp_policy&#39;] if arg in function_specific_parameters}
             return self.expand_fsvi(model=model, 
-                                    b=belief_set.belief_list[0],
+                                    b0=belief_set.belief_list[0],
                                     mdp_policy=args[&#39;mdp_policy&#39;],
                                     max_generation=max_generation)
+        
+        elif self.expand_function in &#39;expand_fsvi_eg&#39;:
+            args = {arg: function_specific_parameters[arg] for arg in [&#39;mdp_policy&#39;, &#39;eps_greedy&#39;] if arg in function_specific_parameters}
+            return self.expand_fsvi_eg(model=model, 
+                                       b0=belief_set.belief_list[0],
+                                       mdp_policy=args[&#39;mdp_policy&#39;],
+                                       eps_greedy=args[&#39;eps_greedy&#39;] if &#39;eps_greedy&#39; in args else None,
+                                       max_generation=max_generation)
         
         elif self.expand_function in &#39;expand_perseus&#39;:
             return self.expand_perseus(model=model, b=belief_set.belief_list[0], max_generation=max_generation)
@@ -2097,6 +2207,7 @@ class PBVI_Solver(Solver):
               initial_value_function:Union[ValueFunction,None]=None,
               prune_level:int=1,
               prune_interval:int=10,
+              limit_value_function_size:int=-1,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -2137,6 +2248,9 @@ class PBVI_Solver(Solver):
             Parameter to prune the value function further before the expand function.
         prune_interval : int, default=10
             How often to prune the value function. It is counted in number of backup iterations.
+        limit_value_function_size : int, default=-1
+            When the value function size crosses this treshold, a random selection of &#39;max_belief_growth&#39; alpha vectors will be removed from the value function
+            If set to -1, the value function can grow without bounds.
         use_gpu : bool, default=False
             Whether to use the GPU with cupy array to accelerate solving.
         history_tracking_level : int, default=1
@@ -2182,7 +2296,8 @@ class PBVI_Solver(Solver):
             full_backup = any([self.expand_function in func for func in [&#39;expand_ra&#39;, &#39;expand_ssra&#39;, &#39;expand_ssga&#39;, &#39;expand_ssea&#39;, &#39;expand_ger&#39;]])
 
         # For hsvi of fsvi, mdp policy is required as upper bound, so if it is not required, generate it
-        if (&#39;mdp_policy&#39; not in self.expand_function_params) or (self.expand_function_params[&#39;mdp_policy&#39;] is None):
+        if ((&#39;fsvi&#39; in self.expand_function or &#39;hsvi&#39; in self.expand_function) and 
+            ((&#39;mdp_policy&#39; not in self.expand_function_params) or (self.expand_function_params[&#39;mdp_policy&#39;] is None))):
             log(&#39;[Warning] MDP solution not provided, running value iteration on the problem to retrieve it...&#39;)
             vi_solver = VI_Solver(gamma=self.gamma, eps=self.eps)
 
@@ -2214,7 +2329,9 @@ class PBVI_Solver(Solver):
         old_value_function = value_function
 
         try:
-            for expansion_i in range(expansions) if not print_progress else trange(expansions, desc=&#39;Expansions&#39;):
+            iterator = trange(expansions, desc=&#39;Expansions&#39;) if print_progress else range(expansions)
+            iterator_postfix = {}
+            for expansion_i in iterator:
 
                 # 1: Expand belief set
                 start_ts = datetime.now()
@@ -2225,11 +2342,8 @@ class PBVI_Solver(Solver):
                                              max_generation=max_belief_growth,
                                              **self.expand_function_params)
 
-                # If full backup append the newly generated set to the old belief_set
-                if full_backup:
-                    belief_set = BeliefSet(model, xp.vstack((belief_set.belief_array, new_belief_set.belief_array)))
-                else:
-                    belief_set = new_belief_set
+                # Add new beliefs points to the total belief_set
+                belief_set = belief_set.union(new_belief_set)
 
                 expand_time = (datetime.now() - start_ts).total_seconds()
                 solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
@@ -2240,7 +2354,7 @@ class PBVI_Solver(Solver):
 
                     # Backup step
                     value_function = self.backup(model,
-                                                 belief_set,
+                                                 belief_set if full_backup else new_belief_set,
                                                  value_function,
                                                  append=(not full_backup),
                                                  belief_dominance_prune=False)
@@ -2256,6 +2370,29 @@ class PBVI_Solver(Solver):
                         prune_time = (datetime.now() - start_ts).total_seconds()
                         alpha_vectors_pruned = len(value_function) - vf_len
                         solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
+
+                    # Check if value function size is above treshold
+                    if limit_value_function_size &gt;= 0 and len(value_function) &gt; limit_value_function_size:
+                        # Compute matrix multiplications between avs and beliefs
+                        alpha_value_per_belief = xp.matmul(value_function.alpha_vector_array, belief_set.belief_array.T)
+
+                        # Select the useful alpha vectors
+                        best_alpha_vector_per_belief = xp.argmax(alpha_value_per_belief, axis=0)
+                        useful_alpha_vectors = xp.unique(best_alpha_vector_per_belief)
+
+                        # Select a random selection of vectors to delete
+                        unuseful_alpha_vectors = xp.delete(xp.arange(len(value_function)), useful_alpha_vectors)
+                        random_vectors_to_delete = xp.random.choice(unuseful_alpha_vectors,
+                                                                    size=max_belief_growth,
+                                                                    p=(xp.arange(len(unuseful_alpha_vectors))[::-1] / xp.sum(xp.arange(len(unuseful_alpha_vectors)))))
+                                                                    # replace=False,
+                                                                    # p=1/len(unuseful_alpha_vectors))
+
+                        value_function = ValueFunction(model=model,
+                                                       alpha_vectors=xp.delete(value_function.alpha_vector_array, random_vectors_to_delete, axis=0),
+                                                       action_list=xp.delete(value_function.actions, random_vectors_to_delete))
+                        
+                        iterator_postfix[&#39;|useful|&#39;] = useful_alpha_vectors.shape[0]
                     
                     # Compute the change between value functions
                     max_change = self.compute_change(value_function, old_value_function, belief_set)
@@ -2280,6 +2417,13 @@ class PBVI_Solver(Solver):
                     break
 
                 expand_value_function = value_function
+
+                iterator_postfix[&#39;|V|&#39;] = len(value_function)
+                iterator_postfix[&#39;|B|&#39;] = len(belief_set)
+
+                if print_progress:
+                    iterator.set_postfix(iterator_postfix)
+
         except MemoryError as e:
             print(f&#39;Memory full: {e}&#39;)
             print(&#39;Returning value function and history as is...\n&#39;)
@@ -2299,7 +2443,30 @@ class PBVI_Solver(Solver):
 
 class HSVI_Solver(PBVI_Solver):
     &#39;&#39;&#39;
-    TODO
+    Solver to solve a POMDP problem based on the Heurisitic Search Value Iteration principle.
+    It is developped by Smith T. and Simmons R. and described in the paper &#34;Heuristic Search Value Iteration for POMDPs&#34;.
+    It works by generating beliefs to attempt to minimize the bound between the upper and lower estimations of the value function.
+
+    The solve function is the same as the pomdp.PBVI_Solver class with some parameters prefilled.
+
+    Note:
+    - The backup mode is set to new points only
+    - Only one update/backup is run for each iteration.
+    
+    ...
+    Parameters
+    ----------
+    gamma : float, default=0.99
+        The learning rate, used to control how fast the value function will change after the each iterations.
+    eps : float, default=0.001
+        The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.
+    mdp_solution : ValueFunction, optional
+        The value that will be used to decide actions during the exploration procedure. If not provided, it will be computed at solve time.
+
+    Attributes
+    ----------
+    gamma : float
+    eps : float
     &#39;&#39;&#39;
     def __init__(self,
                  gamma:float=0.99,
@@ -2319,6 +2486,7 @@ class HSVI_Solver(PBVI_Solver):
               initial_value_function:Union[ValueFunction,None]=None,
               prune_level:int=1,
               prune_interval:int=10,
+              limit_value_function_size:int=-1,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -2332,6 +2500,7 @@ class HSVI_Solver(PBVI_Solver):
                              initial_value_function=initial_value_function,
                              prune_level=prune_level,
                              prune_interval=prune_interval,
+                             limit_value_function_size=limit_value_function_size,
                              use_gpu=use_gpu,
                              history_tracking_level=history_tracking_level,
                              print_progress=print_progress)
@@ -2383,6 +2552,7 @@ class FSVI_Solver(PBVI_Solver):
               initial_value_function:Union[ValueFunction, None]=None,
               prune_level:int=1,
               prune_interval:int=10,
+              limit_value_function_size:int=-1,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -2396,9 +2566,44 @@ class FSVI_Solver(PBVI_Solver):
                              initial_value_function=initial_value_function,
                              prune_level=prune_level,
                              prune_interval=prune_interval,
+                             limit_value_function_size=limit_value_function_size,
                              use_gpu=use_gpu,
                              history_tracking_level=history_tracking_level,
                              print_progress=print_progress)
+
+
+class FSVI_EG_Solver(FSVI_Solver):
+    &#39;&#39;&#39;
+    As FSVI_Solver except actions are chosen in an epsilon-greedy fashion
+    
+    ...
+    Parameters
+    ----------
+    gamma : float, default=0.9
+        The learning rate, used to control how fast the value function will change after the each iterations.
+    eps : float, default=0.001
+        The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.
+    mdp_policy : ValueFunction, optional
+        The value that will be used to decide actions during the MDP explore procedure. If not provided, it will be computed at solve time.
+    eps_greedy : callable, default=0.2 (fixed)
+        A function or a callable, representing how a the epsilon parameter should evolve through the iterations.
+
+    Attributes
+    ----------
+    gamma : float
+    eps : float
+    &#39;&#39;&#39;
+    def __init__(self,
+                 gamma:float=0.9,
+                 eps:float=0.001,
+                 mdp_policy:Union[ValueFunction,None]=None,
+                 eps_greedy:Union[callable,None]=None
+                 ):
+        super().__init__(gamma,
+                         eps,
+                         mdp_policy)
+        self.expand_function = &#39;fsvi_eg&#39;
+        self.expand_function_params[&#39;eps_greedy&#39;] = eps_greedy if eps_greedy is not None else (lambda t: 0.2)
 
 
 class SimulationHistory(MDP_SimulationHistory):
@@ -2492,7 +2697,7 @@ class SimulationHistory(MDP_SimulationHistory):
 
         Parameters
         ----------
-        include_beliefs : bool, default=False # TODO: implement option
+        include_beliefs : bool, default=False
             Whether or not to include the beliefs in the dataframe or not. Doing so requires potential a large amount of memory.
         &#39;&#39;&#39;
         df = super().to_dataframe()
@@ -2505,7 +2710,7 @@ class SimulationHistory(MDP_SimulationHistory):
             df = pd.concat([df, belief_df], axis=1)
 
         return df
-    
+
 
     # Overwritten
     def save(self, path:str=&#39;./Simulations&#39;, file_name:Union[str,None]=None, include_beliefs:bool=False) -&gt; None:
@@ -2572,6 +2777,9 @@ class SimulationHistory(MDP_SimulationHistory):
         ax.set_xticks(x_ticks)
         ax.set_yticks(y_ticks)
 
+        ax.set_xlim(0, dimensions[1])
+        ax.set_ylim(dimensions[0], 0)
+
 
 class Simulation(MDP_Simulation):
     &#39;&#39;&#39;
@@ -2635,6 +2843,136 @@ class Simulation(MDP_Simulation):
         return (r, o)
 
 
+class SimulationSet:
+    &#39;&#39;&#39;
+    Class to reprensent a set of simulation processes for a POMDP model.
+    A set of initial random states are given and actions can be applied to the model that impact the actual states of the agents along with returning rewards and observations.
+
+    ...
+
+    Parameters
+    ----------
+    model: pomdp.Model
+        The POMDP model the simulation will be applied on.
+
+    Attributes
+    ----------
+    model: pomdp.Model
+    n : int
+        How many simulations are running at once.
+    agent_states : np.ndarray
+        An array containing all of the agent&#39;s states in the running simulations.
+    simulations : np.ndarray
+        An array of a sequence of numbers with the IDs of the various simulations.
+    is_done : np.ndarray
+        An array of booleans of whether or not the agent has reached an end state or performed an ending action.
+    &#39;&#39;&#39;
+    def __init__(self, model:Model):
+        self.model = model
+        
+        # Simulation variables
+        self.n = -1
+        self.agent_states = [-1]
+        self.simulations = []
+        self.is_done = [True] # Need to run initialization first
+
+
+    def initialize_simulations(self, n:int=1, start_state:Union[list[int],int,None]=None) -&gt; np.ndarray:
+        &#39;&#39;&#39;
+        Function to initialize the various variable used to run a set of simulations in parallel.
+
+
+        Parameters
+        ----------
+        n : int (default = 1)
+            How many simulation to run at once.
+        start_state : list[int] or int (optional)
+            The starting state of the simulations.
+            It can either be set for each simulation or a single starting state for all simulations.
+            If it is not provided random starting states will be chosen.
+
+        Returns
+        -------
+        agent_states : np.ndarray
+            The chosen start states (to be recorded in the history).
+        &#39;&#39;&#39;
+        # GPU support
+        xp = np if not self.model.is_on_gpu else cp
+
+        # Handle the different way the starting states can be provided
+        start_state_array = xp.empty(n)
+        if isinstance(start_state, int):
+            start_state_array = (xp.ones(n) * start_state).astype(int)
+        elif isinstance(start_state, list):
+            repeated_list = xp.repeat(xp.array(start_state), int(np.ceil(n / len(start_state))))
+            start_state_array = xp.resize(repeated_list, n)
+        else:
+            start_state_array = xp.random.choice(self.model.states, size=n, p=self.model.start_probabilities).astype(int)
+
+        # Set the attributes
+        self.n = n
+        self.agent_states = start_state_array
+        self.simulations = xp.arange(n)
+        self.is_done = xp.zeros(n, dtype=bool)
+
+        return self.agent_states
+
+
+    def run_actions(self, actions:np.ndarray) -&gt; tuple[np.ndarray, np.ndarray]:
+        &#39;&#39;&#39;
+        Function to run a step of the simulation.
+        An action is provided which modifies the agent&#39;s state using the transition function.
+        And following this action and new state, an observation is gathered and a potential reward is returned.
+        
+        The observations are selected based on the observation matrix of the model.
+        The rewards are selected based on the immediate function of the model.
+
+
+        Parameters
+        ----------
+        actions : np.ndarray
+            The actions as an array the agents chose based on their belief.
+
+        Returns
+        -------
+        rewards : np.ndarray
+            An array of rewards for each simulation that is sent back to the agent.
+        observations : np.ndarray
+            An array of observations for each simulation that is sent back to the agent.
+        &#39;&#39;&#39;
+        # GPU support
+        xp = np if not self.model.is_on_gpu else cp
+        
+        # Get each reachable next states for each action
+        reachable_state_per_actions = self.model.reachable_states[:, actions, :]
+
+        # Gathering new states based on the transition function and the chosen actions
+        next_state_potentials = reachable_state_per_actions[self.agent_states, xp.arange(self.n)]
+        if self.model.reachable_state_count == 1:
+            next_states = next_state_potentials[:,0]
+        else:
+            potential_probabilities = self.model.reachable_probabilities[self.agent_states[:,None], actions[:,None]][:,0,:]
+            chosen_indices = xp.apply_along_axis(lambda x: xp.random.choice(len(x), size=1, p=x), axis=1, arr=potential_probabilities)
+            next_states = next_state_potentials[chosen_indices][:,0,0]
+
+        # Making observations based on the states landed in and the action that was taken
+        observation_probabilities = self.model.observation_table[next_states[:,None], actions[:,None]][:,0,:]
+        observations = xp.sum(xp.random.random(self.n)[:,None] &gt; xp.cumsum(observation_probabilities[:,:-1], axis=1), axis=1)
+
+        # Rewards computation
+        step_rewards = xp.array([self.model.immediate_reward_function(int(s), int(a), int(s_p), int(o)) for s,a,s_p,o in zip(self.agent_states, actions, next_states, observations)])
+        rewards = xp.where(~self.is_done, step_rewards, 0)
+
+        # Checking for done condition
+        are_done = xp.isin(next_states, xp.array(self.model.end_states))
+        self.is_done |= are_done
+
+        # Update states
+        self.agent_states = next_states
+
+        return rewards, observations
+
+
 class Agent:
     &#39;&#39;&#39;
     The class of an Agent running on a POMDP model.
@@ -2657,12 +2995,19 @@ class Agent:
     value_function : ValueFunction
         The value function the agent has come up to after training.
     &#39;&#39;&#39;
-    def __init__(self, model:Model, value_function:Union[ValueFunction,None]=None) -&gt; None:
+    def __init__(self,
+                 model:Model,
+                 value_function:Union[ValueFunction,None]=None
+                 ) -&gt; None:
         self.model = model
         self.value_function = value_function
 
 
-    def train(self, solver:PBVI_Solver, expansions:int, horizon:int) -&gt; SolverHistory:
+    def train(self,
+              solver:PBVI_Solver,
+              expansions:int,
+              horizon:int
+              ) -&gt; SolverHistory:
         &#39;&#39;&#39;
         Method to train the agent using a given solver.
         The solver will provide a value function that will map beliefs in belief space to actions.
@@ -2685,7 +3030,7 @@ class Agent:
         return solve_history
 
 
-    def get_best_action(self, belief:Belief) -&gt; int:
+    def get_best_action(self, belief: Belief | np.ndarray) -&gt; int:
         &#39;&#39;&#39;
         Function to retrieve the best action for a given belief based on the value function retrieved from the training.
 
@@ -2704,16 +3049,24 @@ class Agent:
         # GPU
         xp = np if not self.value_function.is_on_gpu else cp
 
-        best_vector = xp.argmax(xp.dot(self.value_function.alpha_vector_array, belief.values))
-        best_action = int(self.value_function.actions[best_vector])
+        # Handle case where we have a single belief
+        is_single_belief = isinstance(belief, Belief)
+        belief_array = belief.values[None,:] if is_single_belief else belief
 
-        return best_action
+        # Retrieving the top vectors according to the value function
+        best_vectors = xp.argmax(xp.matmul(belief_array, self.value_function.alpha_vector_array.T), axis=1)
+
+        # Retrieving the actions associated with the vectors chosen
+        best_actions = self.value_function.actions[best_vectors]
+
+        return int(best_actions[0]) if is_single_belief else best_actions
 
 
     def simulate(self,
                  simulator:Union[Simulation,None]=None,
                  max_steps:int=1000,
                  start_state:Union[int,None]=None,
+                 initial_belief:Union[Belief,None]=None,
                  print_progress:bool=True,
                  print_stats:bool=True
                  ) -&gt; SimulationHistory:
@@ -2728,6 +3081,8 @@ class Agent:
             The max amount of steps the simulation can run for.
         start_state : int, optional
             The state the agent should start in, if not provided, will be set at random based on start probabilities of the model.
+        initial_belief : Belief, optional
+            If the agent is to be to start with a different belief than the default one it can be provided here.
         print_progress : bool, default=True
             Whether or not to print out the progress of the simulation.
         print_stats : bool, default=True
@@ -2747,10 +3102,14 @@ class Agent:
         if simulator is None:
             simulator = Simulation(self.model)
 
-        # reset
+        # (Re-)initialize simulator
         s = simulator.initialize_simulation(start_state=start_state) # s is only used for the simulation history
-        belief = Belief(self.model)
 
+        # Generating initial belief or getting the provided initial belief
+        belief = Belief(self.model) if initial_belief is None else initial_belief
+        belief = belief if not self.value_function.is_on_gpu else Belief(self.model, cp.array(belief.values))
+
+        # Tracking
         history = SimulationHistory(self.model, start_state=s, start_belief=belief)
 
         sim_start_ts = datetime.now()
@@ -2789,15 +3148,14 @@ class Agent:
                           simulator:Union[Simulation,None]=None,
                           n:int=1000,
                           max_steps:int=1000,
-                          start_state:Union[int,None]=None,
+                          start_states:Union[list[int],int,None]=None,
+                          initial_beliefs:Union[list[Belief],Belief,None]=None,
                           reward_discount:float=0.99,
                           print_progress:bool=True,
                           print_stats:bool=True
                           ) -&gt; Tuple[RewardSet, list[SimulationHistory]]:
         &#39;&#39;&#39;
         Function to run a set of simulations in a row.
-        This is useful when the simulation has a &#39;done&#39; condition.
-        In this case, the rewards of individual simulations are summed together under a single number.
 
         Parameters
         ----------
@@ -2807,8 +3165,12 @@ class Agent:
             The amount of simulations to run.
         max_steps : int, default=1000
             The max_steps to run per simulation.
-        start_state : int, optional
+        start_states : list[int] or int, optional
             The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
+            If a list is provided it has to have n items.
+        initial_beliefs : list[Belief] or Belief, optional
+            A single or list of beliefs to use instead to the default model initial belief.
+            If a list is provided it has to have n items.
         reward_discount : float, default=0.99
             The reward discount to compute the Average Discounted Reward (ADR).
         print_progress : bool, default=True
@@ -2826,15 +3188,25 @@ class Agent:
         if simulator is None:
             simulator = Simulation(self.model)
 
+        assert (not isinstance(start_states, list)) or (len(start_states) == n), &#39;The size of the list of start states has to match n&#39;
+        assert (not isinstance(initial_beliefs, list)) or (len(initial_beliefs) == n), &#39;The size of the list of initial beliefs has to match n&#39;
+
         sim_start_ts = datetime.now()
 
+        # Tracking all simulations
         all_histories = []
         all_final_rewards = RewardSet()
         all_discounted_rewards = []
         all_sim_length = []
         done_sim_count = 0
-        for _ in (trange(n) if print_progress else range(n)):
-            sim_history = self.simulate(simulator, max_steps, start_state, False, False)
+
+        for i in (trange(n) if print_progress else range(n)):
+            sim_history = self.simulate(simulator=simulator,
+                                        max_steps=max_steps,
+                                        start_state=(start_states if not isinstance(start_states, list) else start_states[i]),
+                                        initial_belief=(initial_beliefs if not isinstance(initial_beliefs, list) else initial_beliefs[i]),
+                                        print_progress=False,
+                                        print_stats=False)
 
             if simulator.is_done:
                 done_sim_count += 1
@@ -2858,41 +3230,71 @@ class Agent:
 
     def run_n_simulations_parallel(self,
                                    n:int=1000,
+                                   simulator_set:Union[SimulationSet,None]=None,
                                    max_steps:int=1000,
-                                   start_state:Union[list[int],int,None]=None,
+                                   start_states:Union[list[int],int,None]=None,
+                                   initial_beliefs:Union[list[Belief],Belief,None]=None,
                                    reward_discount:float=0.99,
                                    print_progress:bool=True,
                                    print_stats:bool=True
                                    ) -&gt; Tuple[RewardSet, list[SimulationHistory]]:
         &#39;&#39;&#39;
-        TODO
+        Function to run a set of simulations in parallel.
+        The simulation will happen on the gpu if the value function object is on the gpu.
+
+        Parameters
+        ----------
+        n : int (default = 1000)
+            How many simulations should be run at once.
+        simulator_set : SimulationSet (optional)
+            A SimulatorSet object. It is used if the agent has to be simulated in a different situation (different model) than during training.
+        max_steps : int (default = 1000)
+            The horizon of the simulation. How many steps to run before the agent is considered &#39;lost&#39; and can be killed.
+        start_state : list[int] or int (optional)
+            The state from which the agent will start. Alternatively a list of start states can be provided.
+            If none is provided, random starting states will be generated.
+        reward_discount : float (default = 0.99)
+            A discount of the reward that discount how much a reward is worth based on how late it is received.
+        print_progress : bool (default = True)
+            Whether to print the progress of the simulation as a progress bar.
+        print_stats : bool (default = True)
+            Whether to print statistics about the simulations after the simulations are done.
+
+        Returns
+        -------
+        all_histories : RewardSet
+            A list of the final rewards after the set of simulations.
+        all_histories : list[SimulationHistory]
+            A list the simulation histories gathered in the set of simulations.
         &#39;&#39;&#39;
         # GPU support
         xp = np if not self.value_function.is_on_gpu else cp
         model = self.model.cpu_model if not self.value_function.is_on_gpu else self.model.gpu_model
 
-        # Genetion of an array of n beliefs
-        initial_beliefs = xp.repeat(Belief(model).values[None,:], n, axis=0)
+        assert (not isinstance(start_states, list)) or (len(start_states) == n), &#39;The size of the list of start states has to match n&#39;
+        assert (not isinstance(initial_beliefs, list)) or (len(initial_beliefs) == n), &#39;The size of the list of initial beliefs has to match n&#39;
 
-        # Generating n initial positions
-        start_state_array = xp.empty(n)
-        if isinstance(start_state, int):
-            start_state_array = start_state
-        elif isinstance(start_state, list):
-            repeated_list = xp.repeat(xp.array(start_state), int(np.ceil(n / len(start_state))))
-            start_state_array = xp.resize(repeated_list, n)
+        # Genetion of an array of n beliefs
+        if initial_beliefs is None:
+            initial_beliefs = xp.repeat(Belief(model).values[None,:], n, axis=0)
         else:
-            start_state_array = xp.random.choice(model.states, size=n, p=model.start_probabilities)
+            if isinstance(initial_beliefs, Belief):
+                initial_beliefs = xp.repeat(initial_beliefs.values[None,:], n, axis=0)
+            else:
+                initial_beliefs = xp.array([b.values for b in initial_beliefs])
+
+        if simulator_set is None:
+            simulator_set = SimulationSet(model)
+
+        # Simulations initialization
+        start_state_array = simulator_set.initialize_simulations(n, start_states)
         
         # Belief and state arrays
         beliefs = initial_beliefs
         new_beliefs = None
-        states = start_state_array
-        next_states = None
 
         # Tracking what simulations are done
-        sim_is_done = xp.zeros(n, dtype=bool)
-        done_at_step = xp.full(n, -1)
+        done_at_step = xp.full(n, -1, dtype=int)
 
         # Speedup item
         simulations = xp.arange(n)
@@ -2900,45 +3302,33 @@ class Agent:
         flat_shape = (n, (model.state_count * model.reachable_state_count))
 
         # 2D bincount for belief set update
-        def bincount2D_vectorized(a, w):    
+        def bincount2D_vectorized(a, w):
             a_offs = a + flatten_offset
-            return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape(-1,model.state_count)
+            return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape((-1,model.state_count))
 
         # Results
         discount = reward_discount
-        rewards = []
-        discounted_rewards = []
+        rewards_history = xp.zeros((max_steps, n))
+        discounted_rewards_history = xp.zeros((max_steps, n))
 
         # History items
-        states_history = [states]
-        actions_history = []
-        observations_history = []
+        states_history = xp.empty((max_steps+1, n))
+        states_history[0] = start_state_array
+
+        actions_history = xp.empty((max_steps, n))
+        observations_history = xp.empty((max_steps, n))
 
         sim_start_ts = datetime.now()
         
         iterator = trange(max_steps) if print_progress else range(max_steps)
         for i in iterator:
-            # Retrieving the top vectors according to the value function
-            best_vectors = xp.argmax(xp.matmul(beliefs, self.value_function.alpha_vector_array.T), axis=1)
-
-            # Retrieving the actions associated with the vectors chosen
-            best_actions = self.value_function.actions[best_vectors]
+            best_actions = self.get_best_action(beliefs)
 
             # Get each reachable next states for each action
             reachable_state_per_actions = model.reachable_states[:, best_actions, :]
 
-            # Gathering new states based on the transition function and the chosen actions
-            next_state_potentials = reachable_state_per_actions[states, simulations]
-            if model.reachable_state_count == 1:
-                next_states = next_state_potentials[:,0]
-            else:
-                potential_probabilities = model.reachable_probabilities[states[:,None], best_actions[:,None]][:,0,:]
-                chosen_indices = xp.apply_along_axis(lambda x: xp.random.choice(len(x), size=1, p=x), axis=1, arr=potential_probabilities)
-                next_states = next_state_potentials[chosen_indices][:,0,0]
-
-            # Making observations based on the states landed in and the action that was taken
-            observation_probabilities = model.observation_table[next_states[:,None], best_actions[:,None]][:,0,:]
-            observations = xp.sum(xp.random.random(n)[:,None] &gt; xp.cumsum(observation_probabilities[:,:-1], axis=1), axis=1)
+            # Run action in simulation
+            rewards, observations = simulator_set.run_actions(best_actions)
 
             # Belief set update
             reachable_probabilities = (model.reachable_transitional_observation_table[:,best_actions,observations,:] * beliefs.T[:,:,None])
@@ -2946,74 +3336,77 @@ class Agent:
                                                 w=reachable_probabilities.swapaxes(0,1).reshape(flat_shape))
 
             new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
+            beliefs = new_beliefs
 
             # Rewards computation
-            step_rewards = xp.array([model.immediate_reward_function(int(s), int(a), int(s_p), int(o)) for s,a,s_p,o in zip(states, best_actions, next_states, observations)])
-            rewards.append(xp.where(~sim_is_done, step_rewards, 0))
-            discounted_rewards.append(xp.where(~sim_is_done, step_rewards * discount, 0))
+            rewards_history[i, simulations] = rewards
+            discounted_rewards_history[i, simulations] = rewards * discount
 
-            # Checking for done condition
-            are_done = xp.isin(next_states, xp.array(model.end_states))
-            done_at_step[sim_is_done ^ are_done] = i+1
-            sim_is_done |= are_done
+            # History tracking
+            states_history[i+1, simulations] = simulator_set.agent_states
+            actions_history[i, simulations] = best_actions
+            observations_history[i, simulations] = observations
+
+            # Marking the steps at which sims are done
+            done_at_step[simulations[simulator_set.is_done]] = i
+
+            # Filtering to done simulations
+            simulations = simulations[~simulator_set.is_done]
+            beliefs = beliefs[~simulator_set.is_done]
+            flatten_offset = xp.arange(len(simulations))[:,None] * model.state_count
+            flat_shape = (len(simulations), flat_shape[1])
+
+            # Filtering in simulator_set
+            simulator_set.n = len(simulations)
+            simulator_set.agent_states = simulator_set.agent_states[~simulator_set.is_done]
+            simulator_set.simulations = simulator_set.simulations[~simulator_set.is_done]
+            simulator_set.is_done = simulator_set.is_done[~simulator_set.is_done]
 
             # Update iterator postfix
             if print_progress:
-                iterator.set_postfix({&#39;done&#39;: xp.sum(sim_is_done)})
+                done_count = n-len(simulations)
+                iterator.set_postfix({&#39;done &#39;: f&#39; {done_count} of {n} ({(done_count*100)/n:.1f}%)&#39;})
 
             # Replacing old with new
-            states = next_states
-            beliefs = new_beliefs
             discount *= reward_discount
 
-            # History tracking
-            states_history.append(states)
-            actions_history.append(best_actions)
-            observations_history.append(observations)
-
             # Early stopping
-            if xp.all(sim_is_done):
+            if len(simulations) == 0:
                 break
 
         # Wrap up
         sim_hist_list = []
         b0 = Belief(model)
 
-        states_history = xp.array(states_history).T
-        actions_history = xp.array(actions_history).T
-        observations_history = xp.array(observations_history).T
-        rewards = xp.array(rewards).T
-        discounted_rewards = xp.array(discounted_rewards).T
-
         done_at_step_sum = 0
 
         for i, s0 in enumerate(start_state_array):
             sim_hist = SimulationHistory(self.model, int(s0), b0)
             
-            last_step = int(done_at_step[i]) if bool(sim_is_done[i]) else max_steps
+            last_step = int(done_at_step[i]) if done_at_step[i] &gt;= 0  else max_steps
             done_at_step_sum += last_step
 
             # Setting the elements
-            sim_hist.states = states_history[i,:last_step+1].tolist()
-            sim_hist.actions = actions_history[i,:last_step].tolist()
-            sim_hist.observations = observations_history[i,:last_step].tolist()
-            sim_hist.rewards = rewards[i,:last_step].tolist()
+            sim_hist.states = states_history[:last_step+1, i].tolist()
+            sim_hist.actions = actions_history[:last_step, i].tolist()
+            sim_hist.observations = observations_history[:last_step, i].tolist()
+            sim_hist.rewards = rewards_history[:last_step, i].tolist()
 
             # Adding the sim history to the list of histories
             sim_hist_list.append(sim_hist)
 
-        done_sim_count = sum([1 if done else 0 for done in sim_is_done])
+        done_sim_count = int(xp.sum(done_at_step &gt;= 0))
 
         if print_stats:
             sim_end_ts = datetime.now()
             print(f&#39;All {n} simulations done in {(sim_end_ts - sim_start_ts).total_seconds():.3f}s:&#39;)
             print(f&#39;\t- Simulations reached goal: {done_sim_count}/{n} ({n-done_sim_count} failures)&#39;)
             print(f&#39;\t- Average step count: {(done_at_step_sum / n)}&#39;)
-            print(f&#39;\t- Average total rewards: {(xp.sum(rewards) / n)}&#39;)
-            print(f&#39;\t- Average discounted rewards (ADR): {(xp.sum(discounted_rewards) / n)}&#39;)
+            print(f&#39;\t- Average total rewards: {(xp.sum(rewards_history) / n)}&#39;)
+            print(f&#39;\t- Average discounted rewards (ADR): {(xp.sum(discounted_rewards_history) / n)}&#39;)
 
-        return RewardSet(xp.sum(rewards, axis=1).tolist()), sim_hist_list
-    
+        return RewardSet(xp.sum(rewards_history, axis=0).tolist()), sim_hist_list
+
 
 def load_POMDP_file(file_name:str) -&gt; Tuple[Model, PBVI_Solver]:
     &#39;&#39;&#39;
@@ -3814,12 +4207,19 @@ either for a given amount of steps or until a single reward is received.</p>
     value_function : ValueFunction
         The value function the agent has come up to after training.
     &#39;&#39;&#39;
-    def __init__(self, model:Model, value_function:Union[ValueFunction,None]=None) -&gt; None:
+    def __init__(self,
+                 model:Model,
+                 value_function:Union[ValueFunction,None]=None
+                 ) -&gt; None:
         self.model = model
         self.value_function = value_function
 
 
-    def train(self, solver:PBVI_Solver, expansions:int, horizon:int) -&gt; SolverHistory:
+    def train(self,
+              solver:PBVI_Solver,
+              expansions:int,
+              horizon:int
+              ) -&gt; SolverHistory:
         &#39;&#39;&#39;
         Method to train the agent using a given solver.
         The solver will provide a value function that will map beliefs in belief space to actions.
@@ -3842,7 +4242,7 @@ either for a given amount of steps or until a single reward is received.</p>
         return solve_history
 
 
-    def get_best_action(self, belief:Belief) -&gt; int:
+    def get_best_action(self, belief: Belief | np.ndarray) -&gt; int:
         &#39;&#39;&#39;
         Function to retrieve the best action for a given belief based on the value function retrieved from the training.
 
@@ -3861,16 +4261,24 @@ either for a given amount of steps or until a single reward is received.</p>
         # GPU
         xp = np if not self.value_function.is_on_gpu else cp
 
-        best_vector = xp.argmax(xp.dot(self.value_function.alpha_vector_array, belief.values))
-        best_action = int(self.value_function.actions[best_vector])
+        # Handle case where we have a single belief
+        is_single_belief = isinstance(belief, Belief)
+        belief_array = belief.values[None,:] if is_single_belief else belief
 
-        return best_action
+        # Retrieving the top vectors according to the value function
+        best_vectors = xp.argmax(xp.matmul(belief_array, self.value_function.alpha_vector_array.T), axis=1)
+
+        # Retrieving the actions associated with the vectors chosen
+        best_actions = self.value_function.actions[best_vectors]
+
+        return int(best_actions[0]) if is_single_belief else best_actions
 
 
     def simulate(self,
                  simulator:Union[Simulation,None]=None,
                  max_steps:int=1000,
                  start_state:Union[int,None]=None,
+                 initial_belief:Union[Belief,None]=None,
                  print_progress:bool=True,
                  print_stats:bool=True
                  ) -&gt; SimulationHistory:
@@ -3885,6 +4293,8 @@ either for a given amount of steps or until a single reward is received.</p>
             The max amount of steps the simulation can run for.
         start_state : int, optional
             The state the agent should start in, if not provided, will be set at random based on start probabilities of the model.
+        initial_belief : Belief, optional
+            If the agent is to be to start with a different belief than the default one it can be provided here.
         print_progress : bool, default=True
             Whether or not to print out the progress of the simulation.
         print_stats : bool, default=True
@@ -3904,10 +4314,14 @@ either for a given amount of steps or until a single reward is received.</p>
         if simulator is None:
             simulator = Simulation(self.model)
 
-        # reset
+        # (Re-)initialize simulator
         s = simulator.initialize_simulation(start_state=start_state) # s is only used for the simulation history
-        belief = Belief(self.model)
 
+        # Generating initial belief or getting the provided initial belief
+        belief = Belief(self.model) if initial_belief is None else initial_belief
+        belief = belief if not self.value_function.is_on_gpu else Belief(self.model, cp.array(belief.values))
+
+        # Tracking
         history = SimulationHistory(self.model, start_state=s, start_belief=belief)
 
         sim_start_ts = datetime.now()
@@ -3946,15 +4360,14 @@ either for a given amount of steps or until a single reward is received.</p>
                           simulator:Union[Simulation,None]=None,
                           n:int=1000,
                           max_steps:int=1000,
-                          start_state:Union[int,None]=None,
+                          start_states:Union[list[int],int,None]=None,
+                          initial_beliefs:Union[list[Belief],Belief,None]=None,
                           reward_discount:float=0.99,
                           print_progress:bool=True,
                           print_stats:bool=True
                           ) -&gt; Tuple[RewardSet, list[SimulationHistory]]:
         &#39;&#39;&#39;
         Function to run a set of simulations in a row.
-        This is useful when the simulation has a &#39;done&#39; condition.
-        In this case, the rewards of individual simulations are summed together under a single number.
 
         Parameters
         ----------
@@ -3964,8 +4377,12 @@ either for a given amount of steps or until a single reward is received.</p>
             The amount of simulations to run.
         max_steps : int, default=1000
             The max_steps to run per simulation.
-        start_state : int, optional
+        start_states : list[int] or int, optional
             The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
+            If a list is provided it has to have n items.
+        initial_beliefs : list[Belief] or Belief, optional
+            A single or list of beliefs to use instead to the default model initial belief.
+            If a list is provided it has to have n items.
         reward_discount : float, default=0.99
             The reward discount to compute the Average Discounted Reward (ADR).
         print_progress : bool, default=True
@@ -3983,15 +4400,25 @@ either for a given amount of steps or until a single reward is received.</p>
         if simulator is None:
             simulator = Simulation(self.model)
 
+        assert (not isinstance(start_states, list)) or (len(start_states) == n), &#39;The size of the list of start states has to match n&#39;
+        assert (not isinstance(initial_beliefs, list)) or (len(initial_beliefs) == n), &#39;The size of the list of initial beliefs has to match n&#39;
+
         sim_start_ts = datetime.now()
 
+        # Tracking all simulations
         all_histories = []
         all_final_rewards = RewardSet()
         all_discounted_rewards = []
         all_sim_length = []
         done_sim_count = 0
-        for _ in (trange(n) if print_progress else range(n)):
-            sim_history = self.simulate(simulator, max_steps, start_state, False, False)
+
+        for i in (trange(n) if print_progress else range(n)):
+            sim_history = self.simulate(simulator=simulator,
+                                        max_steps=max_steps,
+                                        start_state=(start_states if not isinstance(start_states, list) else start_states[i]),
+                                        initial_belief=(initial_beliefs if not isinstance(initial_beliefs, list) else initial_beliefs[i]),
+                                        print_progress=False,
+                                        print_stats=False)
 
             if simulator.is_done:
                 done_sim_count += 1
@@ -4015,41 +4442,71 @@ either for a given amount of steps or until a single reward is received.</p>
 
     def run_n_simulations_parallel(self,
                                    n:int=1000,
+                                   simulator_set:Union[SimulationSet,None]=None,
                                    max_steps:int=1000,
-                                   start_state:Union[list[int],int,None]=None,
+                                   start_states:Union[list[int],int,None]=None,
+                                   initial_beliefs:Union[list[Belief],Belief,None]=None,
                                    reward_discount:float=0.99,
                                    print_progress:bool=True,
                                    print_stats:bool=True
                                    ) -&gt; Tuple[RewardSet, list[SimulationHistory]]:
         &#39;&#39;&#39;
-        TODO
+        Function to run a set of simulations in parallel.
+        The simulation will happen on the gpu if the value function object is on the gpu.
+
+        Parameters
+        ----------
+        n : int (default = 1000)
+            How many simulations should be run at once.
+        simulator_set : SimulationSet (optional)
+            A SimulatorSet object. It is used if the agent has to be simulated in a different situation (different model) than during training.
+        max_steps : int (default = 1000)
+            The horizon of the simulation. How many steps to run before the agent is considered &#39;lost&#39; and can be killed.
+        start_state : list[int] or int (optional)
+            The state from which the agent will start. Alternatively a list of start states can be provided.
+            If none is provided, random starting states will be generated.
+        reward_discount : float (default = 0.99)
+            A discount of the reward that discount how much a reward is worth based on how late it is received.
+        print_progress : bool (default = True)
+            Whether to print the progress of the simulation as a progress bar.
+        print_stats : bool (default = True)
+            Whether to print statistics about the simulations after the simulations are done.
+
+        Returns
+        -------
+        all_histories : RewardSet
+            A list of the final rewards after the set of simulations.
+        all_histories : list[SimulationHistory]
+            A list the simulation histories gathered in the set of simulations.
         &#39;&#39;&#39;
         # GPU support
         xp = np if not self.value_function.is_on_gpu else cp
         model = self.model.cpu_model if not self.value_function.is_on_gpu else self.model.gpu_model
 
-        # Genetion of an array of n beliefs
-        initial_beliefs = xp.repeat(Belief(model).values[None,:], n, axis=0)
+        assert (not isinstance(start_states, list)) or (len(start_states) == n), &#39;The size of the list of start states has to match n&#39;
+        assert (not isinstance(initial_beliefs, list)) or (len(initial_beliefs) == n), &#39;The size of the list of initial beliefs has to match n&#39;
 
-        # Generating n initial positions
-        start_state_array = xp.empty(n)
-        if isinstance(start_state, int):
-            start_state_array = start_state
-        elif isinstance(start_state, list):
-            repeated_list = xp.repeat(xp.array(start_state), int(np.ceil(n / len(start_state))))
-            start_state_array = xp.resize(repeated_list, n)
+        # Genetion of an array of n beliefs
+        if initial_beliefs is None:
+            initial_beliefs = xp.repeat(Belief(model).values[None,:], n, axis=0)
         else:
-            start_state_array = xp.random.choice(model.states, size=n, p=model.start_probabilities)
+            if isinstance(initial_beliefs, Belief):
+                initial_beliefs = xp.repeat(initial_beliefs.values[None,:], n, axis=0)
+            else:
+                initial_beliefs = xp.array([b.values for b in initial_beliefs])
+
+        if simulator_set is None:
+            simulator_set = SimulationSet(model)
+
+        # Simulations initialization
+        start_state_array = simulator_set.initialize_simulations(n, start_states)
         
         # Belief and state arrays
         beliefs = initial_beliefs
         new_beliefs = None
-        states = start_state_array
-        next_states = None
 
         # Tracking what simulations are done
-        sim_is_done = xp.zeros(n, dtype=bool)
-        done_at_step = xp.full(n, -1)
+        done_at_step = xp.full(n, -1, dtype=int)
 
         # Speedup item
         simulations = xp.arange(n)
@@ -4057,45 +4514,33 @@ either for a given amount of steps or until a single reward is received.</p>
         flat_shape = (n, (model.state_count * model.reachable_state_count))
 
         # 2D bincount for belief set update
-        def bincount2D_vectorized(a, w):    
+        def bincount2D_vectorized(a, w):
             a_offs = a + flatten_offset
-            return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape(-1,model.state_count)
+            return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape((-1,model.state_count))
 
         # Results
         discount = reward_discount
-        rewards = []
-        discounted_rewards = []
+        rewards_history = xp.zeros((max_steps, n))
+        discounted_rewards_history = xp.zeros((max_steps, n))
 
         # History items
-        states_history = [states]
-        actions_history = []
-        observations_history = []
+        states_history = xp.empty((max_steps+1, n))
+        states_history[0] = start_state_array
+
+        actions_history = xp.empty((max_steps, n))
+        observations_history = xp.empty((max_steps, n))
 
         sim_start_ts = datetime.now()
         
         iterator = trange(max_steps) if print_progress else range(max_steps)
         for i in iterator:
-            # Retrieving the top vectors according to the value function
-            best_vectors = xp.argmax(xp.matmul(beliefs, self.value_function.alpha_vector_array.T), axis=1)
-
-            # Retrieving the actions associated with the vectors chosen
-            best_actions = self.value_function.actions[best_vectors]
+            best_actions = self.get_best_action(beliefs)
 
             # Get each reachable next states for each action
             reachable_state_per_actions = model.reachable_states[:, best_actions, :]
 
-            # Gathering new states based on the transition function and the chosen actions
-            next_state_potentials = reachable_state_per_actions[states, simulations]
-            if model.reachable_state_count == 1:
-                next_states = next_state_potentials[:,0]
-            else:
-                potential_probabilities = model.reachable_probabilities[states[:,None], best_actions[:,None]][:,0,:]
-                chosen_indices = xp.apply_along_axis(lambda x: xp.random.choice(len(x), size=1, p=x), axis=1, arr=potential_probabilities)
-                next_states = next_state_potentials[chosen_indices][:,0,0]
-
-            # Making observations based on the states landed in and the action that was taken
-            observation_probabilities = model.observation_table[next_states[:,None], best_actions[:,None]][:,0,:]
-            observations = xp.sum(xp.random.random(n)[:,None] &gt; xp.cumsum(observation_probabilities[:,:-1], axis=1), axis=1)
+            # Run action in simulation
+            rewards, observations = simulator_set.run_actions(best_actions)
 
             # Belief set update
             reachable_probabilities = (model.reachable_transitional_observation_table[:,best_actions,observations,:] * beliefs.T[:,:,None])
@@ -4103,78 +4548,81 @@ either for a given amount of steps or until a single reward is received.</p>
                                                 w=reachable_probabilities.swapaxes(0,1).reshape(flat_shape))
 
             new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
+            beliefs = new_beliefs
 
             # Rewards computation
-            step_rewards = xp.array([model.immediate_reward_function(int(s), int(a), int(s_p), int(o)) for s,a,s_p,o in zip(states, best_actions, next_states, observations)])
-            rewards.append(xp.where(~sim_is_done, step_rewards, 0))
-            discounted_rewards.append(xp.where(~sim_is_done, step_rewards * discount, 0))
+            rewards_history[i, simulations] = rewards
+            discounted_rewards_history[i, simulations] = rewards * discount
 
-            # Checking for done condition
-            are_done = xp.isin(next_states, xp.array(model.end_states))
-            done_at_step[sim_is_done ^ are_done] = i+1
-            sim_is_done |= are_done
+            # History tracking
+            states_history[i+1, simulations] = simulator_set.agent_states
+            actions_history[i, simulations] = best_actions
+            observations_history[i, simulations] = observations
+
+            # Marking the steps at which sims are done
+            done_at_step[simulations[simulator_set.is_done]] = i
+
+            # Filtering to done simulations
+            simulations = simulations[~simulator_set.is_done]
+            beliefs = beliefs[~simulator_set.is_done]
+            flatten_offset = xp.arange(len(simulations))[:,None] * model.state_count
+            flat_shape = (len(simulations), flat_shape[1])
+
+            # Filtering in simulator_set
+            simulator_set.n = len(simulations)
+            simulator_set.agent_states = simulator_set.agent_states[~simulator_set.is_done]
+            simulator_set.simulations = simulator_set.simulations[~simulator_set.is_done]
+            simulator_set.is_done = simulator_set.is_done[~simulator_set.is_done]
 
             # Update iterator postfix
             if print_progress:
-                iterator.set_postfix({&#39;done&#39;: xp.sum(sim_is_done)})
+                done_count = n-len(simulations)
+                iterator.set_postfix({&#39;done &#39;: f&#39; {done_count} of {n} ({(done_count*100)/n:.1f}%)&#39;})
 
             # Replacing old with new
-            states = next_states
-            beliefs = new_beliefs
             discount *= reward_discount
 
-            # History tracking
-            states_history.append(states)
-            actions_history.append(best_actions)
-            observations_history.append(observations)
-
             # Early stopping
-            if xp.all(sim_is_done):
+            if len(simulations) == 0:
                 break
 
         # Wrap up
         sim_hist_list = []
         b0 = Belief(model)
 
-        states_history = xp.array(states_history).T
-        actions_history = xp.array(actions_history).T
-        observations_history = xp.array(observations_history).T
-        rewards = xp.array(rewards).T
-        discounted_rewards = xp.array(discounted_rewards).T
-
         done_at_step_sum = 0
 
         for i, s0 in enumerate(start_state_array):
             sim_hist = SimulationHistory(self.model, int(s0), b0)
             
-            last_step = int(done_at_step[i]) if bool(sim_is_done[i]) else max_steps
+            last_step = int(done_at_step[i]) if done_at_step[i] &gt;= 0  else max_steps
             done_at_step_sum += last_step
 
             # Setting the elements
-            sim_hist.states = states_history[i,:last_step+1].tolist()
-            sim_hist.actions = actions_history[i,:last_step].tolist()
-            sim_hist.observations = observations_history[i,:last_step].tolist()
-            sim_hist.rewards = rewards[i,:last_step].tolist()
+            sim_hist.states = states_history[:last_step+1, i].tolist()
+            sim_hist.actions = actions_history[:last_step, i].tolist()
+            sim_hist.observations = observations_history[:last_step, i].tolist()
+            sim_hist.rewards = rewards_history[:last_step, i].tolist()
 
             # Adding the sim history to the list of histories
             sim_hist_list.append(sim_hist)
 
-        done_sim_count = sum([1 if done else 0 for done in sim_is_done])
+        done_sim_count = int(xp.sum(done_at_step &gt;= 0))
 
         if print_stats:
             sim_end_ts = datetime.now()
             print(f&#39;All {n} simulations done in {(sim_end_ts - sim_start_ts).total_seconds():.3f}s:&#39;)
             print(f&#39;\t- Simulations reached goal: {done_sim_count}/{n} ({n-done_sim_count} failures)&#39;)
             print(f&#39;\t- Average step count: {(done_at_step_sum / n)}&#39;)
-            print(f&#39;\t- Average total rewards: {(xp.sum(rewards) / n)}&#39;)
-            print(f&#39;\t- Average discounted rewards (ADR): {(xp.sum(discounted_rewards) / n)}&#39;)
+            print(f&#39;\t- Average total rewards: {(xp.sum(rewards_history) / n)}&#39;)
+            print(f&#39;\t- Average discounted rewards (ADR): {(xp.sum(discounted_rewards_history) / n)}&#39;)
 
-        return RewardSet(xp.sum(rewards, axis=1).tolist()), sim_hist_list</code></pre>
+        return RewardSet(xp.sum(rewards_history, axis=0).tolist()), sim_hist_list</code></pre>
 </details>
 <h3>Methods</h3>
 <dl>
 <dt id="src.pomdp.Agent.get_best_action"><code class="name flex">
-<span>def <span class="ident">get_best_action</span></span>(<span>self, belief: <a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>) ‑> int</span>
+<span>def <span class="ident">get_best_action</span></span>(<span>self, belief: <a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a> | numpy.ndarray) ‑> int</span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function to retrieve the best action for a given belief based on the value function retrieved from the training.</p>
@@ -4192,7 +4640,7 @@ either for a given amount of steps or until a single reward is received.</p>
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def get_best_action(self, belief:Belief) -&gt; int:
+<pre><code class="python">def get_best_action(self, belief: Belief | np.ndarray) -&gt; int:
     &#39;&#39;&#39;
     Function to retrieve the best action for a given belief based on the value function retrieved from the training.
 
@@ -4211,19 +4659,24 @@ either for a given amount of steps or until a single reward is received.</p>
     # GPU
     xp = np if not self.value_function.is_on_gpu else cp
 
-    best_vector = xp.argmax(xp.dot(self.value_function.alpha_vector_array, belief.values))
-    best_action = int(self.value_function.actions[best_vector])
+    # Handle case where we have a single belief
+    is_single_belief = isinstance(belief, Belief)
+    belief_array = belief.values[None,:] if is_single_belief else belief
 
-    return best_action</code></pre>
+    # Retrieving the top vectors according to the value function
+    best_vectors = xp.argmax(xp.matmul(belief_array, self.value_function.alpha_vector_array.T), axis=1)
+
+    # Retrieving the actions associated with the vectors chosen
+    best_actions = self.value_function.actions[best_vectors]
+
+    return int(best_actions[0]) if is_single_belief else best_actions</code></pre>
 </details>
 </dd>
 <dt id="src.pomdp.Agent.run_n_simulations"><code class="name flex">
-<span>def <span class="ident">run_n_simulations</span></span>(<span>self, simulator: Optional[<a title="src.pomdp.Simulation" href="#src.pomdp.Simulation">Simulation</a>] = None, n: int = 1000, max_steps: int = 1000, start_state: Optional[int] = None, reward_discount: float = 0.99, print_progress: bool = True, print_stats: bool = True) ‑> Tuple[<a title="src.mdp.RewardSet" href="mdp.html#src.mdp.RewardSet">RewardSet</a>, list[<a title="src.pomdp.SimulationHistory" href="#src.pomdp.SimulationHistory">SimulationHistory</a>]]</span>
+<span>def <span class="ident">run_n_simulations</span></span>(<span>self, simulator: Optional[<a title="src.pomdp.Simulation" href="#src.pomdp.Simulation">Simulation</a>] = None, n: int = 1000, max_steps: int = 1000, start_states: Union[list[int], int, ForwardRef(None)] = None, initial_beliefs: Union[list[<a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>], <a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>, ForwardRef(None)] = None, reward_discount: float = 0.99, print_progress: bool = True, print_stats: bool = True) ‑> Tuple[<a title="src.mdp.RewardSet" href="mdp.html#src.mdp.RewardSet">RewardSet</a>, list[<a title="src.pomdp.SimulationHistory" href="#src.pomdp.SimulationHistory">SimulationHistory</a>]]</span>
 </code></dt>
 <dd>
-<div class="desc"><p>Function to run a set of simulations in a row.
-This is useful when the simulation has a 'done' condition.
-In this case, the rewards of individual simulations are summed together under a single number.</p>
+<div class="desc"><p>Function to run a set of simulations in a row.</p>
 <h2 id="parameters">Parameters</h2>
 <dl>
 <dt><strong><code>simulator</code></strong> :&ensp;<code>pomdp.Simulation</code>, optional</dt>
@@ -4232,8 +4685,12 @@ In this case, the rewards of individual simulations are summed together under a 
 <dd>The amount of simulations to run.</dd>
 <dt><strong><code>max_steps</code></strong> :&ensp;<code>int</code>, default=<code>1000</code></dt>
 <dd>The max_steps to run per simulation.</dd>
-<dt><strong><code>start_state</code></strong> :&ensp;<code>int</code>, optional</dt>
-<dd>The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)</dd>
+<dt><strong><code>start_states</code></strong> :&ensp;<code>list[int]</code> or <code>int</code>, optional</dt>
+<dd>The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
+If a list is provided it has to have n items.</dd>
+<dt><strong><code>initial_beliefs</code></strong> :&ensp;<code>list[<a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>]</code> or <code><a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a></code>, optional</dt>
+<dd>A single or list of beliefs to use instead to the default model initial belief.
+If a list is provided it has to have n items.</dd>
 <dt><strong><code>reward_discount</code></strong> :&ensp;<code>float</code>, default=<code>0.99</code></dt>
 <dd>The reward discount to compute the Average Discounted Reward (ADR).</dd>
 <dt><strong><code>print_progress</code></strong> :&ensp;<code>bool</code>, default=<code>True</code></dt>
@@ -4256,15 +4713,14 @@ In this case, the rewards of individual simulations are summed together under a 
                       simulator:Union[Simulation,None]=None,
                       n:int=1000,
                       max_steps:int=1000,
-                      start_state:Union[int,None]=None,
+                      start_states:Union[list[int],int,None]=None,
+                      initial_beliefs:Union[list[Belief],Belief,None]=None,
                       reward_discount:float=0.99,
                       print_progress:bool=True,
                       print_stats:bool=True
                       ) -&gt; Tuple[RewardSet, list[SimulationHistory]]:
     &#39;&#39;&#39;
     Function to run a set of simulations in a row.
-    This is useful when the simulation has a &#39;done&#39; condition.
-    In this case, the rewards of individual simulations are summed together under a single number.
 
     Parameters
     ----------
@@ -4274,8 +4730,12 @@ In this case, the rewards of individual simulations are summed together under a 
         The amount of simulations to run.
     max_steps : int, default=1000
         The max_steps to run per simulation.
-    start_state : int, optional
+    start_states : list[int] or int, optional
         The state the agent should start in, if not provided, will be set at random based on start probabilities of the model (Default: random)
+        If a list is provided it has to have n items.
+    initial_beliefs : list[Belief] or Belief, optional
+        A single or list of beliefs to use instead to the default model initial belief.
+        If a list is provided it has to have n items.
     reward_discount : float, default=0.99
         The reward discount to compute the Average Discounted Reward (ADR).
     print_progress : bool, default=True
@@ -4293,15 +4753,25 @@ In this case, the rewards of individual simulations are summed together under a 
     if simulator is None:
         simulator = Simulation(self.model)
 
+    assert (not isinstance(start_states, list)) or (len(start_states) == n), &#39;The size of the list of start states has to match n&#39;
+    assert (not isinstance(initial_beliefs, list)) or (len(initial_beliefs) == n), &#39;The size of the list of initial beliefs has to match n&#39;
+
     sim_start_ts = datetime.now()
 
+    # Tracking all simulations
     all_histories = []
     all_final_rewards = RewardSet()
     all_discounted_rewards = []
     all_sim_length = []
     done_sim_count = 0
-    for _ in (trange(n) if print_progress else range(n)):
-        sim_history = self.simulate(simulator, max_steps, start_state, False, False)
+
+    for i in (trange(n) if print_progress else range(n)):
+        sim_history = self.simulate(simulator=simulator,
+                                    max_steps=max_steps,
+                                    start_state=(start_states if not isinstance(start_states, list) else start_states[i]),
+                                    initial_belief=(initial_beliefs if not isinstance(initial_beliefs, list) else initial_beliefs[i]),
+                                    print_progress=False,
+                                    print_stats=False)
 
         if simulator.is_done:
             done_sim_count += 1
@@ -4324,51 +4794,107 @@ In this case, the rewards of individual simulations are summed together under a 
 </details>
 </dd>
 <dt id="src.pomdp.Agent.run_n_simulations_parallel"><code class="name flex">
-<span>def <span class="ident">run_n_simulations_parallel</span></span>(<span>self, n: int = 1000, max_steps: int = 1000, start_state: Union[list[int], int, ForwardRef(None)] = None, reward_discount: float = 0.99, print_progress: bool = True, print_stats: bool = True) ‑> Tuple[<a title="src.mdp.RewardSet" href="mdp.html#src.mdp.RewardSet">RewardSet</a>, list[<a title="src.pomdp.SimulationHistory" href="#src.pomdp.SimulationHistory">SimulationHistory</a>]]</span>
+<span>def <span class="ident">run_n_simulations_parallel</span></span>(<span>self, n: int = 1000, simulator_set: Optional[<a title="src.pomdp.SimulationSet" href="#src.pomdp.SimulationSet">SimulationSet</a>] = None, max_steps: int = 1000, start_states: Union[list[int], int, ForwardRef(None)] = None, initial_beliefs: Union[list[<a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>], <a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>, ForwardRef(None)] = None, reward_discount: float = 0.99, print_progress: bool = True, print_stats: bool = True) ‑> Tuple[<a title="src.mdp.RewardSet" href="mdp.html#src.mdp.RewardSet">RewardSet</a>, list[<a title="src.pomdp.SimulationHistory" href="#src.pomdp.SimulationHistory">SimulationHistory</a>]]</span>
 </code></dt>
 <dd>
-<div class="desc"><p>TODO</p></div>
+<div class="desc"><p>Function to run a set of simulations in parallel.
+The simulation will happen on the gpu if the value function object is on the gpu.</p>
+<h2 id="parameters">Parameters</h2>
+<dl>
+<dt><strong><code>n</code></strong> :&ensp;<code>int (default = 1000)</code></dt>
+<dd>How many simulations should be run at once.</dd>
+<dt><strong><code>simulator_set</code></strong> :&ensp;<code><a title="src.pomdp.SimulationSet" href="#src.pomdp.SimulationSet">SimulationSet</a> (optional)</code></dt>
+<dd>A SimulatorSet object. It is used if the agent has to be simulated in a different situation (different model) than during training.</dd>
+<dt><strong><code>max_steps</code></strong> :&ensp;<code>int (default = 1000)</code></dt>
+<dd>The horizon of the simulation. How many steps to run before the agent is considered 'lost' and can be killed.</dd>
+<dt><strong><code>start_state</code></strong> :&ensp;<code>list[int]</code> or <code>int (optional)</code></dt>
+<dd>The state from which the agent will start. Alternatively a list of start states can be provided.
+If none is provided, random starting states will be generated.</dd>
+<dt><strong><code>reward_discount</code></strong> :&ensp;<code>float (default = 0.99)</code></dt>
+<dd>A discount of the reward that discount how much a reward is worth based on how late it is received.</dd>
+<dt><strong><code>print_progress</code></strong> :&ensp;<code>bool (default = True)</code></dt>
+<dd>Whether to print the progress of the simulation as a progress bar.</dd>
+<dt><strong><code>print_stats</code></strong> :&ensp;<code>bool (default = True)</code></dt>
+<dd>Whether to print statistics about the simulations after the simulations are done.</dd>
+</dl>
+<h2 id="returns">Returns</h2>
+<dl>
+<dt><strong><code>all_histories</code></strong> :&ensp;<code>RewardSet</code></dt>
+<dd>A list of the final rewards after the set of simulations.</dd>
+<dt><strong><code>all_histories</code></strong> :&ensp;<code>list[<a title="src.pomdp.SimulationHistory" href="#src.pomdp.SimulationHistory">SimulationHistory</a>]</code></dt>
+<dd>A list the simulation histories gathered in the set of simulations.</dd>
+</dl></div>
 <details class="source">
 <summary>
 <span>Expand source code</span>
 </summary>
 <pre><code class="python">def run_n_simulations_parallel(self,
                                n:int=1000,
+                               simulator_set:Union[SimulationSet,None]=None,
                                max_steps:int=1000,
-                               start_state:Union[list[int],int,None]=None,
+                               start_states:Union[list[int],int,None]=None,
+                               initial_beliefs:Union[list[Belief],Belief,None]=None,
                                reward_discount:float=0.99,
                                print_progress:bool=True,
                                print_stats:bool=True
                                ) -&gt; Tuple[RewardSet, list[SimulationHistory]]:
     &#39;&#39;&#39;
-    TODO
+    Function to run a set of simulations in parallel.
+    The simulation will happen on the gpu if the value function object is on the gpu.
+
+    Parameters
+    ----------
+    n : int (default = 1000)
+        How many simulations should be run at once.
+    simulator_set : SimulationSet (optional)
+        A SimulatorSet object. It is used if the agent has to be simulated in a different situation (different model) than during training.
+    max_steps : int (default = 1000)
+        The horizon of the simulation. How many steps to run before the agent is considered &#39;lost&#39; and can be killed.
+    start_state : list[int] or int (optional)
+        The state from which the agent will start. Alternatively a list of start states can be provided.
+        If none is provided, random starting states will be generated.
+    reward_discount : float (default = 0.99)
+        A discount of the reward that discount how much a reward is worth based on how late it is received.
+    print_progress : bool (default = True)
+        Whether to print the progress of the simulation as a progress bar.
+    print_stats : bool (default = True)
+        Whether to print statistics about the simulations after the simulations are done.
+
+    Returns
+    -------
+    all_histories : RewardSet
+        A list of the final rewards after the set of simulations.
+    all_histories : list[SimulationHistory]
+        A list the simulation histories gathered in the set of simulations.
     &#39;&#39;&#39;
     # GPU support
     xp = np if not self.value_function.is_on_gpu else cp
     model = self.model.cpu_model if not self.value_function.is_on_gpu else self.model.gpu_model
 
-    # Genetion of an array of n beliefs
-    initial_beliefs = xp.repeat(Belief(model).values[None,:], n, axis=0)
+    assert (not isinstance(start_states, list)) or (len(start_states) == n), &#39;The size of the list of start states has to match n&#39;
+    assert (not isinstance(initial_beliefs, list)) or (len(initial_beliefs) == n), &#39;The size of the list of initial beliefs has to match n&#39;
 
-    # Generating n initial positions
-    start_state_array = xp.empty(n)
-    if isinstance(start_state, int):
-        start_state_array = start_state
-    elif isinstance(start_state, list):
-        repeated_list = xp.repeat(xp.array(start_state), int(np.ceil(n / len(start_state))))
-        start_state_array = xp.resize(repeated_list, n)
+    # Genetion of an array of n beliefs
+    if initial_beliefs is None:
+        initial_beliefs = xp.repeat(Belief(model).values[None,:], n, axis=0)
     else:
-        start_state_array = xp.random.choice(model.states, size=n, p=model.start_probabilities)
+        if isinstance(initial_beliefs, Belief):
+            initial_beliefs = xp.repeat(initial_beliefs.values[None,:], n, axis=0)
+        else:
+            initial_beliefs = xp.array([b.values for b in initial_beliefs])
+
+    if simulator_set is None:
+        simulator_set = SimulationSet(model)
+
+    # Simulations initialization
+    start_state_array = simulator_set.initialize_simulations(n, start_states)
     
     # Belief and state arrays
     beliefs = initial_beliefs
     new_beliefs = None
-    states = start_state_array
-    next_states = None
 
     # Tracking what simulations are done
-    sim_is_done = xp.zeros(n, dtype=bool)
-    done_at_step = xp.full(n, -1)
+    done_at_step = xp.full(n, -1, dtype=int)
 
     # Speedup item
     simulations = xp.arange(n)
@@ -4376,45 +4902,33 @@ In this case, the rewards of individual simulations are summed together under a 
     flat_shape = (n, (model.state_count * model.reachable_state_count))
 
     # 2D bincount for belief set update
-    def bincount2D_vectorized(a, w):    
+    def bincount2D_vectorized(a, w):
         a_offs = a + flatten_offset
-        return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape(-1,model.state_count)
+        return xp.bincount(a_offs.ravel(), weights=w.ravel(), minlength=a.shape[0]*model.state_count).reshape((-1,model.state_count))
 
     # Results
     discount = reward_discount
-    rewards = []
-    discounted_rewards = []
+    rewards_history = xp.zeros((max_steps, n))
+    discounted_rewards_history = xp.zeros((max_steps, n))
 
     # History items
-    states_history = [states]
-    actions_history = []
-    observations_history = []
+    states_history = xp.empty((max_steps+1, n))
+    states_history[0] = start_state_array
+
+    actions_history = xp.empty((max_steps, n))
+    observations_history = xp.empty((max_steps, n))
 
     sim_start_ts = datetime.now()
     
     iterator = trange(max_steps) if print_progress else range(max_steps)
     for i in iterator:
-        # Retrieving the top vectors according to the value function
-        best_vectors = xp.argmax(xp.matmul(beliefs, self.value_function.alpha_vector_array.T), axis=1)
-
-        # Retrieving the actions associated with the vectors chosen
-        best_actions = self.value_function.actions[best_vectors]
+        best_actions = self.get_best_action(beliefs)
 
         # Get each reachable next states for each action
         reachable_state_per_actions = model.reachable_states[:, best_actions, :]
 
-        # Gathering new states based on the transition function and the chosen actions
-        next_state_potentials = reachable_state_per_actions[states, simulations]
-        if model.reachable_state_count == 1:
-            next_states = next_state_potentials[:,0]
-        else:
-            potential_probabilities = model.reachable_probabilities[states[:,None], best_actions[:,None]][:,0,:]
-            chosen_indices = xp.apply_along_axis(lambda x: xp.random.choice(len(x), size=1, p=x), axis=1, arr=potential_probabilities)
-            next_states = next_state_potentials[chosen_indices][:,0,0]
-
-        # Making observations based on the states landed in and the action that was taken
-        observation_probabilities = model.observation_table[next_states[:,None], best_actions[:,None]][:,0,:]
-        observations = xp.sum(xp.random.random(n)[:,None] &gt; xp.cumsum(observation_probabilities[:,:-1], axis=1), axis=1)
+        # Run action in simulation
+        rewards, observations = simulator_set.run_actions(best_actions)
 
         # Belief set update
         reachable_probabilities = (model.reachable_transitional_observation_table[:,best_actions,observations,:] * beliefs.T[:,:,None])
@@ -4422,77 +4936,80 @@ In this case, the rewards of individual simulations are summed together under a 
                                             w=reachable_probabilities.swapaxes(0,1).reshape(flat_shape))
 
         new_beliefs /= xp.sum(new_beliefs, axis=1)[:,None]
+        beliefs = new_beliefs
 
         # Rewards computation
-        step_rewards = xp.array([model.immediate_reward_function(int(s), int(a), int(s_p), int(o)) for s,a,s_p,o in zip(states, best_actions, next_states, observations)])
-        rewards.append(xp.where(~sim_is_done, step_rewards, 0))
-        discounted_rewards.append(xp.where(~sim_is_done, step_rewards * discount, 0))
+        rewards_history[i, simulations] = rewards
+        discounted_rewards_history[i, simulations] = rewards * discount
 
-        # Checking for done condition
-        are_done = xp.isin(next_states, xp.array(model.end_states))
-        done_at_step[sim_is_done ^ are_done] = i+1
-        sim_is_done |= are_done
+        # History tracking
+        states_history[i+1, simulations] = simulator_set.agent_states
+        actions_history[i, simulations] = best_actions
+        observations_history[i, simulations] = observations
+
+        # Marking the steps at which sims are done
+        done_at_step[simulations[simulator_set.is_done]] = i
+
+        # Filtering to done simulations
+        simulations = simulations[~simulator_set.is_done]
+        beliefs = beliefs[~simulator_set.is_done]
+        flatten_offset = xp.arange(len(simulations))[:,None] * model.state_count
+        flat_shape = (len(simulations), flat_shape[1])
+
+        # Filtering in simulator_set
+        simulator_set.n = len(simulations)
+        simulator_set.agent_states = simulator_set.agent_states[~simulator_set.is_done]
+        simulator_set.simulations = simulator_set.simulations[~simulator_set.is_done]
+        simulator_set.is_done = simulator_set.is_done[~simulator_set.is_done]
 
         # Update iterator postfix
         if print_progress:
-            iterator.set_postfix({&#39;done&#39;: xp.sum(sim_is_done)})
+            done_count = n-len(simulations)
+            iterator.set_postfix({&#39;done &#39;: f&#39; {done_count} of {n} ({(done_count*100)/n:.1f}%)&#39;})
 
         # Replacing old with new
-        states = next_states
-        beliefs = new_beliefs
         discount *= reward_discount
 
-        # History tracking
-        states_history.append(states)
-        actions_history.append(best_actions)
-        observations_history.append(observations)
-
         # Early stopping
-        if xp.all(sim_is_done):
+        if len(simulations) == 0:
             break
 
     # Wrap up
     sim_hist_list = []
     b0 = Belief(model)
 
-    states_history = xp.array(states_history).T
-    actions_history = xp.array(actions_history).T
-    observations_history = xp.array(observations_history).T
-    rewards = xp.array(rewards).T
-    discounted_rewards = xp.array(discounted_rewards).T
-
     done_at_step_sum = 0
 
     for i, s0 in enumerate(start_state_array):
         sim_hist = SimulationHistory(self.model, int(s0), b0)
         
-        last_step = int(done_at_step[i]) if bool(sim_is_done[i]) else max_steps
+        last_step = int(done_at_step[i]) if done_at_step[i] &gt;= 0  else max_steps
         done_at_step_sum += last_step
 
         # Setting the elements
-        sim_hist.states = states_history[i,:last_step+1].tolist()
-        sim_hist.actions = actions_history[i,:last_step].tolist()
-        sim_hist.observations = observations_history[i,:last_step].tolist()
-        sim_hist.rewards = rewards[i,:last_step].tolist()
+        sim_hist.states = states_history[:last_step+1, i].tolist()
+        sim_hist.actions = actions_history[:last_step, i].tolist()
+        sim_hist.observations = observations_history[:last_step, i].tolist()
+        sim_hist.rewards = rewards_history[:last_step, i].tolist()
 
         # Adding the sim history to the list of histories
         sim_hist_list.append(sim_hist)
 
-    done_sim_count = sum([1 if done else 0 for done in sim_is_done])
+    done_sim_count = int(xp.sum(done_at_step &gt;= 0))
 
     if print_stats:
         sim_end_ts = datetime.now()
         print(f&#39;All {n} simulations done in {(sim_end_ts - sim_start_ts).total_seconds():.3f}s:&#39;)
         print(f&#39;\t- Simulations reached goal: {done_sim_count}/{n} ({n-done_sim_count} failures)&#39;)
         print(f&#39;\t- Average step count: {(done_at_step_sum / n)}&#39;)
-        print(f&#39;\t- Average total rewards: {(xp.sum(rewards) / n)}&#39;)
-        print(f&#39;\t- Average discounted rewards (ADR): {(xp.sum(discounted_rewards) / n)}&#39;)
+        print(f&#39;\t- Average total rewards: {(xp.sum(rewards_history) / n)}&#39;)
+        print(f&#39;\t- Average discounted rewards (ADR): {(xp.sum(discounted_rewards_history) / n)}&#39;)
 
-    return RewardSet(xp.sum(rewards, axis=1).tolist()), sim_hist_list</code></pre>
+    return RewardSet(xp.sum(rewards_history, axis=0).tolist()), sim_hist_list</code></pre>
 </details>
 </dd>
 <dt id="src.pomdp.Agent.simulate"><code class="name flex">
-<span>def <span class="ident">simulate</span></span>(<span>self, simulator: Optional[<a title="src.pomdp.Simulation" href="#src.pomdp.Simulation">Simulation</a>] = None, max_steps: int = 1000, start_state: Optional[int] = None, print_progress: bool = True, print_stats: bool = True) ‑> <a title="src.pomdp.SimulationHistory" href="#src.pomdp.SimulationHistory">SimulationHistory</a></span>
+<span>def <span class="ident">simulate</span></span>(<span>self, simulator: Optional[<a title="src.pomdp.Simulation" href="#src.pomdp.Simulation">Simulation</a>] = None, max_steps: int = 1000, start_state: Optional[int] = None, initial_belief: Optional[<a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>] = None, print_progress: bool = True, print_stats: bool = True) ‑> <a title="src.pomdp.SimulationHistory" href="#src.pomdp.SimulationHistory">SimulationHistory</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function to run a simulation with the current agent for up to 'max_steps' amount of steps using a Simulation simulator.</p>
@@ -4504,6 +5021,8 @@ In this case, the rewards of individual simulations are summed together under a 
 <dd>The max amount of steps the simulation can run for.</dd>
 <dt><strong><code>start_state</code></strong> :&ensp;<code>int</code>, optional</dt>
 <dd>The state the agent should start in, if not provided, will be set at random based on start probabilities of the model.</dd>
+<dt><strong><code>initial_belief</code></strong> :&ensp;<code><a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a></code>, optional</dt>
+<dd>If the agent is to be to start with a different belief than the default one it can be provided here.</dd>
 <dt><strong><code>print_progress</code></strong> :&ensp;<code>bool</code>, default=<code>True</code></dt>
 <dd>Whether or not to print out the progress of the simulation.</dd>
 <dt><strong><code>print_stats</code></strong> :&ensp;<code>bool</code>, default=<code>True</code></dt>
@@ -4522,6 +5041,7 @@ In this case, the rewards of individual simulations are summed together under a 
              simulator:Union[Simulation,None]=None,
              max_steps:int=1000,
              start_state:Union[int,None]=None,
+             initial_belief:Union[Belief,None]=None,
              print_progress:bool=True,
              print_stats:bool=True
              ) -&gt; SimulationHistory:
@@ -4536,6 +5056,8 @@ In this case, the rewards of individual simulations are summed together under a 
         The max amount of steps the simulation can run for.
     start_state : int, optional
         The state the agent should start in, if not provided, will be set at random based on start probabilities of the model.
+    initial_belief : Belief, optional
+        If the agent is to be to start with a different belief than the default one it can be provided here.
     print_progress : bool, default=True
         Whether or not to print out the progress of the simulation.
     print_stats : bool, default=True
@@ -4555,10 +5077,14 @@ In this case, the rewards of individual simulations are summed together under a 
     if simulator is None:
         simulator = Simulation(self.model)
 
-    # reset
+    # (Re-)initialize simulator
     s = simulator.initialize_simulation(start_state=start_state) # s is only used for the simulation history
-    belief = Belief(self.model)
 
+    # Generating initial belief or getting the provided initial belief
+    belief = Belief(self.model) if initial_belief is None else initial_belief
+    belief = belief if not self.value_function.is_on_gpu else Belief(self.model, cp.array(belief.values))
+
+    # Tracking
     history = SimulationHistory(self.model, start_state=s, start_belief=belief)
 
     sim_start_ts = datetime.now()
@@ -4617,7 +5143,11 @@ The solver will provide a value function that will map beliefs in belief space t
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def train(self, solver:PBVI_Solver, expansions:int, horizon:int) -&gt; SolverHistory:
+<pre><code class="python">def train(self,
+          solver:PBVI_Solver,
+          expansions:int,
+          horizon:int
+          ) -&gt; SolverHistory:
     &#39;&#39;&#39;
     Method to train the agent using a given solver.
     The solver will provide a value function that will map beliefs in belief space to actions.
@@ -4768,7 +5298,9 @@ If not specified, it will be set as the start probabilities of the model.</dd>
             return succ
 
         reachable_state_probabilities = self.model.reachable_transitional_observation_table[:,a,o,:] * self.values[:,None]
-        new_state_probabilities = xp.bincount(self.model.reachable_states[:,a,:].flatten(), weights=reachable_state_probabilities.flatten(), minlength=self.model.state_count)
+        new_state_probabilities = xp.bincount(self.model.reachable_states[:,a,:].flatten(),
+                                              weights=reachable_state_probabilities.flatten(),
+                                              minlength=self.model.state_count)
         
         # Normalization
         new_state_probabilities /= xp.sum(new_state_probabilities)
@@ -5034,7 +5566,9 @@ def values(self) -&gt; np.ndarray:
         return succ
 
     reachable_state_probabilities = self.model.reachable_transitional_observation_table[:,a,o,:] * self.values[:,None]
-    new_state_probabilities = xp.bincount(self.model.reachable_states[:,a,:].flatten(), weights=reachable_state_probabilities.flatten(), minlength=self.model.state_count)
+    new_state_probabilities = xp.bincount(self.model.reachable_states[:,a,:].flatten(),
+                                          weights=reachable_state_probabilities.flatten(),
+                                          minlength=self.model.state_count)
     
     # Normalization
     new_state_probabilities /= xp.sum(new_state_probabilities)
@@ -5109,6 +5643,7 @@ This class also provides the option to display the beliefs when operating on a 2
 
         self._belief_list = None
         self._belief_array = None
+        self._uniqueness_dict = None
 
         self.is_on_gpu = False
 
@@ -5130,10 +5665,6 @@ This class also provides the option to display the beliefs when operating on a 2
             # Check if array is on gpu
             if gpu_support and cp.get_array_module(beliefs) == cp:
                 self.is_on_gpu = True
-
-        # # Deduplication
-        # self._uniqueness_dict = {belief.values.tobytes(): belief for belief in self._belief_list}
-        # self._belief_list = list(self._uniqueness_dict.values())
 
 
     @property
@@ -5171,7 +5702,38 @@ This class also provides the option to display the beliefs when operating on a 2
         for belief in self.belief_list:
             all_successors.extend(belief.generate_successors())
         return BeliefSet(self.model, all_successors)
-    
+
+
+    @property
+    def unique_belief_dict(self) -&gt; dict:
+        if self._uniqueness_dict is None:
+            self._uniqueness_dict = {belief.bytes_repr: belief for belief in self.belief_list}
+        return self._uniqueness_dict
+
+
+    def union(self, other_belief_set:&#39;BeliefSet&#39;) -&gt; &#39;BeliefSet&#39;:
+        &#39;&#39;&#39;
+        Function to make the union between two belief set objects.
+
+        Parameters
+        ----------
+        other_belief_set : BeliefSet
+            The other belief set to make the union with
+        
+        Returns
+        -------
+        new_belief_set : BeliefSet
+            A new, combined, belief set
+        &#39;&#39;&#39;
+        # Deduplication
+        combined_uniqueness_dict = self.unique_belief_dict | other_belief_set.unique_belief_dict
+
+        # Generation of new set
+        new_belief_set = BeliefSet(self.model, list(combined_uniqueness_dict.values()))
+        new_belief_set._uniqueness_dict = combined_uniqueness_dict
+
+        return new_belief_set
+
 
     def __len__(self) -&gt; int:
         return len(self._belief_list) if self._belief_list is not None else self._belief_array.shape[0]
@@ -5387,6 +5949,20 @@ def belief_list(self) -&gt; list[Belief]:
     return self._belief_list</code></pre>
 </details>
 </dd>
+<dt id="src.pomdp.BeliefSet.unique_belief_dict"><code class="name">var <span class="ident">unique_belief_dict</span> : dict</code></dt>
+<dd>
+<div class="desc"></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">@property
+def unique_belief_dict(self) -&gt; dict:
+    if self._uniqueness_dict is None:
+        self._uniqueness_dict = {belief.bytes_repr: belief for belief in self.belief_list}
+    return self._uniqueness_dict</code></pre>
+</details>
+</dd>
 </dl>
 <h3>Methods</h3>
 <dl>
@@ -5534,6 +6110,49 @@ Note: Only works for 2-state and 3-state believes.</p>
         gpu_belief_set = BeliefSet(gpu_model, gpu_belief_list)
 
     return gpu_belief_set</code></pre>
+</details>
+</dd>
+<dt id="src.pomdp.BeliefSet.union"><code class="name flex">
+<span>def <span class="ident">union</span></span>(<span>self, other_belief_set: <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
+</code></dt>
+<dd>
+<div class="desc"><p>Function to make the union between two belief set objects.</p>
+<h2 id="parameters">Parameters</h2>
+<dl>
+<dt><strong><code>other_belief_set</code></strong> :&ensp;<code><a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></code></dt>
+<dd>The other belief set to make the union with</dd>
+</dl>
+<h2 id="returns">Returns</h2>
+<dl>
+<dt><strong><code>new_belief_set</code></strong> :&ensp;<code><a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></code></dt>
+<dd>A new, combined, belief set</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def union(self, other_belief_set:&#39;BeliefSet&#39;) -&gt; &#39;BeliefSet&#39;:
+    &#39;&#39;&#39;
+    Function to make the union between two belief set objects.
+
+    Parameters
+    ----------
+    other_belief_set : BeliefSet
+        The other belief set to make the union with
+    
+    Returns
+    -------
+    new_belief_set : BeliefSet
+        A new, combined, belief set
+    &#39;&#39;&#39;
+    # Deduplication
+    combined_uniqueness_dict = self.unique_belief_dict | other_belief_set.unique_belief_dict
+
+    # Generation of new set
+    new_belief_set = BeliefSet(self.model, list(combined_uniqueness_dict.values()))
+    new_belief_set._uniqueness_dict = combined_uniqueness_dict
+
+    return new_belief_set</code></pre>
 </details>
 </dd>
 </dl>
@@ -5812,6 +6431,98 @@ def value_array(self) -&gt; np.ndarray:
 </dd>
 </dl>
 </dd>
+<dt id="src.pomdp.FSVI_EG_Solver"><code class="flex name class">
+<span>class <span class="ident">FSVI_EG_Solver</span></span>
+<span>(</span><span>gamma: float = 0.9, eps: float = 0.001, mdp_policy: Optional[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>] = None, eps_greedy: Optional[<built-in function callable>] = None)</span>
+</code></dt>
+<dd>
+<div class="desc"><p>As FSVI_Solver except actions are chosen in an epsilon-greedy fashion</p>
+<p>&hellip;
+Parameters</p>
+<hr>
+<dl>
+<dt><strong><code>gamma</code></strong> :&ensp;<code>float</code>, default=<code>0.9</code></dt>
+<dd>The learning rate, used to control how fast the value function will change after the each iterations.</dd>
+<dt><strong><code>eps</code></strong> :&ensp;<code>float</code>, default=<code>0.001</code></dt>
+<dd>The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.</dd>
+<dt><strong><code>mdp_policy</code></strong> :&ensp;<code>ValueFunction</code>, optional</dt>
+<dd>The value that will be used to decide actions during the MDP explore procedure. If not provided, it will be computed at solve time.</dd>
+<dt><strong><code>eps_greedy</code></strong> :&ensp;<code>callable</code>, default=<code>0.2 (fixed)</code></dt>
+<dd>A function or a callable, representing how a the epsilon parameter should evolve through the iterations.</dd>
+</dl>
+<h2 id="attributes">Attributes</h2>
+<dl>
+<dt><strong><code>gamma</code></strong> :&ensp;<code>float</code></dt>
+<dd>&nbsp;</dd>
+<dt><strong><code>eps</code></strong> :&ensp;<code>float</code></dt>
+<dd>&nbsp;</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">class FSVI_EG_Solver(FSVI_Solver):
+    &#39;&#39;&#39;
+    As FSVI_Solver except actions are chosen in an epsilon-greedy fashion
+    
+    ...
+    Parameters
+    ----------
+    gamma : float, default=0.9
+        The learning rate, used to control how fast the value function will change after the each iterations.
+    eps : float, default=0.001
+        The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.
+    mdp_policy : ValueFunction, optional
+        The value that will be used to decide actions during the MDP explore procedure. If not provided, it will be computed at solve time.
+    eps_greedy : callable, default=0.2 (fixed)
+        A function or a callable, representing how a the epsilon parameter should evolve through the iterations.
+
+    Attributes
+    ----------
+    gamma : float
+    eps : float
+    &#39;&#39;&#39;
+    def __init__(self,
+                 gamma:float=0.9,
+                 eps:float=0.001,
+                 mdp_policy:Union[ValueFunction,None]=None,
+                 eps_greedy:Union[callable,None]=None
+                 ):
+        super().__init__(gamma,
+                         eps,
+                         mdp_policy)
+        self.expand_function = &#39;fsvi_eg&#39;
+        self.expand_function_params[&#39;eps_greedy&#39;] = eps_greedy if eps_greedy is not None else (lambda t: 0.2)</code></pre>
+</details>
+<h3>Ancestors</h3>
+<ul class="hlist">
+<li><a title="src.pomdp.FSVI_Solver" href="#src.pomdp.FSVI_Solver">FSVI_Solver</a></li>
+<li><a title="src.pomdp.PBVI_Solver" href="#src.pomdp.PBVI_Solver">PBVI_Solver</a></li>
+<li><a title="src.pomdp.Solver" href="#src.pomdp.Solver">Solver</a></li>
+<li><a title="src.mdp.Solver" href="mdp.html#src.mdp.Solver">Solver</a></li>
+</ul>
+<h3>Inherited members</h3>
+<ul class="hlist">
+<li><code><b><a title="src.pomdp.FSVI_Solver" href="#src.pomdp.FSVI_Solver">FSVI_Solver</a></b></code>:
+<ul class="hlist">
+<li><code><a title="src.pomdp.FSVI_Solver.backup" href="#src.pomdp.PBVI_Solver.backup">backup</a></code></li>
+<li><code><a title="src.pomdp.FSVI_Solver.compute_change" href="#src.pomdp.PBVI_Solver.compute_change">compute_change</a></code></li>
+<li><code><a title="src.pomdp.FSVI_Solver.expand" href="#src.pomdp.PBVI_Solver.expand">expand</a></code></li>
+<li><code><a title="src.pomdp.FSVI_Solver.expand_fsvi" href="#src.pomdp.PBVI_Solver.expand_fsvi">expand_fsvi</a></code></li>
+<li><code><a title="src.pomdp.FSVI_Solver.expand_fsvi_eg" href="#src.pomdp.PBVI_Solver.expand_fsvi_eg">expand_fsvi_eg</a></code></li>
+<li><code><a title="src.pomdp.FSVI_Solver.expand_ger" href="#src.pomdp.PBVI_Solver.expand_ger">expand_ger</a></code></li>
+<li><code><a title="src.pomdp.FSVI_Solver.expand_hsvi" href="#src.pomdp.PBVI_Solver.expand_hsvi">expand_hsvi</a></code></li>
+<li><code><a title="src.pomdp.FSVI_Solver.expand_perseus" href="#src.pomdp.PBVI_Solver.expand_perseus">expand_perseus</a></code></li>
+<li><code><a title="src.pomdp.FSVI_Solver.expand_ra" href="#src.pomdp.PBVI_Solver.expand_ra">expand_ra</a></code></li>
+<li><code><a title="src.pomdp.FSVI_Solver.expand_ssea" href="#src.pomdp.PBVI_Solver.expand_ssea">expand_ssea</a></code></li>
+<li><code><a title="src.pomdp.FSVI_Solver.expand_ssga" href="#src.pomdp.PBVI_Solver.expand_ssga">expand_ssga</a></code></li>
+<li><code><a title="src.pomdp.FSVI_Solver.expand_ssra" href="#src.pomdp.PBVI_Solver.expand_ssra">expand_ssra</a></code></li>
+<li><code><a title="src.pomdp.FSVI_Solver.solve" href="#src.pomdp.PBVI_Solver.solve">solve</a></code></li>
+<li><code><a title="src.pomdp.FSVI_Solver.test_n_simulations" href="#src.pomdp.PBVI_Solver.test_n_simulations">test_n_simulations</a></code></li>
+</ul>
+</li>
+</ul>
+</dd>
 <dt id="src.pomdp.FSVI_Solver"><code class="flex name class">
 <span>class <span class="ident">FSVI_Solver</span></span>
 <span>(</span><span>gamma: float = 0.9, eps: float = 0.001, mdp_policy: Optional[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>] = None)</span>
@@ -5893,6 +6604,7 @@ Parameters</p>
               initial_value_function:Union[ValueFunction, None]=None,
               prune_level:int=1,
               prune_interval:int=10,
+              limit_value_function_size:int=-1,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -5906,6 +6618,7 @@ Parameters</p>
                              initial_value_function=initial_value_function,
                              prune_level=prune_level,
                              prune_interval=prune_interval,
+                             limit_value_function_size=limit_value_function_size,
                              use_gpu=use_gpu,
                              history_tracking_level=history_tracking_level,
                              print_progress=print_progress)</code></pre>
@@ -5916,6 +6629,10 @@ Parameters</p>
 <li><a title="src.pomdp.Solver" href="#src.pomdp.Solver">Solver</a></li>
 <li><a title="src.mdp.Solver" href="mdp.html#src.mdp.Solver">Solver</a></li>
 </ul>
+<h3>Subclasses</h3>
+<ul class="hlist">
+<li><a title="src.pomdp.FSVI_EG_Solver" href="#src.pomdp.FSVI_EG_Solver">FSVI_EG_Solver</a></li>
+</ul>
 <h3>Inherited members</h3>
 <ul class="hlist">
 <li><code><b><a title="src.pomdp.PBVI_Solver" href="#src.pomdp.PBVI_Solver">PBVI_Solver</a></b></code>:
@@ -5924,6 +6641,7 @@ Parameters</p>
 <li><code><a title="src.pomdp.PBVI_Solver.compute_change" href="#src.pomdp.PBVI_Solver.compute_change">compute_change</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand" href="#src.pomdp.PBVI_Solver.expand">expand</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_fsvi" href="#src.pomdp.PBVI_Solver.expand_fsvi">expand_fsvi</a></code></li>
+<li><code><a title="src.pomdp.PBVI_Solver.expand_fsvi_eg" href="#src.pomdp.PBVI_Solver.expand_fsvi_eg">expand_fsvi_eg</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_ger" href="#src.pomdp.PBVI_Solver.expand_ger">expand_ger</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_hsvi" href="#src.pomdp.PBVI_Solver.expand_hsvi">expand_hsvi</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_perseus" href="#src.pomdp.PBVI_Solver.expand_perseus">expand_perseus</a></code></li>
@@ -5942,14 +6660,61 @@ Parameters</p>
 <span>(</span><span>gamma: float = 0.99, eps: float = 0.001, mdp_solution: Optional[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>] = None)</span>
 </code></dt>
 <dd>
-<div class="desc"><p>TODO</p></div>
+<div class="desc"><p>Solver to solve a POMDP problem based on the Heurisitic Search Value Iteration principle.
+It is developped by Smith T. and Simmons R. and described in the paper "Heuristic Search Value Iteration for POMDPs".
+It works by generating beliefs to attempt to minimize the bound between the upper and lower estimations of the value function.</p>
+<p>The solve function is the same as the pomdp.PBVI_Solver class with some parameters prefilled.</p>
+<p>Note:
+- The backup mode is set to new points only
+- Only one update/backup is run for each iteration.</p>
+<p>&hellip;
+Parameters</p>
+<hr>
+<dl>
+<dt><strong><code>gamma</code></strong> :&ensp;<code>float</code>, default=<code>0.99</code></dt>
+<dd>The learning rate, used to control how fast the value function will change after the each iterations.</dd>
+<dt><strong><code>eps</code></strong> :&ensp;<code>float</code>, default=<code>0.001</code></dt>
+<dd>The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.</dd>
+<dt><strong><code>mdp_solution</code></strong> :&ensp;<code>ValueFunction</code>, optional</dt>
+<dd>The value that will be used to decide actions during the exploration procedure. If not provided, it will be computed at solve time.</dd>
+</dl>
+<h2 id="attributes">Attributes</h2>
+<dl>
+<dt><strong><code>gamma</code></strong> :&ensp;<code>float</code></dt>
+<dd>&nbsp;</dd>
+<dt><strong><code>eps</code></strong> :&ensp;<code>float</code></dt>
+<dd>&nbsp;</dd>
+</dl></div>
 <details class="source">
 <summary>
 <span>Expand source code</span>
 </summary>
 <pre><code class="python">class HSVI_Solver(PBVI_Solver):
     &#39;&#39;&#39;
-    TODO
+    Solver to solve a POMDP problem based on the Heurisitic Search Value Iteration principle.
+    It is developped by Smith T. and Simmons R. and described in the paper &#34;Heuristic Search Value Iteration for POMDPs&#34;.
+    It works by generating beliefs to attempt to minimize the bound between the upper and lower estimations of the value function.
+
+    The solve function is the same as the pomdp.PBVI_Solver class with some parameters prefilled.
+
+    Note:
+    - The backup mode is set to new points only
+    - Only one update/backup is run for each iteration.
+    
+    ...
+    Parameters
+    ----------
+    gamma : float, default=0.99
+        The learning rate, used to control how fast the value function will change after the each iterations.
+    eps : float, default=0.001
+        The treshold for convergence. If the max change between value function is lower that eps, the algorithm is considered to have converged.
+    mdp_solution : ValueFunction, optional
+        The value that will be used to decide actions during the exploration procedure. If not provided, it will be computed at solve time.
+
+    Attributes
+    ----------
+    gamma : float
+    eps : float
     &#39;&#39;&#39;
     def __init__(self,
                  gamma:float=0.99,
@@ -5969,6 +6734,7 @@ Parameters</p>
               initial_value_function:Union[ValueFunction,None]=None,
               prune_level:int=1,
               prune_interval:int=10,
+              limit_value_function_size:int=-1,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -5982,6 +6748,7 @@ Parameters</p>
                              initial_value_function=initial_value_function,
                              prune_level=prune_level,
                              prune_interval=prune_interval,
+                             limit_value_function_size=limit_value_function_size,
                              use_gpu=use_gpu,
                              history_tracking_level=history_tracking_level,
                              print_progress=print_progress)</code></pre>
@@ -6000,6 +6767,7 @@ Parameters</p>
 <li><code><a title="src.pomdp.PBVI_Solver.compute_change" href="#src.pomdp.PBVI_Solver.compute_change">compute_change</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand" href="#src.pomdp.PBVI_Solver.expand">expand</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_fsvi" href="#src.pomdp.PBVI_Solver.expand_fsvi">expand_fsvi</a></code></li>
+<li><code><a title="src.pomdp.PBVI_Solver.expand_fsvi_eg" href="#src.pomdp.PBVI_Solver.expand_fsvi_eg">expand_fsvi_eg</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_ger" href="#src.pomdp.PBVI_Solver.expand_ger">expand_ger</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_hsvi" href="#src.pomdp.PBVI_Solver.expand_hsvi">expand_hsvi</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_perseus" href="#src.pomdp.PBVI_Solver.expand_perseus">expand_perseus</a></code></li>
@@ -6252,9 +7020,6 @@ It is made by taking the weighted average of immediate rewards with the transiti
 
         print()
         log(&#39;POMDP particular parameters:&#39;)
-
-        def end_reward_function(s, a, sn, o):
-            return (np.isin(sn, self.end_states) | np.isin(a, self.end_actions)).astype(int)
 
         # ------------------------- Observations -------------------------
         if isinstance(observations, int):
@@ -6729,15 +7494,21 @@ Parameters</p>
 
         # Step 1
         vector_array = value_function.alpha_vector_array
-        vectors_array_reachable_states = vector_array[xp.arange(vector_array.shape[0])[:,None,None,None], model.reachable_states[None,:,:,:]]
+        vectors_array_reachable_states = vector_array[xp.arange(vector_array.shape[0])[:,None,None,None],
+                                                      model.reachable_states[None,:,:,:]]
         
-        gamma_a_o_t = self.gamma * xp.einsum(&#39;saor,vsar-&gt;aovs&#39;, model.reachable_transitional_observation_table, vectors_array_reachable_states)
+        gamma_a_o_t = self.gamma * xp.einsum(&#39;saor,vsar-&gt;aovs&#39;,
+                                             model.reachable_transitional_observation_table,
+                                             vectors_array_reachable_states)
 
         # Step 2
         belief_array = belief_set.belief_array # bs
         best_alpha_ind = xp.argmax(xp.tensordot(belief_array, gamma_a_o_t, (1,3)), axis=3) # argmax(bs,aovs-&gt;baov) -&gt; bao
 
-        best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]] # baos
+        best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None],
+                                        model.observations[None,None,:,None],
+                                        best_alpha_ind[:,:,:,None],
+                                        model.states[None,None,None,:]] # baos
 
         alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2) # as + bas
 
@@ -6762,7 +7533,7 @@ Parameters</p>
             new_value_function.extend(value_function)
         
         return new_value_function
-    
+
 
     def expand_ra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
@@ -6787,7 +7558,7 @@ Parameters</p>
 
         return BeliefSet(model, new_beliefs)
 
-    
+
     def expand_ssra(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Stochastic Simulation with Random Action.
@@ -6830,7 +7601,7 @@ Parameters</p>
             new_belief_array[i] = b_new.values
             
         return BeliefSet(model, new_belief_array)
-    
+
 
     def expand_ssga(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, epsilon:float=0.1, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
@@ -6886,7 +7657,7 @@ Parameters</p>
             new_belief_array[i] = b_new.values
             
         return BeliefSet(model, new_belief_array)
-    
+
 
     def expand_ssea(self, model:Model, belief_set:BeliefSet, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
@@ -6932,7 +7703,7 @@ Parameters</p>
         new_belief_array = successor_beliefs[b_star[:,None], a_star[:,None], o_star[:,None], model.states[None,:]]
 
         return BeliefSet(model, new_belief_array)
-    
+
 
     def expand_ger(self, model:Model, belief_set:BeliefSet, value_function:ValueFunction, max_generation:int=10) -&gt; BeliefSet:
         &#39;&#39;&#39;
@@ -7014,7 +7785,7 @@ Parameters</p>
                     max_generation:int=10
                     ) -&gt; BeliefSet:
         &#39;&#39;&#39;
-        The expand function of the  Heruistic Search Value Iteration (HSVI) technique.
+        The expand function of the  Heuristic Search Value Iteration (HSVI) technique.
         It is a redursive function attempting to minimize the bound between the upper and lower estimations of the value function.
 
         It is developped by Smith T. and Simmons R. and described in the paper &#34;Heuristic Search Value Iteration for POMDPs&#34;.
@@ -7109,75 +7880,143 @@ Parameters</p>
 
 
     def expand_fsvi(self,
-                   model:Model,
-                   b:Belief,
-                   mdp_policy:ValueFunction,
-                   s:Union[int, None]=None,
-                   max_generation:int=10,
-                   sequence_string:str=&#39;&#39;
-                   ) -&gt; BeliefSet:
+                    model:Model,
+                    b0:Belief,
+                    mdp_policy:ValueFunction,
+                    max_generation:int=10
+                    ) -&gt; BeliefSet:
         &#39;&#39;&#39;
         Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs following the the Forward Search Value Iteration principles.
-        It is a recursive function that is started by a initial state &#39;s&#39; and using the MDP policy, chooses the best action to take.
+        It starts in an initial state &#39;s&#39; and using the MDP policy, chooses the best action to take.
         Following this, a random next state &#39;s_p&#39; is being sampled from the transition probabilities and a random observation &#39;o&#39; based on the observation probabilities.
         Then the given belief is updated using the chosen action and the observation received and the updated belief is added to the sequence.
-        Once the state is a goal state, the recursion is done and the belief sequence is returned.
+        Once the state is a goal state, a new random start state is chosen to continue generating belief points until &#39;max_generation&#39; are in the sequence.
 
         Parameters
         ----------
         model : pomdp.Model
             The model in which the exploration process will happen.
-        b : Belief
-            A belief to be added to the returned belief sequence and updated for the next step of the recursion.
+        b0 : Belief
+            The belief to start the sequence with.
+            A random state will be chosen based on the probability distribution of the belief.
         mdp_policy : ValueFunction
             The mdp policy used to choose the action from with the given state &#39;s&#39;.
-        s : int
-            The state that starts the exploration sequence and based on which an action will be chosen.
         max_generation : int, default=10
             The maximum recursion depth that can be reached before the generated belief sequence is returned.
-        sequence_string : str, default=&#39;&#39;
-            The sequence of previously explored actions and observations.
         
         Returns
         -------
         belief_set : BeliefSet
             A new sequence of beliefs.
         &#39;&#39;&#39;
-        xp = np if not gpu_support else cp.get_array_module(b.values)
-        belief_list = [b]
+        xp = np if not gpu_support else cp.get_array_module(b0.values)
+        belief_list = [b0]
 
-        # If state not provided pick a random one
-        if s is None:
-            s = b.random_state()
+        # Choose a random starting state
+        s = b0.random_state()
 
-        # If end is not reached
-        if (s not in model.end_states) and (max_generation &gt; 0):
+        # Setting the working belief
+        b = b0
+
+        for _ in range(max_generation - 1): #-1 due to a one belief already being present in the set
             # Choose action based on mdp value function
             a_star = xp.argmax(mdp_policy.alpha_vector_array[:,s])
 
             # Pick a random next state (weighted by transition probabilities)
             s_p = model.transition(s, a_star)
-
+            
             # Pick a random observation weighted by observation probabilities in state s_p and after having done action a_star
             o = model.observe(s_p, a_star)
-
-            # Update sequence string
-            sequence_string += (&#39;-&#39; if len(sequence_string) &gt; 0 else &#39;&#39;) + f&#39;{a_star},{o}&#39;
-
+            
             # Generate a new belief based on a_star and o
             b_p = b.update(a_star, o)
 
-            # Recursive call to go closer to goal
-            b_set = self.expand_fsvi(model=model,
-                                     b=b_p,
-                                     mdp_policy=mdp_policy,
-                                     s=s_p,
-                                     max_generation=max_generation-1,
-                                     sequence_string=sequence_string)
-            belief_list.extend(b_set.belief_list)
-        
+            # Record new belief
+            belief_list.append(b_p)
+
+            # Updating s and b
+            s = s_p
+            b = b_p
+
+            # Reset and belief if end state is reached
+            if s in model.end_states:
+                s = b0.random_state()
+                b = b0
+
         return BeliefSet(model, belief_list)
-    
+
+
+    def expand_fsvi_eg(self,
+                       model:Model,
+                       b0:Belief,
+                       mdp_policy:ValueFunction,
+                       eps_greedy:Union[callable, None]=None,
+                       max_generation:int=10
+                       ) -&gt; BeliefSet:
+        &#39;&#39;&#39;
+        A modification of the Forward Search Value Iteration algorithm where in some epsilon greedy fashion, the action can be chosen randomly.
+        The randomness is controlled by the eps_greedy parameter.
+        If a random variable is under the epsilon value at iteration t, a random action will be made instead of following the mdp policy.
+
+        Parameters
+        ----------
+        model : pomdp.Model
+            The model in which the exploration process will happen.
+        b0 : Belief
+            The belief to start the sequence with.
+            A random state will be chosen based on the probability distribution of the belief.
+        mdp_policy : ValueFunction
+            The mdp policy used to choose the action from with the given state &#39;s&#39;.
+        eps_greedy : callable, default=0.2 (fixed)
+            A function or a callable, representing how a the epsilon parameter should evolve through the iterations
+        max_generation : int, default=10
+            The maximum recursion depth that can be reached before the generated belief sequence is returned.
+        
+        Returns
+        -------
+        belief_set : BeliefSet
+            A new sequence of beliefs.
+        &#39;&#39;&#39;
+        xp = np if not gpu_support else cp.get_array_module(b0.values)
+        belief_list = [b0]
+
+        # Choose a random starting state
+        s = b0.random_state()
+
+        # Setting the working belief
+        b = b0
+
+        # If eps_greedy is None
+        if eps_greedy is None:
+            eps_greedy = (lambda t: 0.2)
+
+        for i in range(max_generation - 1): # -1 due to a one belief already being present in the set
+            # Choose action based on mdp value function
+            a_star = int(random.choice(model.actions)) if random.random() &lt; eps_greedy(i) else xp.argmax(mdp_policy.alpha_vector_array[:,s])
+
+            # Pick a random next state (weighted by transition probabilities)
+            s_p = model.transition(s, a_star)
+            
+            # Pick a random observation weighted by observation probabilities in state s_p and after having done action a_star
+            o = model.observe(s_p, a_star)
+            
+            # Generate a new belief based on a_star and o
+            b_p = b.update(a_star, o)
+
+            # Record new belief
+            belief_list.append(b_p)
+
+            # Updating s and b
+            s = s_p
+            b = b_p
+
+            # Reset and belief if end state is reached
+            if s in model.end_states:
+                s = b0.random_state()
+                b = b0
+
+        return BeliefSet(model, belief_list)
+
 
     def expand_perseus(self,
                        model:Model,
@@ -7238,6 +8077,7 @@ Parameters</p>
             - Greedy Error Reduction (ger)
             - Heuristic Search Value Iteration (hsvi)
             - Forward Search Value Iteration (fsvi)
+            - Forward Search Value Iteration - Epsilon Greedy (fsvi_eg)
             - Perseus (perseus)
                 
         Parameters
@@ -7288,9 +8128,17 @@ Parameters</p>
         elif self.expand_function in &#39;expand_fsvi&#39;:
             args = {arg: function_specific_parameters[arg] for arg in [&#39;mdp_policy&#39;] if arg in function_specific_parameters}
             return self.expand_fsvi(model=model, 
-                                    b=belief_set.belief_list[0],
+                                    b0=belief_set.belief_list[0],
                                     mdp_policy=args[&#39;mdp_policy&#39;],
                                     max_generation=max_generation)
+        
+        elif self.expand_function in &#39;expand_fsvi_eg&#39;:
+            args = {arg: function_specific_parameters[arg] for arg in [&#39;mdp_policy&#39;, &#39;eps_greedy&#39;] if arg in function_specific_parameters}
+            return self.expand_fsvi_eg(model=model, 
+                                       b0=belief_set.belief_list[0],
+                                       mdp_policy=args[&#39;mdp_policy&#39;],
+                                       eps_greedy=args[&#39;eps_greedy&#39;] if &#39;eps_greedy&#39; in args else None,
+                                       max_generation=max_generation)
         
         elif self.expand_function in &#39;expand_perseus&#39;:
             return self.expand_perseus(model=model, b=belief_set.belief_list[0], max_generation=max_generation)
@@ -7342,6 +8190,7 @@ Parameters</p>
               initial_value_function:Union[ValueFunction,None]=None,
               prune_level:int=1,
               prune_interval:int=10,
+              limit_value_function_size:int=-1,
               use_gpu:bool=False,
               history_tracking_level:int=1,
               print_progress:bool=True
@@ -7382,6 +8231,9 @@ Parameters</p>
             Parameter to prune the value function further before the expand function.
         prune_interval : int, default=10
             How often to prune the value function. It is counted in number of backup iterations.
+        limit_value_function_size : int, default=-1
+            When the value function size crosses this treshold, a random selection of &#39;max_belief_growth&#39; alpha vectors will be removed from the value function
+            If set to -1, the value function can grow without bounds.
         use_gpu : bool, default=False
             Whether to use the GPU with cupy array to accelerate solving.
         history_tracking_level : int, default=1
@@ -7427,7 +8279,8 @@ Parameters</p>
             full_backup = any([self.expand_function in func for func in [&#39;expand_ra&#39;, &#39;expand_ssra&#39;, &#39;expand_ssga&#39;, &#39;expand_ssea&#39;, &#39;expand_ger&#39;]])
 
         # For hsvi of fsvi, mdp policy is required as upper bound, so if it is not required, generate it
-        if (&#39;mdp_policy&#39; not in self.expand_function_params) or (self.expand_function_params[&#39;mdp_policy&#39;] is None):
+        if ((&#39;fsvi&#39; in self.expand_function or &#39;hsvi&#39; in self.expand_function) and 
+            ((&#39;mdp_policy&#39; not in self.expand_function_params) or (self.expand_function_params[&#39;mdp_policy&#39;] is None))):
             log(&#39;[Warning] MDP solution not provided, running value iteration on the problem to retrieve it...&#39;)
             vi_solver = VI_Solver(gamma=self.gamma, eps=self.eps)
 
@@ -7459,7 +8312,9 @@ Parameters</p>
         old_value_function = value_function
 
         try:
-            for expansion_i in range(expansions) if not print_progress else trange(expansions, desc=&#39;Expansions&#39;):
+            iterator = trange(expansions, desc=&#39;Expansions&#39;) if print_progress else range(expansions)
+            iterator_postfix = {}
+            for expansion_i in iterator:
 
                 # 1: Expand belief set
                 start_ts = datetime.now()
@@ -7470,11 +8325,8 @@ Parameters</p>
                                              max_generation=max_belief_growth,
                                              **self.expand_function_params)
 
-                # If full backup append the newly generated set to the old belief_set
-                if full_backup:
-                    belief_set = BeliefSet(model, xp.vstack((belief_set.belief_array, new_belief_set.belief_array)))
-                else:
-                    belief_set = new_belief_set
+                # Add new beliefs points to the total belief_set
+                belief_set = belief_set.union(new_belief_set)
 
                 expand_time = (datetime.now() - start_ts).total_seconds()
                 solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
@@ -7485,7 +8337,7 @@ Parameters</p>
 
                     # Backup step
                     value_function = self.backup(model,
-                                                 belief_set,
+                                                 belief_set if full_backup else new_belief_set,
                                                  value_function,
                                                  append=(not full_backup),
                                                  belief_dominance_prune=False)
@@ -7501,6 +8353,29 @@ Parameters</p>
                         prune_time = (datetime.now() - start_ts).total_seconds()
                         alpha_vectors_pruned = len(value_function) - vf_len
                         solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
+
+                    # Check if value function size is above treshold
+                    if limit_value_function_size &gt;= 0 and len(value_function) &gt; limit_value_function_size:
+                        # Compute matrix multiplications between avs and beliefs
+                        alpha_value_per_belief = xp.matmul(value_function.alpha_vector_array, belief_set.belief_array.T)
+
+                        # Select the useful alpha vectors
+                        best_alpha_vector_per_belief = xp.argmax(alpha_value_per_belief, axis=0)
+                        useful_alpha_vectors = xp.unique(best_alpha_vector_per_belief)
+
+                        # Select a random selection of vectors to delete
+                        unuseful_alpha_vectors = xp.delete(xp.arange(len(value_function)), useful_alpha_vectors)
+                        random_vectors_to_delete = xp.random.choice(unuseful_alpha_vectors,
+                                                                    size=max_belief_growth,
+                                                                    p=(xp.arange(len(unuseful_alpha_vectors))[::-1] / xp.sum(xp.arange(len(unuseful_alpha_vectors)))))
+                                                                    # replace=False,
+                                                                    # p=1/len(unuseful_alpha_vectors))
+
+                        value_function = ValueFunction(model=model,
+                                                       alpha_vectors=xp.delete(value_function.alpha_vector_array, random_vectors_to_delete, axis=0),
+                                                       action_list=xp.delete(value_function.actions, random_vectors_to_delete))
+                        
+                        iterator_postfix[&#39;|useful|&#39;] = useful_alpha_vectors.shape[0]
                     
                     # Compute the change between value functions
                     max_change = self.compute_change(value_function, old_value_function, belief_set)
@@ -7525,6 +8400,13 @@ Parameters</p>
                     break
 
                 expand_value_function = value_function
+
+                iterator_postfix[&#39;|V|&#39;] = len(value_function)
+                iterator_postfix[&#39;|B|&#39;] = len(belief_set)
+
+                if print_progress:
+                    iterator.set_postfix(iterator_postfix)
+
         except MemoryError as e:
             print(f&#39;Memory full: {e}&#39;)
             print(&#39;Returning value function and history as is...\n&#39;)
@@ -7624,15 +8506,21 @@ In the end we have a set of alpha vectors as large as the amount of beliefs.</p>
 
     # Step 1
     vector_array = value_function.alpha_vector_array
-    vectors_array_reachable_states = vector_array[xp.arange(vector_array.shape[0])[:,None,None,None], model.reachable_states[None,:,:,:]]
+    vectors_array_reachable_states = vector_array[xp.arange(vector_array.shape[0])[:,None,None,None],
+                                                  model.reachable_states[None,:,:,:]]
     
-    gamma_a_o_t = self.gamma * xp.einsum(&#39;saor,vsar-&gt;aovs&#39;, model.reachable_transitional_observation_table, vectors_array_reachable_states)
+    gamma_a_o_t = self.gamma * xp.einsum(&#39;saor,vsar-&gt;aovs&#39;,
+                                         model.reachable_transitional_observation_table,
+                                         vectors_array_reachable_states)
 
     # Step 2
     belief_array = belief_set.belief_array # bs
     best_alpha_ind = xp.argmax(xp.tensordot(belief_array, gamma_a_o_t, (1,3)), axis=3) # argmax(bs,aovs-&gt;baov) -&gt; bao
 
-    best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None], model.observations[None,None,:,None], best_alpha_ind[:,:,:,None], model.states[None,None,None,:]] # baos
+    best_alphas_per_o = gamma_a_o_t[model.actions[None,:,None,None],
+                                    model.observations[None,None,:,None],
+                                    best_alpha_ind[:,:,:,None],
+                                    model.states[None,None,None,:]] # baos
 
     alpha_a = model.expected_rewards_table.T + xp.sum(best_alphas_per_o, axis=2) # as + bas
 
@@ -7727,6 +8615,7 @@ If this max change is lower than eps * (gamma / (1 - gamma)).</p>
 - Greedy Error Reduction (ger)
 - Heuristic Search Value Iteration (hsvi)
 - Forward Search Value Iteration (fsvi)
+- Forward Search Value Iteration - Epsilon Greedy (fsvi_eg)
 - Perseus (perseus)</p>
 <h2 id="parameters">Parameters</h2>
 <dl>
@@ -7758,6 +8647,7 @@ If this max change is lower than eps * (gamma / (1 - gamma)).</p>
         - Greedy Error Reduction (ger)
         - Heuristic Search Value Iteration (hsvi)
         - Forward Search Value Iteration (fsvi)
+        - Forward Search Value Iteration - Epsilon Greedy (fsvi_eg)
         - Perseus (perseus)
             
     Parameters
@@ -7808,9 +8698,17 @@ If this max change is lower than eps * (gamma / (1 - gamma)).</p>
     elif self.expand_function in &#39;expand_fsvi&#39;:
         args = {arg: function_specific_parameters[arg] for arg in [&#39;mdp_policy&#39;] if arg in function_specific_parameters}
         return self.expand_fsvi(model=model, 
-                                b=belief_set.belief_list[0],
+                                b0=belief_set.belief_list[0],
                                 mdp_policy=args[&#39;mdp_policy&#39;],
                                 max_generation=max_generation)
+    
+    elif self.expand_function in &#39;expand_fsvi_eg&#39;:
+        args = {arg: function_specific_parameters[arg] for arg in [&#39;mdp_policy&#39;, &#39;eps_greedy&#39;] if arg in function_specific_parameters}
+        return self.expand_fsvi_eg(model=model, 
+                                   b0=belief_set.belief_list[0],
+                                   mdp_policy=args[&#39;mdp_policy&#39;],
+                                   eps_greedy=args[&#39;eps_greedy&#39;] if &#39;eps_greedy&#39; in args else None,
+                                   max_generation=max_generation)
     
     elif self.expand_function in &#39;expand_perseus&#39;:
         return self.expand_perseus(model=model, b=belief_set.belief_list[0], max_generation=max_generation)
@@ -7822,28 +8720,25 @@ If this max change is lower than eps * (gamma / (1 - gamma)).</p>
 </details>
 </dd>
 <dt id="src.pomdp.PBVI_Solver.expand_fsvi"><code class="name flex">
-<span>def <span class="ident">expand_fsvi</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, b: <a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>, mdp_policy: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, s: Optional[int] = None, max_generation: int = 10, sequence_string: str = '') ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
+<span>def <span class="ident">expand_fsvi</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, b0: <a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>, mdp_policy: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, max_generation: int = 10) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs following the the Forward Search Value Iteration principles.
-It is a recursive function that is started by a initial state 's' and using the MDP policy, chooses the best action to take.
+It starts in an initial state 's' and using the MDP policy, chooses the best action to take.
 Following this, a random next state 's_p' is being sampled from the transition probabilities and a random observation 'o' based on the observation probabilities.
 Then the given belief is updated using the chosen action and the observation received and the updated belief is added to the sequence.
-Once the state is a goal state, the recursion is done and the belief sequence is returned.</p>
+Once the state is a goal state, a new random start state is chosen to continue generating belief points until 'max_generation' are in the sequence.</p>
 <h2 id="parameters">Parameters</h2>
 <dl>
 <dt><strong><code>model</code></strong> :&ensp;<code>pomdp.Model</code></dt>
 <dd>The model in which the exploration process will happen.</dd>
-<dt><strong><code>b</code></strong> :&ensp;<code><a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a></code></dt>
-<dd>A belief to be added to the returned belief sequence and updated for the next step of the recursion.</dd>
+<dt><strong><code>b0</code></strong> :&ensp;<code><a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a></code></dt>
+<dd>The belief to start the sequence with.
+A random state will be chosen based on the probability distribution of the belief.</dd>
 <dt><strong><code>mdp_policy</code></strong> :&ensp;<code>ValueFunction</code></dt>
 <dd>The mdp policy used to choose the action from with the given state 's'.</dd>
-<dt><strong><code>s</code></strong> :&ensp;<code>int</code></dt>
-<dd>The state that starts the exploration sequence and based on which an action will be chosen.</dd>
 <dt><strong><code>max_generation</code></strong> :&ensp;<code>int</code>, default=<code>10</code></dt>
 <dd>The maximum recursion depth that can be reached before the generated belief sequence is returned.</dd>
-<dt><strong><code>sequence_string</code></strong> :&ensp;<code>str</code>, default=<code>''</code></dt>
-<dd>The sequence of previously explored actions and observations.</dd>
 </dl>
 <h2 id="returns">Returns</h2>
 <dl>
@@ -7855,73 +8750,171 @@ Once the state is a goal state, the recursion is done and the belief sequence is
 <span>Expand source code</span>
 </summary>
 <pre><code class="python">def expand_fsvi(self,
-               model:Model,
-               b:Belief,
-               mdp_policy:ValueFunction,
-               s:Union[int, None]=None,
-               max_generation:int=10,
-               sequence_string:str=&#39;&#39;
-               ) -&gt; BeliefSet:
+                model:Model,
+                b0:Belief,
+                mdp_policy:ValueFunction,
+                max_generation:int=10
+                ) -&gt; BeliefSet:
     &#39;&#39;&#39;
     Function implementing the exploration process using the MDP policy in order to generate a sequence of Beliefs following the the Forward Search Value Iteration principles.
-    It is a recursive function that is started by a initial state &#39;s&#39; and using the MDP policy, chooses the best action to take.
+    It starts in an initial state &#39;s&#39; and using the MDP policy, chooses the best action to take.
     Following this, a random next state &#39;s_p&#39; is being sampled from the transition probabilities and a random observation &#39;o&#39; based on the observation probabilities.
     Then the given belief is updated using the chosen action and the observation received and the updated belief is added to the sequence.
-    Once the state is a goal state, the recursion is done and the belief sequence is returned.
+    Once the state is a goal state, a new random start state is chosen to continue generating belief points until &#39;max_generation&#39; are in the sequence.
 
     Parameters
     ----------
     model : pomdp.Model
         The model in which the exploration process will happen.
-    b : Belief
-        A belief to be added to the returned belief sequence and updated for the next step of the recursion.
+    b0 : Belief
+        The belief to start the sequence with.
+        A random state will be chosen based on the probability distribution of the belief.
     mdp_policy : ValueFunction
         The mdp policy used to choose the action from with the given state &#39;s&#39;.
-    s : int
-        The state that starts the exploration sequence and based on which an action will be chosen.
     max_generation : int, default=10
         The maximum recursion depth that can be reached before the generated belief sequence is returned.
-    sequence_string : str, default=&#39;&#39;
-        The sequence of previously explored actions and observations.
     
     Returns
     -------
     belief_set : BeliefSet
         A new sequence of beliefs.
     &#39;&#39;&#39;
-    xp = np if not gpu_support else cp.get_array_module(b.values)
-    belief_list = [b]
+    xp = np if not gpu_support else cp.get_array_module(b0.values)
+    belief_list = [b0]
 
-    # If state not provided pick a random one
-    if s is None:
-        s = b.random_state()
+    # Choose a random starting state
+    s = b0.random_state()
 
-    # If end is not reached
-    if (s not in model.end_states) and (max_generation &gt; 0):
+    # Setting the working belief
+    b = b0
+
+    for _ in range(max_generation - 1): #-1 due to a one belief already being present in the set
         # Choose action based on mdp value function
         a_star = xp.argmax(mdp_policy.alpha_vector_array[:,s])
 
         # Pick a random next state (weighted by transition probabilities)
         s_p = model.transition(s, a_star)
-
+        
         # Pick a random observation weighted by observation probabilities in state s_p and after having done action a_star
         o = model.observe(s_p, a_star)
-
-        # Update sequence string
-        sequence_string += (&#39;-&#39; if len(sequence_string) &gt; 0 else &#39;&#39;) + f&#39;{a_star},{o}&#39;
-
+        
         # Generate a new belief based on a_star and o
         b_p = b.update(a_star, o)
 
-        # Recursive call to go closer to goal
-        b_set = self.expand_fsvi(model=model,
-                                 b=b_p,
-                                 mdp_policy=mdp_policy,
-                                 s=s_p,
-                                 max_generation=max_generation-1,
-                                 sequence_string=sequence_string)
-        belief_list.extend(b_set.belief_list)
+        # Record new belief
+        belief_list.append(b_p)
+
+        # Updating s and b
+        s = s_p
+        b = b_p
+
+        # Reset and belief if end state is reached
+        if s in model.end_states:
+            s = b0.random_state()
+            b = b0
+
+    return BeliefSet(model, belief_list)</code></pre>
+</details>
+</dd>
+<dt id="src.pomdp.PBVI_Solver.expand_fsvi_eg"><code class="name flex">
+<span>def <span class="ident">expand_fsvi_eg</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, b0: <a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>, mdp_policy: <a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, eps_greedy: Optional[<built-in function callable>] = None, max_generation: int = 10) ‑> <a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></span>
+</code></dt>
+<dd>
+<div class="desc"><p>A modification of the Forward Search Value Iteration algorithm where in some epsilon greedy fashion, the action can be chosen randomly.
+The randomness is controlled by the eps_greedy parameter.
+If a random variable is under the epsilon value at iteration t, a random action will be made instead of following the mdp policy.</p>
+<h2 id="parameters">Parameters</h2>
+<dl>
+<dt><strong><code>model</code></strong> :&ensp;<code>pomdp.Model</code></dt>
+<dd>The model in which the exploration process will happen.</dd>
+<dt><strong><code>b0</code></strong> :&ensp;<code><a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a></code></dt>
+<dd>The belief to start the sequence with.
+A random state will be chosen based on the probability distribution of the belief.</dd>
+<dt><strong><code>mdp_policy</code></strong> :&ensp;<code>ValueFunction</code></dt>
+<dd>The mdp policy used to choose the action from with the given state 's'.</dd>
+<dt><strong><code>eps_greedy</code></strong> :&ensp;<code>callable</code>, default=<code>0.2 (fixed)</code></dt>
+<dd>A function or a callable, representing how a the epsilon parameter should evolve through the iterations</dd>
+<dt><strong><code>max_generation</code></strong> :&ensp;<code>int</code>, default=<code>10</code></dt>
+<dd>The maximum recursion depth that can be reached before the generated belief sequence is returned.</dd>
+</dl>
+<h2 id="returns">Returns</h2>
+<dl>
+<dt><strong><code>belief_set</code></strong> :&ensp;<code><a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a></code></dt>
+<dd>A new sequence of beliefs.</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def expand_fsvi_eg(self,
+                   model:Model,
+                   b0:Belief,
+                   mdp_policy:ValueFunction,
+                   eps_greedy:Union[callable, None]=None,
+                   max_generation:int=10
+                   ) -&gt; BeliefSet:
+    &#39;&#39;&#39;
+    A modification of the Forward Search Value Iteration algorithm where in some epsilon greedy fashion, the action can be chosen randomly.
+    The randomness is controlled by the eps_greedy parameter.
+    If a random variable is under the epsilon value at iteration t, a random action will be made instead of following the mdp policy.
+
+    Parameters
+    ----------
+    model : pomdp.Model
+        The model in which the exploration process will happen.
+    b0 : Belief
+        The belief to start the sequence with.
+        A random state will be chosen based on the probability distribution of the belief.
+    mdp_policy : ValueFunction
+        The mdp policy used to choose the action from with the given state &#39;s&#39;.
+    eps_greedy : callable, default=0.2 (fixed)
+        A function or a callable, representing how a the epsilon parameter should evolve through the iterations
+    max_generation : int, default=10
+        The maximum recursion depth that can be reached before the generated belief sequence is returned.
     
+    Returns
+    -------
+    belief_set : BeliefSet
+        A new sequence of beliefs.
+    &#39;&#39;&#39;
+    xp = np if not gpu_support else cp.get_array_module(b0.values)
+    belief_list = [b0]
+
+    # Choose a random starting state
+    s = b0.random_state()
+
+    # Setting the working belief
+    b = b0
+
+    # If eps_greedy is None
+    if eps_greedy is None:
+        eps_greedy = (lambda t: 0.2)
+
+    for i in range(max_generation - 1): # -1 due to a one belief already being present in the set
+        # Choose action based on mdp value function
+        a_star = int(random.choice(model.actions)) if random.random() &lt; eps_greedy(i) else xp.argmax(mdp_policy.alpha_vector_array[:,s])
+
+        # Pick a random next state (weighted by transition probabilities)
+        s_p = model.transition(s, a_star)
+        
+        # Pick a random observation weighted by observation probabilities in state s_p and after having done action a_star
+        o = model.observe(s_p, a_star)
+        
+        # Generate a new belief based on a_star and o
+        b_p = b.update(a_star, o)
+
+        # Record new belief
+        belief_list.append(b_p)
+
+        # Updating s and b
+        s = s_p
+        b = b_p
+
+        # Reset and belief if end state is reached
+        if s in model.end_states:
+            s = b0.random_state()
+            b = b0
+
     return BeliefSet(model, belief_list)</code></pre>
 </details>
 </dd>
@@ -8028,7 +9021,7 @@ The error is computed by the sum of the change between two beliefs and their two
 </code></dt>
 <dd>
 <div class="desc"><p>The expand function of the
-Heruistic Search Value Iteration (HSVI) technique.
+Heuristic Search Value Iteration (HSVI) technique.
 It is a redursive function attempting to minimize the bound between the upper and lower estimations of the value function.</p>
 <p>It is developped by Smith T. and Simmons R. and described in the paper "Heuristic Search Value Iteration for POMDPs".</p>
 <h2 id="parameters">Parameters</h2>
@@ -8064,7 +9057,7 @@ It is then refined through the expansion process by adding newly found belief an
                 max_generation:int=10
                 ) -&gt; BeliefSet:
     &#39;&#39;&#39;
-    The expand function of the  Heruistic Search Value Iteration (HSVI) technique.
+    The expand function of the  Heuristic Search Value Iteration (HSVI) technique.
     It is a redursive function attempting to minimize the bound between the upper and lower estimations of the value function.
 
     It is developped by Smith T. and Simmons R. and described in the paper &#34;Heuristic Search Value Iteration for POMDPs&#34;.
@@ -8506,7 +9499,7 @@ From this action a and observation o we can update our belief.</p>
 </details>
 </dd>
 <dt id="src.pomdp.PBVI_Solver.solve"><code class="name flex">
-<span>def <span class="ident">solve</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, expansions: int, full_backup: Optional[bool] = None, update_passes: int = 1, max_belief_growth: int = 10, initial_belief: Union[<a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, <a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>, ForwardRef(None)] = None, initial_value_function: Optional[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>] = None, prune_level: int = 1, prune_interval: int = 10, use_gpu: bool = False, history_tracking_level: int = 1, print_progress: bool = True) ‑> tuple[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, <a title="src.pomdp.SolverHistory" href="#src.pomdp.SolverHistory">SolverHistory</a>]</span>
+<span>def <span class="ident">solve</span></span>(<span>self, model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>, expansions: int, full_backup: Optional[bool] = None, update_passes: int = 1, max_belief_growth: int = 10, initial_belief: Union[<a title="src.pomdp.BeliefSet" href="#src.pomdp.BeliefSet">BeliefSet</a>, <a title="src.pomdp.Belief" href="#src.pomdp.Belief">Belief</a>, ForwardRef(None)] = None, initial_value_function: Optional[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>] = None, prune_level: int = 1, prune_interval: int = 10, limit_value_function_size: int = -1, use_gpu: bool = False, history_tracking_level: int = 1, print_progress: bool = True) ‑> tuple[<a title="src.mdp.ValueFunction" href="mdp.html#src.mdp.ValueFunction">ValueFunction</a>, <a title="src.pomdp.SolverHistory" href="#src.pomdp.SolverHistory">SolverHistory</a>]</span>
 </code></dt>
 <dd>
 <div class="desc"><p>Main loop of the Point-Based Value Iteration algorithm.
@@ -8542,6 +9535,9 @@ By default, it will be determined by which expand function is chosen (False if: 
 <dd>Parameter to prune the value function further before the expand function.</dd>
 <dt><strong><code>prune_interval</code></strong> :&ensp;<code>int</code>, default=<code>10</code></dt>
 <dd>How often to prune the value function. It is counted in number of backup iterations.</dd>
+<dt><strong><code>limit_value_function_size</code></strong> :&ensp;<code>int</code>, default=<code>-1</code></dt>
+<dd>When the value function size crosses this treshold, a random selection of 'max_belief_growth' alpha vectors will be removed from the value function
+If set to -1, the value function can grow without bounds.</dd>
 <dt><strong><code>use_gpu</code></strong> :&ensp;<code>bool</code>, default=<code>False</code></dt>
 <dd>Whether to use the GPU with cupy array to accelerate solving.</dd>
 <dt><strong><code>history_tracking_level</code></strong> :&ensp;<code>int</code>, default=<code>1</code></dt>
@@ -8570,6 +9566,7 @@ By default, it will be determined by which expand function is chosen (False if: 
           initial_value_function:Union[ValueFunction,None]=None,
           prune_level:int=1,
           prune_interval:int=10,
+          limit_value_function_size:int=-1,
           use_gpu:bool=False,
           history_tracking_level:int=1,
           print_progress:bool=True
@@ -8610,6 +9607,9 @@ By default, it will be determined by which expand function is chosen (False if: 
         Parameter to prune the value function further before the expand function.
     prune_interval : int, default=10
         How often to prune the value function. It is counted in number of backup iterations.
+    limit_value_function_size : int, default=-1
+        When the value function size crosses this treshold, a random selection of &#39;max_belief_growth&#39; alpha vectors will be removed from the value function
+        If set to -1, the value function can grow without bounds.
     use_gpu : bool, default=False
         Whether to use the GPU with cupy array to accelerate solving.
     history_tracking_level : int, default=1
@@ -8655,7 +9655,8 @@ By default, it will be determined by which expand function is chosen (False if: 
         full_backup = any([self.expand_function in func for func in [&#39;expand_ra&#39;, &#39;expand_ssra&#39;, &#39;expand_ssga&#39;, &#39;expand_ssea&#39;, &#39;expand_ger&#39;]])
 
     # For hsvi of fsvi, mdp policy is required as upper bound, so if it is not required, generate it
-    if (&#39;mdp_policy&#39; not in self.expand_function_params) or (self.expand_function_params[&#39;mdp_policy&#39;] is None):
+    if ((&#39;fsvi&#39; in self.expand_function or &#39;hsvi&#39; in self.expand_function) and 
+        ((&#39;mdp_policy&#39; not in self.expand_function_params) or (self.expand_function_params[&#39;mdp_policy&#39;] is None))):
         log(&#39;[Warning] MDP solution not provided, running value iteration on the problem to retrieve it...&#39;)
         vi_solver = VI_Solver(gamma=self.gamma, eps=self.eps)
 
@@ -8687,7 +9688,9 @@ By default, it will be determined by which expand function is chosen (False if: 
     old_value_function = value_function
 
     try:
-        for expansion_i in range(expansions) if not print_progress else trange(expansions, desc=&#39;Expansions&#39;):
+        iterator = trange(expansions, desc=&#39;Expansions&#39;) if print_progress else range(expansions)
+        iterator_postfix = {}
+        for expansion_i in iterator:
 
             # 1: Expand belief set
             start_ts = datetime.now()
@@ -8698,11 +9701,8 @@ By default, it will be determined by which expand function is chosen (False if: 
                                          max_generation=max_belief_growth,
                                          **self.expand_function_params)
 
-            # If full backup append the newly generated set to the old belief_set
-            if full_backup:
-                belief_set = BeliefSet(model, xp.vstack((belief_set.belief_array, new_belief_set.belief_array)))
-            else:
-                belief_set = new_belief_set
+            # Add new beliefs points to the total belief_set
+            belief_set = belief_set.union(new_belief_set)
 
             expand_time = (datetime.now() - start_ts).total_seconds()
             solver_history.add_expand_step(expansion_time=expand_time, belief_set=belief_set)
@@ -8713,7 +9713,7 @@ By default, it will be determined by which expand function is chosen (False if: 
 
                 # Backup step
                 value_function = self.backup(model,
-                                             belief_set,
+                                             belief_set if full_backup else new_belief_set,
                                              value_function,
                                              append=(not full_backup),
                                              belief_dominance_prune=False)
@@ -8729,6 +9729,29 @@ By default, it will be determined by which expand function is chosen (False if: 
                     prune_time = (datetime.now() - start_ts).total_seconds()
                     alpha_vectors_pruned = len(value_function) - vf_len
                     solver_history.add_prune_step(prune_time, alpha_vectors_pruned)
+
+                # Check if value function size is above treshold
+                if limit_value_function_size &gt;= 0 and len(value_function) &gt; limit_value_function_size:
+                    # Compute matrix multiplications between avs and beliefs
+                    alpha_value_per_belief = xp.matmul(value_function.alpha_vector_array, belief_set.belief_array.T)
+
+                    # Select the useful alpha vectors
+                    best_alpha_vector_per_belief = xp.argmax(alpha_value_per_belief, axis=0)
+                    useful_alpha_vectors = xp.unique(best_alpha_vector_per_belief)
+
+                    # Select a random selection of vectors to delete
+                    unuseful_alpha_vectors = xp.delete(xp.arange(len(value_function)), useful_alpha_vectors)
+                    random_vectors_to_delete = xp.random.choice(unuseful_alpha_vectors,
+                                                                size=max_belief_growth,
+                                                                p=(xp.arange(len(unuseful_alpha_vectors))[::-1] / xp.sum(xp.arange(len(unuseful_alpha_vectors)))))
+                                                                # replace=False,
+                                                                # p=1/len(unuseful_alpha_vectors))
+
+                    value_function = ValueFunction(model=model,
+                                                   alpha_vectors=xp.delete(value_function.alpha_vector_array, random_vectors_to_delete, axis=0),
+                                                   action_list=xp.delete(value_function.actions, random_vectors_to_delete))
+                    
+                    iterator_postfix[&#39;|useful|&#39;] = useful_alpha_vectors.shape[0]
                 
                 # Compute the change between value functions
                 max_change = self.compute_change(value_function, old_value_function, belief_set)
@@ -8753,6 +9776,13 @@ By default, it will be determined by which expand function is chosen (False if: 
                 break
 
             expand_value_function = value_function
+
+            iterator_postfix[&#39;|V|&#39;] = len(value_function)
+            iterator_postfix[&#39;|B|&#39;] = len(belief_set)
+
+            if print_progress:
+                iterator.set_postfix(iterator_postfix)
+
     except MemoryError as e:
         print(f&#39;Memory full: {e}&#39;)
         print(&#39;Returning value function and history as is...\n&#39;)
@@ -9197,7 +10227,7 @@ The main purpose of the class is to provide a set of visualization options of th
 
         Parameters
         ----------
-        include_beliefs : bool, default=False # TODO: implement option
+        include_beliefs : bool, default=False
             Whether or not to include the beliefs in the dataframe or not. Doing so requires potential a large amount of memory.
         &#39;&#39;&#39;
         df = super().to_dataframe()
@@ -9210,7 +10240,7 @@ The main purpose of the class is to provide a set of visualization options of th
             df = pd.concat([df, belief_df], axis=1)
 
         return df
-    
+
 
     # Overwritten
     def save(self, path:str=&#39;./Simulations&#39;, file_name:Union[str,None]=None, include_beliefs:bool=False) -&gt; None:
@@ -9275,7 +10305,10 @@ The main purpose of the class is to provide a set of visualization options of th
         ax.scatter(data[:,1], data[:,0], c=obs_colors)
 
         ax.set_xticks(x_ticks)
-        ax.set_yticks(y_ticks)</code></pre>
+        ax.set_yticks(y_ticks)
+
+        ax.set_xlim(0, dimensions[1])
+        ax.set_ylim(dimensions[0], 0)</code></pre>
 </details>
 <h3>Ancestors</h3>
 <ul class="hlist">
@@ -9362,7 +10395,7 @@ def beliefs(self) -&gt; list[Belief]:
 <p>Note: Beliefs not saved as the sequence can be recreated from the sequence of action-observation pairs.</p>
 <h2 id="parameters">Parameters</h2>
 <dl>
-<dt><strong><code>include_beliefs</code></strong> :&ensp;<code>bool</code>, default=<code>False # TODO: implement option</code></dt>
+<dt><strong><code>include_beliefs</code></strong> :&ensp;<code>bool</code>, default=<code>False</code></dt>
 <dd>Whether or not to include the beliefs in the dataframe or not. Doing so requires potential a large amount of memory.</dd>
 </dl></div>
 <details class="source">
@@ -9377,7 +10410,7 @@ def beliefs(self) -&gt; list[Belief]:
 
     Parameters
     ----------
-    include_beliefs : bool, default=False # TODO: implement option
+    include_beliefs : bool, default=False
         Whether or not to include the beliefs in the dataframe or not. Doing so requires potential a large amount of memory.
     &#39;&#39;&#39;
     df = super().to_dataframe()
@@ -9403,6 +10436,313 @@ def beliefs(self) -&gt; list[Belief]:
 </ul>
 </li>
 </ul>
+</dd>
+<dt id="src.pomdp.SimulationSet"><code class="flex name class">
+<span>class <span class="ident">SimulationSet</span></span>
+<span>(</span><span>model: <a title="src.pomdp.Model" href="#src.pomdp.Model">Model</a>)</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Class to reprensent a set of simulation processes for a POMDP model.
+A set of initial random states are given and actions can be applied to the model that impact the actual states of the agents along with returning rewards and observations.</p>
+<p>&hellip;</p>
+<h2 id="parameters">Parameters</h2>
+<dl>
+<dt><strong><code>model</code></strong> :&ensp;<code>pomdp.Model</code></dt>
+<dd>The POMDP model the simulation will be applied on.</dd>
+</dl>
+<h2 id="attributes">Attributes</h2>
+<dl>
+<dt><strong><code>model</code></strong> :&ensp;<code>pomdp.Model</code></dt>
+<dd>&nbsp;</dd>
+<dt><strong><code>n</code></strong> :&ensp;<code>int</code></dt>
+<dd>How many simulations are running at once.</dd>
+<dt><strong><code>agent_states</code></strong> :&ensp;<code>np.ndarray</code></dt>
+<dd>An array containing all of the agent's states in the running simulations.</dd>
+<dt><strong><code>simulations</code></strong> :&ensp;<code>np.ndarray</code></dt>
+<dd>An array of a sequence of numbers with the IDs of the various simulations.</dd>
+<dt><strong><code>is_done</code></strong> :&ensp;<code>np.ndarray</code></dt>
+<dd>An array of booleans of whether or not the agent has reached an end state or performed an ending action.</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">class SimulationSet:
+    &#39;&#39;&#39;
+    Class to reprensent a set of simulation processes for a POMDP model.
+    A set of initial random states are given and actions can be applied to the model that impact the actual states of the agents along with returning rewards and observations.
+
+    ...
+
+    Parameters
+    ----------
+    model: pomdp.Model
+        The POMDP model the simulation will be applied on.
+
+    Attributes
+    ----------
+    model: pomdp.Model
+    n : int
+        How many simulations are running at once.
+    agent_states : np.ndarray
+        An array containing all of the agent&#39;s states in the running simulations.
+    simulations : np.ndarray
+        An array of a sequence of numbers with the IDs of the various simulations.
+    is_done : np.ndarray
+        An array of booleans of whether or not the agent has reached an end state or performed an ending action.
+    &#39;&#39;&#39;
+    def __init__(self, model:Model):
+        self.model = model
+        
+        # Simulation variables
+        self.n = -1
+        self.agent_states = [-1]
+        self.simulations = []
+        self.is_done = [True] # Need to run initialization first
+
+
+    def initialize_simulations(self, n:int=1, start_state:Union[list[int],int,None]=None) -&gt; np.ndarray:
+        &#39;&#39;&#39;
+        Function to initialize the various variable used to run a set of simulations in parallel.
+
+
+        Parameters
+        ----------
+        n : int (default = 1)
+            How many simulation to run at once.
+        start_state : list[int] or int (optional)
+            The starting state of the simulations.
+            It can either be set for each simulation or a single starting state for all simulations.
+            If it is not provided random starting states will be chosen.
+
+        Returns
+        -------
+        agent_states : np.ndarray
+            The chosen start states (to be recorded in the history).
+        &#39;&#39;&#39;
+        # GPU support
+        xp = np if not self.model.is_on_gpu else cp
+
+        # Handle the different way the starting states can be provided
+        start_state_array = xp.empty(n)
+        if isinstance(start_state, int):
+            start_state_array = (xp.ones(n) * start_state).astype(int)
+        elif isinstance(start_state, list):
+            repeated_list = xp.repeat(xp.array(start_state), int(np.ceil(n / len(start_state))))
+            start_state_array = xp.resize(repeated_list, n)
+        else:
+            start_state_array = xp.random.choice(self.model.states, size=n, p=self.model.start_probabilities).astype(int)
+
+        # Set the attributes
+        self.n = n
+        self.agent_states = start_state_array
+        self.simulations = xp.arange(n)
+        self.is_done = xp.zeros(n, dtype=bool)
+
+        return self.agent_states
+
+
+    def run_actions(self, actions:np.ndarray) -&gt; tuple[np.ndarray, np.ndarray]:
+        &#39;&#39;&#39;
+        Function to run a step of the simulation.
+        An action is provided which modifies the agent&#39;s state using the transition function.
+        And following this action and new state, an observation is gathered and a potential reward is returned.
+        
+        The observations are selected based on the observation matrix of the model.
+        The rewards are selected based on the immediate function of the model.
+
+
+        Parameters
+        ----------
+        actions : np.ndarray
+            The actions as an array the agents chose based on their belief.
+
+        Returns
+        -------
+        rewards : np.ndarray
+            An array of rewards for each simulation that is sent back to the agent.
+        observations : np.ndarray
+            An array of observations for each simulation that is sent back to the agent.
+        &#39;&#39;&#39;
+        # GPU support
+        xp = np if not self.model.is_on_gpu else cp
+        
+        # Get each reachable next states for each action
+        reachable_state_per_actions = self.model.reachable_states[:, actions, :]
+
+        # Gathering new states based on the transition function and the chosen actions
+        next_state_potentials = reachable_state_per_actions[self.agent_states, xp.arange(self.n)]
+        if self.model.reachable_state_count == 1:
+            next_states = next_state_potentials[:,0]
+        else:
+            potential_probabilities = self.model.reachable_probabilities[self.agent_states[:,None], actions[:,None]][:,0,:]
+            chosen_indices = xp.apply_along_axis(lambda x: xp.random.choice(len(x), size=1, p=x), axis=1, arr=potential_probabilities)
+            next_states = next_state_potentials[chosen_indices][:,0,0]
+
+        # Making observations based on the states landed in and the action that was taken
+        observation_probabilities = self.model.observation_table[next_states[:,None], actions[:,None]][:,0,:]
+        observations = xp.sum(xp.random.random(self.n)[:,None] &gt; xp.cumsum(observation_probabilities[:,:-1], axis=1), axis=1)
+
+        # Rewards computation
+        step_rewards = xp.array([self.model.immediate_reward_function(int(s), int(a), int(s_p), int(o)) for s,a,s_p,o in zip(self.agent_states, actions, next_states, observations)])
+        rewards = xp.where(~self.is_done, step_rewards, 0)
+
+        # Checking for done condition
+        are_done = xp.isin(next_states, xp.array(self.model.end_states))
+        self.is_done |= are_done
+
+        # Update states
+        self.agent_states = next_states
+
+        return rewards, observations</code></pre>
+</details>
+<h3>Methods</h3>
+<dl>
+<dt id="src.pomdp.SimulationSet.initialize_simulations"><code class="name flex">
+<span>def <span class="ident">initialize_simulations</span></span>(<span>self, n: int = 1, start_state: Union[list[int], int, ForwardRef(None)] = None) ‑> numpy.ndarray</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Function to initialize the various variable used to run a set of simulations in parallel.</p>
+<h2 id="parameters">Parameters</h2>
+<dl>
+<dt><strong><code>n</code></strong> :&ensp;<code>int (default = 1)</code></dt>
+<dd>How many simulation to run at once.</dd>
+<dt><strong><code>start_state</code></strong> :&ensp;<code>list[int]</code> or <code>int (optional)</code></dt>
+<dd>The starting state of the simulations.
+It can either be set for each simulation or a single starting state for all simulations.
+If it is not provided random starting states will be chosen.</dd>
+</dl>
+<h2 id="returns">Returns</h2>
+<dl>
+<dt><strong><code>agent_states</code></strong> :&ensp;<code>np.ndarray</code></dt>
+<dd>The chosen start states (to be recorded in the history).</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def initialize_simulations(self, n:int=1, start_state:Union[list[int],int,None]=None) -&gt; np.ndarray:
+    &#39;&#39;&#39;
+    Function to initialize the various variable used to run a set of simulations in parallel.
+
+
+    Parameters
+    ----------
+    n : int (default = 1)
+        How many simulation to run at once.
+    start_state : list[int] or int (optional)
+        The starting state of the simulations.
+        It can either be set for each simulation or a single starting state for all simulations.
+        If it is not provided random starting states will be chosen.
+
+    Returns
+    -------
+    agent_states : np.ndarray
+        The chosen start states (to be recorded in the history).
+    &#39;&#39;&#39;
+    # GPU support
+    xp = np if not self.model.is_on_gpu else cp
+
+    # Handle the different way the starting states can be provided
+    start_state_array = xp.empty(n)
+    if isinstance(start_state, int):
+        start_state_array = (xp.ones(n) * start_state).astype(int)
+    elif isinstance(start_state, list):
+        repeated_list = xp.repeat(xp.array(start_state), int(np.ceil(n / len(start_state))))
+        start_state_array = xp.resize(repeated_list, n)
+    else:
+        start_state_array = xp.random.choice(self.model.states, size=n, p=self.model.start_probabilities).astype(int)
+
+    # Set the attributes
+    self.n = n
+    self.agent_states = start_state_array
+    self.simulations = xp.arange(n)
+    self.is_done = xp.zeros(n, dtype=bool)
+
+    return self.agent_states</code></pre>
+</details>
+</dd>
+<dt id="src.pomdp.SimulationSet.run_actions"><code class="name flex">
+<span>def <span class="ident">run_actions</span></span>(<span>self, actions: numpy.ndarray) ‑> tuple[numpy.ndarray, numpy.ndarray]</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Function to run a step of the simulation.
+An action is provided which modifies the agent's state using the transition function.
+And following this action and new state, an observation is gathered and a potential reward is returned.</p>
+<p>The observations are selected based on the observation matrix of the model.
+The rewards are selected based on the immediate function of the model.</p>
+<h2 id="parameters">Parameters</h2>
+<dl>
+<dt><strong><code>actions</code></strong> :&ensp;<code>np.ndarray</code></dt>
+<dd>The actions as an array the agents chose based on their belief.</dd>
+</dl>
+<h2 id="returns">Returns</h2>
+<dl>
+<dt><strong><code>rewards</code></strong> :&ensp;<code>np.ndarray</code></dt>
+<dd>An array of rewards for each simulation that is sent back to the agent.</dd>
+<dt><strong><code>observations</code></strong> :&ensp;<code>np.ndarray</code></dt>
+<dd>An array of observations for each simulation that is sent back to the agent.</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def run_actions(self, actions:np.ndarray) -&gt; tuple[np.ndarray, np.ndarray]:
+    &#39;&#39;&#39;
+    Function to run a step of the simulation.
+    An action is provided which modifies the agent&#39;s state using the transition function.
+    And following this action and new state, an observation is gathered and a potential reward is returned.
+    
+    The observations are selected based on the observation matrix of the model.
+    The rewards are selected based on the immediate function of the model.
+
+
+    Parameters
+    ----------
+    actions : np.ndarray
+        The actions as an array the agents chose based on their belief.
+
+    Returns
+    -------
+    rewards : np.ndarray
+        An array of rewards for each simulation that is sent back to the agent.
+    observations : np.ndarray
+        An array of observations for each simulation that is sent back to the agent.
+    &#39;&#39;&#39;
+    # GPU support
+    xp = np if not self.model.is_on_gpu else cp
+    
+    # Get each reachable next states for each action
+    reachable_state_per_actions = self.model.reachable_states[:, actions, :]
+
+    # Gathering new states based on the transition function and the chosen actions
+    next_state_potentials = reachable_state_per_actions[self.agent_states, xp.arange(self.n)]
+    if self.model.reachable_state_count == 1:
+        next_states = next_state_potentials[:,0]
+    else:
+        potential_probabilities = self.model.reachable_probabilities[self.agent_states[:,None], actions[:,None]][:,0,:]
+        chosen_indices = xp.apply_along_axis(lambda x: xp.random.choice(len(x), size=1, p=x), axis=1, arr=potential_probabilities)
+        next_states = next_state_potentials[chosen_indices][:,0,0]
+
+    # Making observations based on the states landed in and the action that was taken
+    observation_probabilities = self.model.observation_table[next_states[:,None], actions[:,None]][:,0,:]
+    observations = xp.sum(xp.random.random(self.n)[:,None] &gt; xp.cumsum(observation_probabilities[:,:-1], axis=1), axis=1)
+
+    # Rewards computation
+    step_rewards = xp.array([self.model.immediate_reward_function(int(s), int(a), int(s_p), int(o)) for s,a,s_p,o in zip(self.agent_states, actions, next_states, observations)])
+    rewards = xp.where(~self.is_done, step_rewards, 0)
+
+    # Checking for done condition
+    are_done = xp.isin(next_states, xp.array(self.model.end_states))
+    self.is_done |= are_done
+
+    # Update states
+    self.agent_states = next_states
+
+    return rewards, observations</code></pre>
+</details>
+</dd>
+</dl>
 </dd>
 <dt id="src.pomdp.Solver"><code class="flex name class">
 <span>class <span class="ident">Solver</span></span>
@@ -9728,7 +11068,7 @@ The visualizations available are:
             summary_str += f&#39; ({np.sum(np.divide(self.expansion_times, self.beliefs_counts[1:])) / len(self.expansion_times):.4f}s/it/belief)&#39;
             
             summary_str += f&#39;\n  - Backup function took on average {sum(self.backup_times) /len(self.backup_times):.4f}s &#39;
-            summary_str += f&#39;and yielded on average value functions of size {sum(self.alpha_vector_counts[1:]) / len(self.alpha_vector_counts[1:]):.2f} per iteration.&#39;
+            summary_str += f&#39;and yielded on average {np.average(np.diff(self.alpha_vector_counts)):.2f} alpha vectors per iteration.&#39;
             summary_str += f&#39; ({np.sum(np.divide(self.backup_times, self.alpha_vector_counts[1:])) / len(self.backup_times):.4f}s/it/alpha)&#39;
 
             summary_str += f&#39;\n  - Pruning function took on average {sum(self.pruning_times) /len(self.pruning_times):.4f}s &#39;
@@ -9790,7 +11130,7 @@ The visualizations available are:
             How many frames per second should the saved video have.
         &#39;&#39;&#39;
         assert self.tracking_level &gt;= 2, &#34;Tracking level is set too low, increase it to 2 if you want to have value function and belief sets tracking as well.&#34;
-        assert self.model.state_count in [2,3], &#34;Can&#39;t plot for models with state count other than 2 or 3&#34; # TODO Make support for gird videos
+        assert self.model.state_count in [2,3], &#34;Can&#39;t plot for models with state count other than 2 or 3&#34; # TODO Make support for grid videos
 
         if self.model.state_count == 2:
             self._save_history_video_2D(custom_name, compare_with, copy.copy(graph_names), fps)
@@ -9982,7 +11322,7 @@ def summary(self) -&gt; str:
         summary_str += f&#39; ({np.sum(np.divide(self.expansion_times, self.beliefs_counts[1:])) / len(self.expansion_times):.4f}s/it/belief)&#39;
         
         summary_str += f&#39;\n  - Backup function took on average {sum(self.backup_times) /len(self.backup_times):.4f}s &#39;
-        summary_str += f&#39;and yielded on average value functions of size {sum(self.alpha_vector_counts[1:]) / len(self.alpha_vector_counts[1:]):.2f} per iteration.&#39;
+        summary_str += f&#39;and yielded on average {np.average(np.diff(self.alpha_vector_counts)):.2f} alpha vectors per iteration.&#39;
         summary_str += f&#39; ({np.sum(np.divide(self.backup_times, self.alpha_vector_counts[1:])) / len(self.backup_times):.4f}s/it/alpha)&#39;
 
         summary_str += f&#39;\n  - Pruning function took on average {sum(self.pruning_times) /len(self.pruning_times):.4f}s &#39;
@@ -10219,7 +11559,7 @@ Also, a single value function or list of value functions can be sent in but they
         How many frames per second should the saved video have.
     &#39;&#39;&#39;
     assert self.tracking_level &gt;= 2, &#34;Tracking level is set too low, increase it to 2 if you want to have value function and belief sets tracking as well.&#34;
-    assert self.model.state_count in [2,3], &#34;Can&#39;t plot for models with state count other than 2 or 3&#34; # TODO Make support for gird videos
+    assert self.model.state_count in [2,3], &#34;Can&#39;t plot for models with state count other than 2 or 3&#34; # TODO Make support for grid videos
 
     if self.model.state_count == 2:
         self._save_history_video_2D(custom_name, compare_with, copy.copy(graph_names), fps)
@@ -10280,6 +11620,8 @@ Also, a single value function or list of value functions can be sent in but they
 <li><code><a title="src.pomdp.BeliefSet.plot" href="#src.pomdp.BeliefSet.plot">plot</a></code></li>
 <li><code><a title="src.pomdp.BeliefSet.to_cpu" href="#src.pomdp.BeliefSet.to_cpu">to_cpu</a></code></li>
 <li><code><a title="src.pomdp.BeliefSet.to_gpu" href="#src.pomdp.BeliefSet.to_gpu">to_gpu</a></code></li>
+<li><code><a title="src.pomdp.BeliefSet.union" href="#src.pomdp.BeliefSet.union">union</a></code></li>
+<li><code><a title="src.pomdp.BeliefSet.unique_belief_dict" href="#src.pomdp.BeliefSet.unique_belief_dict">unique_belief_dict</a></code></li>
 </ul>
 </li>
 <li>
@@ -10291,6 +11633,9 @@ Also, a single value function or list of value functions can be sent in but they
 <li><code><a title="src.pomdp.BeliefValueMapping.update" href="#src.pomdp.BeliefValueMapping.update">update</a></code></li>
 <li><code><a title="src.pomdp.BeliefValueMapping.value_array" href="#src.pomdp.BeliefValueMapping.value_array">value_array</a></code></li>
 </ul>
+</li>
+<li>
+<h4><code><a title="src.pomdp.FSVI_EG_Solver" href="#src.pomdp.FSVI_EG_Solver">FSVI_EG_Solver</a></code></h4>
 </li>
 <li>
 <h4><code><a title="src.pomdp.FSVI_Solver" href="#src.pomdp.FSVI_Solver">FSVI_Solver</a></code></h4>
@@ -10312,6 +11657,7 @@ Also, a single value function or list of value functions can be sent in but they
 <li><code><a title="src.pomdp.PBVI_Solver.compute_change" href="#src.pomdp.PBVI_Solver.compute_change">compute_change</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand" href="#src.pomdp.PBVI_Solver.expand">expand</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_fsvi" href="#src.pomdp.PBVI_Solver.expand_fsvi">expand_fsvi</a></code></li>
+<li><code><a title="src.pomdp.PBVI_Solver.expand_fsvi_eg" href="#src.pomdp.PBVI_Solver.expand_fsvi_eg">expand_fsvi_eg</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_ger" href="#src.pomdp.PBVI_Solver.expand_ger">expand_ger</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_hsvi" href="#src.pomdp.PBVI_Solver.expand_hsvi">expand_hsvi</a></code></li>
 <li><code><a title="src.pomdp.PBVI_Solver.expand_perseus" href="#src.pomdp.PBVI_Solver.expand_perseus">expand_perseus</a></code></li>
@@ -10335,6 +11681,13 @@ Also, a single value function or list of value functions can be sent in but they
 <li><code><a title="src.pomdp.SimulationHistory.add" href="#src.pomdp.SimulationHistory.add">add</a></code></li>
 <li><code><a title="src.pomdp.SimulationHistory.beliefs" href="#src.pomdp.SimulationHistory.beliefs">beliefs</a></code></li>
 <li><code><a title="src.pomdp.SimulationHistory.to_dataframe" href="#src.pomdp.SimulationHistory.to_dataframe">to_dataframe</a></code></li>
+</ul>
+</li>
+<li>
+<h4><code><a title="src.pomdp.SimulationSet" href="#src.pomdp.SimulationSet">SimulationSet</a></code></h4>
+<ul class="">
+<li><code><a title="src.pomdp.SimulationSet.initialize_simulations" href="#src.pomdp.SimulationSet.initialize_simulations">initialize_simulations</a></code></li>
+<li><code><a title="src.pomdp.SimulationSet.run_actions" href="#src.pomdp.SimulationSet.run_actions">run_actions</a></code></li>
 </ul>
 </li>
 <li>

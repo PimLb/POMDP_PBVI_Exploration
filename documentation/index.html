@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    
+    <title>POMDP PBVI Exploration</title>
+    <meta name="description" content="Homepage of the POMDP PBVI Exploration repository webpage" />
+</head>
+<body>
+    <h1>POMDP PBVI Exploration</h1>
+    <p>
+        In this repository, we explore the Point-Based Value Iteration (PBVI) algorithm to solve Partially-Observable Markov Decision Processes (POMDP).
+    </p>
+    <p>
+        The PBVI algorithm comes in different flavors as described in "J Pineau, et al.; Point-based value iteration: An anytime algorithm for POMDPs; 2003". The different flavors of PBVI are:
+    </p>
+    <ul>
+        <li>Random belief selection (RA)</li>
+        <li>Stochastic Search with Random Action (SSRA)</li>
+        <li>Stochastic Search with Greedy Action (SSGA)</li>
+        <li>Stochastic Search with Exploratory Action (SSEA)</li>
+        <li>Greedy Error Reduction (GER)</li>
+    </ul>
+    <p>
+        Then more techniques were described in different papers and summarized in: "G. Shani, et al.; A survey of point-based POMDP solvers; 2012"
+    </p>
+    <ul>
+        <li>Perseus</li>
+        <li>Heuristic Search Value Iteration (HSVI)</li>
+        <li>Forward Search Value iteration (FSVI)</li>
+    </ul>
+    <p>
+        These techniques were then tested on 2 and 3-state toy problems to see how the details of the PBVI process. Then it was applied to the problem of the Olfactory Navigation which is a much more complex problem with a large amount of states (to the order of 30k). With this, optimizations have been done to the PBVI algorithm to allow for GPU operations to be performed. Alongside this, we further improved the PBVI algorithm to make use of the determinicity of the olfactory navigation problem (the transition matrix is very sparse). This was done by introducing a notion of reachability (which states are reachable from any other state) to minimize the amount of operations required within the PBVI algorithm and therefore reducing the computation complexity.
+    </p>
+
+    <h2>Documentation</h2>
+
+    <p>The documentation for the project can be found at the following <a href="src/">Documentation Page</a></p>
+</body>
+</html>

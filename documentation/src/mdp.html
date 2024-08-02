@@ -807,7 +807,7 @@ class ValueFunction:
         self._pruning_level = 1
 
 
-    def to_gpu(self) -&gt; &#39;Model&#39;:
+    def to_gpu(self) -&gt; &#39;ValueFunction&#39;:
         &#39;&#39;&#39;
         Function returning an equivalent value function object with the arrays stored on GPU instead of CPU.
 
@@ -833,7 +833,7 @@ class ValueFunction:
         return gpu_value_function
     
 
-    def to_cpu(self) -&gt; &#39;Model&#39;:
+    def to_cpu(self) -&gt; &#39;ValueFunction&#39;:
         &#39;&#39;&#39;
         Function returning an equivalent value function object with the arrays stored on CPU instead of GPU.
 
@@ -934,6 +934,28 @@ class ValueFunction:
         self._pruning_level = level
     
 
+    def __save_common(self, path) -&gt; pd.DataFrame:
+        &#39;&#39;&#39;
+        Function to create path and summarize items in pandas df.
+        &#39;&#39;&#39;
+        if not os.path.exists(path):
+            print(&#39;Folder does not exist yet, creating it...&#39;)
+            os.makedirs(path)
+        
+        vector_array = self.alpha_vector_array
+        actions = self.actions
+
+        # Convert arrays to numpy if on gpu
+        if self.is_on_gpu:
+            vector_array = cp.asnumpy(vector_array)
+            actions = cp.asnumpy(actions)
+
+        data = np.concatenate((np.array(actions)[:,None], vector_array), axis=1)
+        columns = [&#39;action&#39;, *self.model.state_labels]
+
+        return pd.DataFrame(data, columns=columns)
+
+
     def save(self, path:str=&#39;./ValueFunctions&#39;, file_name:Union[str,None]=None, compress:bool=False) -&gt; None:
         &#39;&#39;&#39;
         Function to save the value function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
@@ -948,10 +970,8 @@ class ValueFunction:
         compress : bool, default=False
             Whether to compress the resulting file to a gzip file or not.
         &#39;&#39;&#39;
-        if not os.path.exists(path):
-            print(&#39;Folder does not exist yet, creating it...&#39;)
-            os.makedirs(path)
-            
+        df = self.__save_common(path)
+
         if file_name is None:
             timestamp = datetime.now().strftime(&#39;%Y%m%d_%H%M%S&#39;)
             file_name = timestamp + &#39;_value_function.csv&#39;
@@ -966,23 +986,36 @@ class ValueFunction:
             file_name += &#39;.gzip&#39;
             compression_type = &#39;gzip&#39;
 
-        vector_array = self.alpha_vector_array
-        actions = self.actions
+        df.to_csv(path + &#39;/&#39; + file_name, index=False, compression=compression_type)
 
-        # Convert arrays to numpy if on gpu
-        if self.is_on_gpu:
-            vector_array = cp.asnumpy(vector_array)
-            actions = cp.asnumpy(actions)
 
-        data = np.concatenate((np.array(actions)[:,None], vector_array), axis=1)
-        columns = [&#39;action&#39;, *self.model.state_labels]
+    def save_parquet(self, path:str=&#39;./ValueFunctions&#39;, file_name:Union[str,None]=None) -&gt; None:
+        &#39;&#39;&#39;
+        Function to save the value function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
+        If no file_name is provided, it be saved as &#39;&lt;current_timestamp&gt;_value_function.parquet&#39;.
 
-        df = pd.DataFrame(data)
-        df.to_csv(path + &#39;/&#39; + file_name, index=False, header=columns, compression=compression_type)
+        Parameters
+        ----------
+        path : str, default=&#39;./ValueFunctions&#39;
+            The path at which the parquet will be saved.
+        file_name : str, default=&#39;&lt;current_timestamp&gt;_value_function.parquet&#39;
+            The file name used to save in.
+        &#39;&#39;&#39;
+        df = self.__save_common(path)
+
+        if file_name is None:
+            timestamp = datetime.now().strftime(&#39;%Y%m%d_%H%M%S&#39;)
+            file_name = timestamp + &#39;_value_function.parquet&#39;
+
+        # Make sure that .parquet is in the file name
+        if &#39;.parquet&#39; not in file_name:
+            file_name += &#39;.parquet&#39;
+
+        df.to_parquet(path + &#39;/&#39; + file_name, index=False)
 
 
     @classmethod
-    def load_from_file(cls, file:str, model:Model) -&gt; &#39;Model&#39;:
+    def load_from_file(cls, file:str, model:Model) -&gt; &#39;ValueFunction&#39;:
         &#39;&#39;&#39;
         Function to load the value function from a csv file.
 
@@ -1005,7 +1038,30 @@ class ValueFunction:
         df = pd.read_csv(file, header=0, index_col=False, compression=compression_type)
         alpha_vectors = df.to_numpy()
 
-        return ValueFunction(model, alpha_vectors[:,1:], alpha_vectors[:,0].astype(int))
+        return ValueFunction(model, alpha_vectors=alpha_vectors[:,1:], action_list=alpha_vectors[:,0].astype(int))
+
+
+    @classmethod
+    def load_from_parquet(cls, file:str, model:Model) -&gt; &#39;ValueFunction&#39;:
+        &#39;&#39;&#39;
+        Function to load the value function from a parquet file.
+
+        Parameters
+        ----------
+        file : str
+            The path and file_name of the value function to be loaded.
+        model : mdp.Model
+            The model the value function is linked to.
+            
+        Returns
+        -------
+        loaded_value_function : ValueFunction
+            The loaded value function.
+        &#39;&#39;&#39;
+        df = pd.read_parquet(file)
+        alpha_vectors = df.to_numpy()
+
+        return ValueFunction(model, alpha_vectors=alpha_vectors[:,1:], action_list=alpha_vectors[:,0].astype(int))
 
 
     def plot(self,
@@ -1233,7 +1289,12 @@ class ValueFunction:
 
         ax1.set_title(&#39;Value function&#39;)
         ax1_plot = ax1.imshow(value_table)
-        plt.colorbar(ax1_plot, ax=ax1)
+
+        if dimensions[0] &gt;= dimensions[1]: # If higher than wide 
+            plt.colorbar(ax1_plot, ax=ax1)
+        else:
+            plt.colorbar(ax1_plot, ax=ax1, location=&#39;bottom&#39;, orientation=&#39;horizontal&#39;)
+        
         ax1.set_xticks(x_ticks)
         ax1.set_yticks(y_ticks)
 
@@ -2094,6 +2155,7 @@ class Agent:
                           n:int=1000,
                           max_steps:int=1000,
                           start_state:int=-1,
+                          reward_discount:float=0.99,
                           print_progress:bool=True,
                           print_stats:bool=True
                           ) -&gt; Tuple[RewardSet, list[SimulationHistory]]:
@@ -2138,7 +2200,7 @@ class Agent:
 
             all_histories.append(sim_history)
             all_final_rewards.append(sum(sim_history.rewards))
-            all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(0.99)) # TODO: make it variable
+            all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(reward_discount))
             all_sim_length.append(len(sim_history))
 
         if print_stats:
@@ -2368,6 +2430,7 @@ either for a given amount of steps or until a single reward is received.</p>
                           n:int=1000,
                           max_steps:int=1000,
                           start_state:int=-1,
+                          reward_discount:float=0.99,
                           print_progress:bool=True,
                           print_stats:bool=True
                           ) -&gt; Tuple[RewardSet, list[SimulationHistory]]:
@@ -2412,7 +2475,7 @@ either for a given amount of steps or until a single reward is received.</p>
 
             all_histories.append(sim_history)
             all_final_rewards.append(sum(sim_history.rewards))
-            all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(0.99)) # TODO: make it variable
+            all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(reward_discount))
             all_sim_length.append(len(sim_history))
 
         if print_stats:
@@ -2472,7 +2535,7 @@ either for a given amount of steps or until a single reward is received.</p>
 </details>
 </dd>
 <dt id="src.mdp.Agent.run_n_simulations"><code class="name flex">
-<span>def <span class="ident">run_n_simulations</span></span>(<span>self, simulator: Optional[<a title="src.mdp.Simulation" href="#src.mdp.Simulation">Simulation</a>] = None, n: int = 1000, max_steps: int = 1000, start_state: int = -1, print_progress: bool = True, print_stats: bool = True) ‑> Tuple[<a title="src.mdp.RewardSet" href="#src.mdp.RewardSet">RewardSet</a>, list[<a title="src.mdp.SimulationHistory" href="#src.mdp.SimulationHistory">SimulationHistory</a>]]</span>
+<span>def <span class="ident">run_n_simulations</span></span>(<span>self, simulator: Optional[<a title="src.mdp.Simulation" href="#src.mdp.Simulation">Simulation</a>] = None, n: int = 1000, max_steps: int = 1000, start_state: int = -1, reward_discount: float = 0.99, print_progress: bool = True, print_stats: bool = True) ‑> Tuple[<a title="src.mdp.RewardSet" href="#src.mdp.RewardSet">RewardSet</a>, list[<a title="src.mdp.SimulationHistory" href="#src.mdp.SimulationHistory">SimulationHistory</a>]]</span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function to run a set of simulations in a row.
@@ -2510,6 +2573,7 @@ state the agent should start in, if not provided, will be set at random based on
                       n:int=1000,
                       max_steps:int=1000,
                       start_state:int=-1,
+                      reward_discount:float=0.99,
                       print_progress:bool=True,
                       print_stats:bool=True
                       ) -&gt; Tuple[RewardSet, list[SimulationHistory]]:
@@ -2554,7 +2618,7 @@ state the agent should start in, if not provided, will be set at random based on
 
         all_histories.append(sim_history)
         all_final_rewards.append(sum(sim_history.rewards))
-        all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(0.99)) # TODO: make it variable
+        all_discounted_rewards.append(sim_history.rewards.get_total_discounted_reward(reward_discount))
         all_sim_length.append(len(sim_history))
 
     if print_stats:
@@ -5486,7 +5550,7 @@ If an initial value function is not provided, the value function will be initiat
         self._pruning_level = 1
 
 
-    def to_gpu(self) -&gt; &#39;Model&#39;:
+    def to_gpu(self) -&gt; &#39;ValueFunction&#39;:
         &#39;&#39;&#39;
         Function returning an equivalent value function object with the arrays stored on GPU instead of CPU.
 
@@ -5512,7 +5576,7 @@ If an initial value function is not provided, the value function will be initiat
         return gpu_value_function
     
 
-    def to_cpu(self) -&gt; &#39;Model&#39;:
+    def to_cpu(self) -&gt; &#39;ValueFunction&#39;:
         &#39;&#39;&#39;
         Function returning an equivalent value function object with the arrays stored on CPU instead of GPU.
 
@@ -5613,6 +5677,28 @@ If an initial value function is not provided, the value function will be initiat
         self._pruning_level = level
     
 
+    def __save_common(self, path) -&gt; pd.DataFrame:
+        &#39;&#39;&#39;
+        Function to create path and summarize items in pandas df.
+        &#39;&#39;&#39;
+        if not os.path.exists(path):
+            print(&#39;Folder does not exist yet, creating it...&#39;)
+            os.makedirs(path)
+        
+        vector_array = self.alpha_vector_array
+        actions = self.actions
+
+        # Convert arrays to numpy if on gpu
+        if self.is_on_gpu:
+            vector_array = cp.asnumpy(vector_array)
+            actions = cp.asnumpy(actions)
+
+        data = np.concatenate((np.array(actions)[:,None], vector_array), axis=1)
+        columns = [&#39;action&#39;, *self.model.state_labels]
+
+        return pd.DataFrame(data, columns=columns)
+
+
     def save(self, path:str=&#39;./ValueFunctions&#39;, file_name:Union[str,None]=None, compress:bool=False) -&gt; None:
         &#39;&#39;&#39;
         Function to save the value function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
@@ -5627,10 +5713,8 @@ If an initial value function is not provided, the value function will be initiat
         compress : bool, default=False
             Whether to compress the resulting file to a gzip file or not.
         &#39;&#39;&#39;
-        if not os.path.exists(path):
-            print(&#39;Folder does not exist yet, creating it...&#39;)
-            os.makedirs(path)
-            
+        df = self.__save_common(path)
+
         if file_name is None:
             timestamp = datetime.now().strftime(&#39;%Y%m%d_%H%M%S&#39;)
             file_name = timestamp + &#39;_value_function.csv&#39;
@@ -5645,23 +5729,36 @@ If an initial value function is not provided, the value function will be initiat
             file_name += &#39;.gzip&#39;
             compression_type = &#39;gzip&#39;
 
-        vector_array = self.alpha_vector_array
-        actions = self.actions
+        df.to_csv(path + &#39;/&#39; + file_name, index=False, compression=compression_type)
 
-        # Convert arrays to numpy if on gpu
-        if self.is_on_gpu:
-            vector_array = cp.asnumpy(vector_array)
-            actions = cp.asnumpy(actions)
 
-        data = np.concatenate((np.array(actions)[:,None], vector_array), axis=1)
-        columns = [&#39;action&#39;, *self.model.state_labels]
+    def save_parquet(self, path:str=&#39;./ValueFunctions&#39;, file_name:Union[str,None]=None) -&gt; None:
+        &#39;&#39;&#39;
+        Function to save the value function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
+        If no file_name is provided, it be saved as &#39;&lt;current_timestamp&gt;_value_function.parquet&#39;.
 
-        df = pd.DataFrame(data)
-        df.to_csv(path + &#39;/&#39; + file_name, index=False, header=columns, compression=compression_type)
+        Parameters
+        ----------
+        path : str, default=&#39;./ValueFunctions&#39;
+            The path at which the parquet will be saved.
+        file_name : str, default=&#39;&lt;current_timestamp&gt;_value_function.parquet&#39;
+            The file name used to save in.
+        &#39;&#39;&#39;
+        df = self.__save_common(path)
+
+        if file_name is None:
+            timestamp = datetime.now().strftime(&#39;%Y%m%d_%H%M%S&#39;)
+            file_name = timestamp + &#39;_value_function.parquet&#39;
+
+        # Make sure that .parquet is in the file name
+        if &#39;.parquet&#39; not in file_name:
+            file_name += &#39;.parquet&#39;
+
+        df.to_parquet(path + &#39;/&#39; + file_name, index=False)
 
 
     @classmethod
-    def load_from_file(cls, file:str, model:Model) -&gt; &#39;Model&#39;:
+    def load_from_file(cls, file:str, model:Model) -&gt; &#39;ValueFunction&#39;:
         &#39;&#39;&#39;
         Function to load the value function from a csv file.
 
@@ -5684,7 +5781,30 @@ If an initial value function is not provided, the value function will be initiat
         df = pd.read_csv(file, header=0, index_col=False, compression=compression_type)
         alpha_vectors = df.to_numpy()
 
-        return ValueFunction(model, alpha_vectors[:,1:], alpha_vectors[:,0].astype(int))
+        return ValueFunction(model, alpha_vectors=alpha_vectors[:,1:], action_list=alpha_vectors[:,0].astype(int))
+
+
+    @classmethod
+    def load_from_parquet(cls, file:str, model:Model) -&gt; &#39;ValueFunction&#39;:
+        &#39;&#39;&#39;
+        Function to load the value function from a parquet file.
+
+        Parameters
+        ----------
+        file : str
+            The path and file_name of the value function to be loaded.
+        model : mdp.Model
+            The model the value function is linked to.
+            
+        Returns
+        -------
+        loaded_value_function : ValueFunction
+            The loaded value function.
+        &#39;&#39;&#39;
+        df = pd.read_parquet(file)
+        alpha_vectors = df.to_numpy()
+
+        return ValueFunction(model, alpha_vectors=alpha_vectors[:,1:], action_list=alpha_vectors[:,0].astype(int))
 
 
     def plot(self,
@@ -5912,7 +6032,12 @@ If an initial value function is not provided, the value function will be initiat
 
         ax1.set_title(&#39;Value function&#39;)
         ax1_plot = ax1.imshow(value_table)
-        plt.colorbar(ax1_plot, ax=ax1)
+
+        if dimensions[0] &gt;= dimensions[1]: # If higher than wide 
+            plt.colorbar(ax1_plot, ax=ax1)
+        else:
+            plt.colorbar(ax1_plot, ax=ax1, location=&#39;bottom&#39;, orientation=&#39;horizontal&#39;)
+        
         ax1.set_xticks(x_ticks)
         ax1.set_yticks(y_ticks)
 
@@ -5926,7 +6051,7 @@ If an initial value function is not provided, the value function will be initiat
 <h3>Static methods</h3>
 <dl>
 <dt id="src.mdp.ValueFunction.load_from_file"><code class="name flex">
-<span>def <span class="ident">load_from_file</span></span>(<span>file: str, model: <a title="src.mdp.Model" href="#src.mdp.Model">Model</a>) ‑> <a title="src.mdp.Model" href="#src.mdp.Model">Model</a></span>
+<span>def <span class="ident">load_from_file</span></span>(<span>file: str, model: <a title="src.mdp.Model" href="#src.mdp.Model">Model</a>) ‑> <a title="src.mdp.ValueFunction" href="#src.mdp.ValueFunction">ValueFunction</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function to load the value function from a csv file.</p>
@@ -5947,7 +6072,7 @@ If an initial value function is not provided, the value function will be initiat
 <span>Expand source code</span>
 </summary>
 <pre><code class="python">@classmethod
-def load_from_file(cls, file:str, model:Model) -&gt; &#39;Model&#39;:
+def load_from_file(cls, file:str, model:Model) -&gt; &#39;ValueFunction&#39;:
     &#39;&#39;&#39;
     Function to load the value function from a csv file.
 
@@ -5970,7 +6095,51 @@ def load_from_file(cls, file:str, model:Model) -&gt; &#39;Model&#39;:
     df = pd.read_csv(file, header=0, index_col=False, compression=compression_type)
     alpha_vectors = df.to_numpy()
 
-    return ValueFunction(model, alpha_vectors[:,1:], alpha_vectors[:,0].astype(int))</code></pre>
+    return ValueFunction(model, alpha_vectors=alpha_vectors[:,1:], action_list=alpha_vectors[:,0].astype(int))</code></pre>
+</details>
+</dd>
+<dt id="src.mdp.ValueFunction.load_from_parquet"><code class="name flex">
+<span>def <span class="ident">load_from_parquet</span></span>(<span>file: str, model: <a title="src.mdp.Model" href="#src.mdp.Model">Model</a>) ‑> <a title="src.mdp.ValueFunction" href="#src.mdp.ValueFunction">ValueFunction</a></span>
+</code></dt>
+<dd>
+<div class="desc"><p>Function to load the value function from a parquet file.</p>
+<h2 id="parameters">Parameters</h2>
+<dl>
+<dt><strong><code>file</code></strong> :&ensp;<code>str</code></dt>
+<dd>The path and file_name of the value function to be loaded.</dd>
+<dt><strong><code>model</code></strong> :&ensp;<code>mdp.Model</code></dt>
+<dd>The model the value function is linked to.</dd>
+</dl>
+<h2 id="returns">Returns</h2>
+<dl>
+<dt><strong><code>loaded_value_function</code></strong> :&ensp;<code><a title="src.mdp.ValueFunction" href="#src.mdp.ValueFunction">ValueFunction</a></code></dt>
+<dd>The loaded value function.</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">@classmethod
+def load_from_parquet(cls, file:str, model:Model) -&gt; &#39;ValueFunction&#39;:
+    &#39;&#39;&#39;
+    Function to load the value function from a parquet file.
+
+    Parameters
+    ----------
+    file : str
+        The path and file_name of the value function to be loaded.
+    model : mdp.Model
+        The model the value function is linked to.
+        
+    Returns
+    -------
+    loaded_value_function : ValueFunction
+        The loaded value function.
+    &#39;&#39;&#39;
+    df = pd.read_parquet(file)
+    alpha_vectors = df.to_numpy()
+
+    return ValueFunction(model, alpha_vectors=alpha_vectors[:,1:], action_list=alpha_vectors[:,0].astype(int))</code></pre>
 </details>
 </dd>
 </dl>
@@ -6300,10 +6469,8 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
     compress : bool, default=False
         Whether to compress the resulting file to a gzip file or not.
     &#39;&#39;&#39;
-    if not os.path.exists(path):
-        print(&#39;Folder does not exist yet, creating it...&#39;)
-        os.makedirs(path)
-        
+    df = self.__save_common(path)
+
     if file_name is None:
         timestamp = datetime.now().strftime(&#39;%Y%m%d_%H%M%S&#39;)
         file_name = timestamp + &#39;_value_function.csv&#39;
@@ -6318,23 +6485,53 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
         file_name += &#39;.gzip&#39;
         compression_type = &#39;gzip&#39;
 
-    vector_array = self.alpha_vector_array
-    actions = self.actions
+    df.to_csv(path + &#39;/&#39; + file_name, index=False, compression=compression_type)</code></pre>
+</details>
+</dd>
+<dt id="src.mdp.ValueFunction.save_parquet"><code class="name flex">
+<span>def <span class="ident">save_parquet</span></span>(<span>self, path: str = './ValueFunctions', file_name: Optional[str] = None) ‑> None</span>
+</code></dt>
+<dd>
+<div class="desc"><p>Function to save the value function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
+If no file_name is provided, it be saved as '<current_timestamp>_value_function.parquet'.</p>
+<h2 id="parameters">Parameters</h2>
+<dl>
+<dt><strong><code>path</code></strong> :&ensp;<code>str</code>, default=<code>'./ValueFunctions'</code></dt>
+<dd>The path at which the parquet will be saved.</dd>
+<dt><strong><code>file_name</code></strong> :&ensp;<code>str</code>, default=<code>'&lt;current_timestamp&gt;_value_function.parquet'</code></dt>
+<dd>The file name used to save in.</dd>
+</dl></div>
+<details class="source">
+<summary>
+<span>Expand source code</span>
+</summary>
+<pre><code class="python">def save_parquet(self, path:str=&#39;./ValueFunctions&#39;, file_name:Union[str,None]=None) -&gt; None:
+    &#39;&#39;&#39;
+    Function to save the value function in a file at a given path. If no path is provided, it will be saved in a subfolder (ValueFunctions) inside the current working directory.
+    If no file_name is provided, it be saved as &#39;&lt;current_timestamp&gt;_value_function.parquet&#39;.
 
-    # Convert arrays to numpy if on gpu
-    if self.is_on_gpu:
-        vector_array = cp.asnumpy(vector_array)
-        actions = cp.asnumpy(actions)
+    Parameters
+    ----------
+    path : str, default=&#39;./ValueFunctions&#39;
+        The path at which the parquet will be saved.
+    file_name : str, default=&#39;&lt;current_timestamp&gt;_value_function.parquet&#39;
+        The file name used to save in.
+    &#39;&#39;&#39;
+    df = self.__save_common(path)
 
-    data = np.concatenate((np.array(actions)[:,None], vector_array), axis=1)
-    columns = [&#39;action&#39;, *self.model.state_labels]
+    if file_name is None:
+        timestamp = datetime.now().strftime(&#39;%Y%m%d_%H%M%S&#39;)
+        file_name = timestamp + &#39;_value_function.parquet&#39;
 
-    df = pd.DataFrame(data)
-    df.to_csv(path + &#39;/&#39; + file_name, index=False, header=columns, compression=compression_type)</code></pre>
+    # Make sure that .parquet is in the file name
+    if &#39;.parquet&#39; not in file_name:
+        file_name += &#39;.parquet&#39;
+
+    df.to_parquet(path + &#39;/&#39; + file_name, index=False)</code></pre>
 </details>
 </dd>
 <dt id="src.mdp.ValueFunction.to_cpu"><code class="name flex">
-<span>def <span class="ident">to_cpu</span></span>(<span>self) ‑> <a title="src.mdp.Model" href="#src.mdp.Model">Model</a></span>
+<span>def <span class="ident">to_cpu</span></span>(<span>self) ‑> <a title="src.mdp.ValueFunction" href="#src.mdp.ValueFunction">ValueFunction</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function returning an equivalent value function object with the arrays stored on CPU instead of GPU.</p>
@@ -6347,7 +6544,7 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def to_cpu(self) -&gt; &#39;Model&#39;:
+<pre><code class="python">def to_cpu(self) -&gt; &#39;ValueFunction&#39;:
     &#39;&#39;&#39;
     Function returning an equivalent value function object with the arrays stored on CPU instead of GPU.
 
@@ -6374,7 +6571,7 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
 </details>
 </dd>
 <dt id="src.mdp.ValueFunction.to_gpu"><code class="name flex">
-<span>def <span class="ident">to_gpu</span></span>(<span>self) ‑> <a title="src.mdp.Model" href="#src.mdp.Model">Model</a></span>
+<span>def <span class="ident">to_gpu</span></span>(<span>self) ‑> <a title="src.mdp.ValueFunction" href="#src.mdp.ValueFunction">ValueFunction</a></span>
 </code></dt>
 <dd>
 <div class="desc"><p>Function returning an equivalent value function object with the arrays stored on GPU instead of CPU.</p>
@@ -6387,7 +6584,7 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
 <summary>
 <span>Expand source code</span>
 </summary>
-<pre><code class="python">def to_gpu(self) -&gt; &#39;Model&#39;:
+<pre><code class="python">def to_gpu(self) -&gt; &#39;ValueFunction&#39;:
     &#39;&#39;&#39;
     Function returning an equivalent value function object with the arrays stored on GPU instead of CPU.
 
@@ -6515,9 +6712,11 @@ If no file_name is provided, it be saved as '<current_timestamp>_value_function.
 <li><code><a title="src.mdp.ValueFunction.append" href="#src.mdp.ValueFunction.append">append</a></code></li>
 <li><code><a title="src.mdp.ValueFunction.extend" href="#src.mdp.ValueFunction.extend">extend</a></code></li>
 <li><code><a title="src.mdp.ValueFunction.load_from_file" href="#src.mdp.ValueFunction.load_from_file">load_from_file</a></code></li>
+<li><code><a title="src.mdp.ValueFunction.load_from_parquet" href="#src.mdp.ValueFunction.load_from_parquet">load_from_parquet</a></code></li>
 <li><code><a title="src.mdp.ValueFunction.plot" href="#src.mdp.ValueFunction.plot">plot</a></code></li>
 <li><code><a title="src.mdp.ValueFunction.prune" href="#src.mdp.ValueFunction.prune">prune</a></code></li>
 <li><code><a title="src.mdp.ValueFunction.save" href="#src.mdp.ValueFunction.save">save</a></code></li>
+<li><code><a title="src.mdp.ValueFunction.save_parquet" href="#src.mdp.ValueFunction.save_parquet">save_parquet</a></code></li>
 <li><code><a title="src.mdp.ValueFunction.to_cpu" href="#src.mdp.ValueFunction.to_cpu">to_cpu</a></code></li>
 <li><code><a title="src.mdp.ValueFunction.to_gpu" href="#src.mdp.ValueFunction.to_gpu">to_gpu</a></code></li>
 </ul>
